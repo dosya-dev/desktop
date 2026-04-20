@@ -90,12 +90,20 @@ export function registerIpcHandlers(apiBase: string): void {
       // Block popup windows from within the OAuth popup
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
+      // Timeout: if nothing happens within 60s, resolve with error
+      const loadTimeout = setTimeout(() => {
+        done(false, "", "OAuth timed out");
+      }, 60_000);
+
       popup.loadURL(authUrl);
 
       function done(ok: boolean, url: string, error?: string): void {
         if (resolved) return;
         resolved = true;
-        popup.close();
+        clearTimeout(loadTimeout);
+        popup.removeAllListeners();
+        popup.webContents.removeAllListeners();
+        if (!popup.isDestroyed()) popup.close();
         resolve(ok ? { ok: true, redirectedTo: url } : { ok: false, error });
       }
 
@@ -121,11 +129,25 @@ export function registerIpcHandlers(apiBase: string): void {
       }
 
       // did-navigate fires after the response (including Set-Cookie) is received
-      popup.webContents.on("did-navigate", (_e, url) => check(url));
+      popup.webContents.on("did-navigate", (_e, url) => {
+        check(url).catch((err) => {
+          console.error("[oauth] check error:", err);
+          done(false, "", "OAuth check failed");
+        });
+      });
+
+      popup.webContents.on("did-fail-load", (_e, code, desc) => {
+        done(false, "", `Failed to load: ${desc} (${code})`);
+      });
+
+      popup.webContents.on("render-process-gone", () => {
+        done(false, "", "OAuth popup crashed");
+      });
 
       popup.on("closed", () => {
         if (!resolved) {
           resolved = true;
+          clearTimeout(loadTimeout);
           resolve({ ok: false, error: "Window closed by user" });
         }
       });

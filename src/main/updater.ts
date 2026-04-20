@@ -14,7 +14,9 @@ let updateStatus: UpdateStatus = { state: "idle" };
 function broadcastStatus(status: UpdateStatus): void {
   updateStatus = status;
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send("updater:status-changed", status);
+    if (!win.isDestroyed()) {
+      win.webContents.send("updater:status-changed", status);
+    }
   }
 }
 

@@ -334,18 +334,20 @@ function SyncCard() {
   const navigate = useNavigate();
   const [pairs, setPairs] = useState<any[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [globalPaused, setGlobalPaused] = useState(false);
 
   useEffect(() => {
     window.electronAPI.getSyncStatus?.()
       .then((s: any) => {
         setPairs(s?.pairs ?? []);
+        setGlobalPaused(s?.globalPaused ?? false);
         setLoaded(true);
       })
       .catch(() => setLoaded(true));
   }, []);
   const syncing = pairs.filter((p) => p.status === "syncing").length;
   const errors = pairs.filter((p) => p.status === "error").length;
-  const paused = status?.globalPaused;
+  const paused = globalPaused;
 
   return (
     <Card

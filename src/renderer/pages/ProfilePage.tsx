@@ -263,7 +263,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
 
       {/* Member since */}
       <div className="rounded-lg bg-[var(--color-bg-secondary)] px-4 py-3 text-sm text-[var(--color-text-secondary)]">
-        Member since {user?.created_at ? formatDate(user.created_at as unknown as number) : "—"}
+        Member since {user?.created_at ? formatDate(user.created_at) : "—"}
       </div>
 
       {/* Change Email Modal */}

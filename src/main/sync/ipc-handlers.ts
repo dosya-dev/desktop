@@ -147,21 +147,15 @@ export function registerSyncIpcHandlers(engine: SyncEngine): void {
   ipcMain.handle("sync:get-conflicts", () => engine.getConflicts());
 
   // Forward engine events to renderer
-  engine.on("status-changed", (status) => {
+  function broadcast(channel: string, data: unknown): void {
     for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send("sync:status-changed", status);
+      if (!win.isDestroyed()) {
+        win.webContents.send(channel, data);
+      }
     }
-  });
+  }
 
-  engine.on("conflict-detected", (conflict) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send("sync:conflict-detected", conflict);
-    }
-  });
-
-  engine.on("error", (err) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send("sync:error", err);
-    }
-  });
+  engine.on("status-changed", (status) => broadcast("sync:status-changed", status));
+  engine.on("conflict-detected", (conflict) => broadcast("sync:conflict-detected", conflict));
+  engine.on("error", (err) => broadcast("sync:error", err));
 }

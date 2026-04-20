@@ -96,9 +96,9 @@ export function Sidebar() {
   }, [user?.id]);
 
   const [apiBase, setApiBase] = useState("");
-  useState(() => {
+  useEffect(() => {
     window.electronAPI.getApiBase().then(setApiBase);
-  });
+  }, []);
 
   const { data: dashData } = useQuery({
     queryKey: ["dashboard-storage", active?.id],

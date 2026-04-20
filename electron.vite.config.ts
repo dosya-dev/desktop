@@ -5,7 +5,7 @@ import { resolve } from "path";
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ["chokidar"] })],
+    plugins: [externalizeDepsPlugin({ exclude: ["chokidar", "graceful-fs"] })],
     build: {
       outDir: "out/main",
       rollupOptions: {
