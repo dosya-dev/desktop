@@ -133,8 +133,8 @@ function createWindow(): void {
   }
 }
 
-// Single instance lock
-const gotTheLock = app.requestSingleInstanceLock();
+// Single instance lock (skip in test mode so Playwright can launch multiple instances)
+const gotTheLock = process.env.NODE_ENV === "test" || app.requestSingleInstanceLock();
 
 if (!gotTheLock) {
   app.quit();
