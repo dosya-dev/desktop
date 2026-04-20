@@ -7,17 +7,9 @@ import {
   type ReactNode,
 } from "react";
 import { useQuery } from "@tanstack/react-query";
+import type { Workspace } from "@dosya-dev/shared";
 import { api } from "./api-client";
 import { useAuth } from "./auth-context";
-
-interface Workspace {
-  id: string;
-  name: string;
-  slug: string;
-  icon_initials: string;
-  icon_color: string;
-  owner_id: string;
-}
 
 interface WorkspaceState {
   workspaces: Workspace[];
