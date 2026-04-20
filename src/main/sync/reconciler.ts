@@ -1,0 +1,373 @@
+import { join, relative, sep } from "path";
+import { readdir, stat } from "fs/promises";
+import { shouldIgnoreEntry } from "./local-watcher";
+import type {
+  SyncPairState,
+  SyncFileRecord,
+  SyncFolderRecord,
+  SyncAction,
+  SyncConflict,
+  RemoteFileInfo,
+  RemoteFolderInfo,
+  LocalFileStat,
+  SyncPair,
+} from "./types";
+import type { RemoteSnapshot } from "./remote-poller";
+
+function genId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+const MAX_FOLDER_DEPTH = 50;
+
+/**
+ * Build a map of local files: relative path → stat.
+ * Always uses forward slashes in paths regardless of OS.
+ * Uses the shared shouldIgnoreEntry() filter so the scanner and watcher
+ * have identical ignore semantics.
+ */
+async function scanLocal(
+  rootPath: string,
+  userPatterns?: string[],
+): Promise<{ files: Map<string, LocalFileStat>; dirs: Set<string> }> {
+  const files = new Map<string, LocalFileStat>();
+  const dirs = new Set<string>();
+
+  async function walk(dir: string, depth: number): Promise<void> {
+    if (depth > MAX_FOLDER_DEPTH) return;
+
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      // Use shared ignore filter (matches watcher + initial scan)
+      if (shouldIgnoreEntry(entry.name, entry.isDirectory(), userPatterns)) continue;
+
+      const fullPath = join(dir, entry.name);
+      // Always normalize to forward slashes for cross-platform consistency
+      const relPath = relative(rootPath, fullPath).split(sep).join("/");
+
+      if (entry.isDirectory()) {
+        dirs.add(relPath);
+        await walk(fullPath, depth + 1);
+      } else if (entry.isFile()) {
+        try {
+          const s = await stat(fullPath);
+          files.set(relPath, {
+            sizeBytes: s.size,
+            mtimeMs: s.mtimeMs,
+            isDirectory: false,
+          });
+        } catch {
+          // skip unreadable files
+        }
+      }
+    }
+  }
+
+  await walk(rootPath, 0);
+  return { files, dirs };
+}
+
+/**
+ * Build path maps from remote snapshot using the folder tree.
+ * Includes cycle detection via visited set.
+ */
+function buildRemotePaths(
+  remoteFiles: Map<string, RemoteFileInfo>,
+  remoteFolders: Map<string, RemoteFolderInfo>,
+  rootFolderId: string | null,
+): {
+  filePathMap: Map<string, string>;
+  folderPathMap: Map<string, string>;
+} {
+  const folderPathMap = new Map<string, string>();
+  const building = new Set<string>(); // cycle detection
+
+  function folderPath(folderId: string): string {
+    if (folderPathMap.has(folderId)) return folderPathMap.get(folderId)!;
+    if (building.has(folderId)) return ""; // cycle detected
+    building.add(folderId);
+
+    const folder = remoteFolders.get(folderId);
+    if (!folder) return "";
+    const parentId = folder.parent_id;
+    if (!parentId || parentId === rootFolderId) {
+      folderPathMap.set(folderId, folder.name);
+      return folder.name;
+    }
+    const parentPath = folderPath(parentId);
+    const p = parentPath ? `${parentPath}/${folder.name}` : folder.name;
+    folderPathMap.set(folderId, p);
+    return p;
+  }
+
+  for (const [id] of remoteFolders) {
+    folderPath(id);
+  }
+
+  const filePathMap = new Map<string, string>();
+  for (const [id, file] of remoteFiles) {
+    const folderId = file.folder_id;
+    if (!folderId || folderId === rootFolderId) {
+      filePathMap.set(id, file.name);
+    } else {
+      const fp = folderPathMap.get(folderId);
+      filePathMap.set(id, fp ? `${fp}/${file.name}` : file.name);
+    }
+  }
+
+  return { filePathMap, folderPathMap };
+}
+
+/**
+ * Three-way diff: compare stored state, remote snapshot, and local filesystem.
+ */
+export async function reconcile(
+  pair: SyncPair,
+  storedState: SyncPairState,
+  remote: RemoteSnapshot,
+): Promise<SyncAction[]> {
+  const actions: SyncAction[] = [];
+  const { files: localFiles, dirs: localDirs } = await scanLocal(pair.localPath, pair.excludedPatterns);
+  const { filePathMap, folderPathMap } = buildRemotePaths(
+    remote.files,
+    remote.folders,
+    pair.remoteFolderId,
+  );
+
+  // Build reverse maps: relative path → remoteId
+  const pathToRemoteFile = new Map<string, string>();
+  for (const [id, path] of filePathMap) {
+    pathToRemoteFile.set(path, id);
+  }
+  const pathToRemoteFolder = new Map<string, string>();
+  for (const [id, path] of folderPathMap) {
+    pathToRemoteFolder.set(path, id);
+  }
+
+  // ── Folder reconciliation ──────────────────────────────────────
+
+  // New remote folders → create locally
+  for (const [folderId] of remote.folders) {
+    const relPath = folderPathMap.get(folderId);
+    if (!relPath) continue;
+    if (!localDirs.has(relPath) && !storedState.folders[folderId]) {
+      actions.push({
+        type: "create-local-folder",
+        remoteFolderId: folderId,
+        localDir: pair.localPath,
+        name: relPath,
+      });
+    }
+  }
+
+  // New local folders → create remotely
+  for (const relPath of localDirs) {
+    if (!pathToRemoteFolder.has(relPath)) {
+      const known = Object.values(storedState.folders).find((f) => f.localPath === relPath);
+      if (!known) {
+        const parts = relPath.split("/");
+        const parentRelPath = parts.slice(0, -1).join("/");
+        const parentRemoteId = parentRelPath ? (pathToRemoteFolder.get(parentRelPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
+        actions.push({
+          type: "create-remote-folder",
+          localPath: join(pair.localPath, relPath),
+          parentRemoteId: parentRemoteId,
+          name: parts[parts.length - 1],
+        });
+      }
+    }
+  }
+
+  // ── File reconciliation (three-way) ────────────────────────────
+
+  const allFileIds = new Set([
+    ...remote.files.keys(),
+    ...Object.keys(storedState.files),
+  ]);
+
+  // Also check local-only files
+  for (const [relPath] of localFiles) {
+    if (!pathToRemoteFile.has(relPath)) {
+      const storedByPath = Object.values(storedState.files).find((f) => f.localPath === relPath);
+      if (storedByPath) {
+        allFileIds.add(storedByPath.remoteId);
+      }
+    }
+  }
+
+  // Track which stored IDs we've processed, so we can clean up stale ones
+  const processedIds = new Set<string>();
+
+  for (const remoteId of allFileIds) {
+    processedIds.add(remoteId);
+    const remoteFile = remote.files.get(remoteId);
+    const stored = storedState.files[remoteId];
+    const relPath = remoteFile ? filePathMap.get(remoteId) : stored?.localPath;
+    const localStat = relPath ? localFiles.get(relPath) : undefined;
+
+    // Case 1: In remote, NOT stored, NOT local → download-new
+    if (remoteFile && !stored && !localStat) {
+      const dir = remoteFile.folder_id
+        ? folderPathMap.get(remoteFile.folder_id) ?? ""
+        : "";
+      actions.push({
+        type: "download-new",
+        remoteFile,
+        localDir: dir ? join(pair.localPath, dir) : pair.localPath,
+      });
+      continue;
+    }
+
+    // Case 2: NOT remote, NOT stored, In local → upload-new
+    if (!remoteFile && !stored && localStat && relPath) {
+      const parts = relPath.split("/");
+      const dirPath = parts.slice(0, -1).join("/");
+      const remoteFolderId = dirPath ? (pathToRemoteFolder.get(dirPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
+      actions.push({
+        type: "upload-new",
+        localPath: join(pair.localPath, relPath),
+        remoteFolderId,
+        stat: localStat,
+        fileName: parts[parts.length - 1],
+      });
+      continue;
+    }
+
+    // Case 3: In remote, In stored, NOT local → locally deleted
+    if (remoteFile && stored && !localStat) {
+      const remoteChanged =
+        remoteFile.updated_at !== stored.remoteUpdatedAt ||
+        remoteFile.size_bytes !== stored.remoteSizeBytes ||
+        remoteFile.current_version !== stored.remoteVersion;
+      if (remoteChanged) {
+        const dir = remoteFile.folder_id
+          ? folderPathMap.get(remoteFile.folder_id) ?? ""
+          : "";
+        actions.push({
+          type: "download-new",
+          remoteFile,
+          localDir: dir ? join(pair.localPath, dir) : pair.localPath,
+        });
+      } else {
+        actions.push({ type: "delete-remote", remoteId, record: stored });
+      }
+      continue;
+    }
+
+    // Case 4: NOT remote, In stored, In local → remotely deleted
+    if (!remoteFile && stored && localStat && relPath) {
+      const localChanged =
+        localStat.mtimeMs !== stored.localMtimeMs ||
+        localStat.sizeBytes !== stored.localSizeBytes;
+      if (localChanged) {
+        const parts = relPath.split("/");
+        const dirPath = parts.slice(0, -1).join("/");
+        const remoteFolderId = dirPath ? (pathToRemoteFolder.get(dirPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
+        actions.push({
+          type: "upload-new",
+          localPath: join(pair.localPath, relPath),
+          remoteFolderId,
+          stat: localStat,
+          fileName: parts[parts.length - 1],
+        });
+      } else {
+        actions.push({
+          type: "delete-local",
+          localPath: join(pair.localPath, relPath),
+          record: stored,
+        });
+      }
+      continue;
+    }
+
+    // Case 5: In remote, In stored, In local → check for changes
+    if (remoteFile && stored && localStat && relPath) {
+      const remoteChanged =
+        remoteFile.updated_at !== stored.remoteUpdatedAt ||
+        remoteFile.size_bytes !== stored.remoteSizeBytes ||
+        remoteFile.current_version !== stored.remoteVersion;
+      const localChanged =
+        localStat.mtimeMs !== stored.localMtimeMs ||
+        localStat.sizeBytes !== stored.localSizeBytes;
+
+      if (!remoteChanged && !localChanged) continue;
+
+      if (remoteChanged && !localChanged) {
+        actions.push({
+          type: "download-update",
+          remoteFile,
+          localPath: join(pair.localPath, relPath),
+          existingRecord: stored,
+        });
+      } else if (!remoteChanged && localChanged) {
+        actions.push({
+          type: "upload-update",
+          localPath: join(pair.localPath, relPath),
+          existingRecord: stored,
+          stat: localStat,
+        });
+      } else {
+        // Both changed → conflict
+        if (pair.conflictStrategy === "last-write-wins") {
+          const remoteTime = remoteFile.updated_at;
+          const localTime = localStat.mtimeMs / 1000;
+          if (remoteTime > localTime) {
+            actions.push({
+              type: "download-update",
+              remoteFile,
+              localPath: join(pair.localPath, relPath),
+              existingRecord: stored,
+            });
+          } else {
+            actions.push({
+              type: "upload-update",
+              localPath: join(pair.localPath, relPath),
+              existingRecord: stored,
+              stat: localStat,
+            });
+          }
+        } else {
+          actions.push({
+            type: "conflict",
+            conflict: {
+              id: genId(),
+              pairId: pair.id,
+              localPath: join(pair.localPath, relPath),
+              remoteName: remoteFile.name,
+              remoteId: remoteFile.id,
+              localMtimeMs: localStat.mtimeMs,
+              remoteUpdatedAt: remoteFile.updated_at,
+              localSizeBytes: localStat.sizeBytes,
+              remoteSizeBytes: remoteFile.size_bytes,
+              detectedAt: Date.now(),
+            },
+          });
+        }
+      }
+      continue;
+    }
+
+    // Case 6: NOT remote, In stored, NOT local → both deleted, clean up state
+    // (no action needed — will be cleaned below)
+  }
+
+  // Clean up stale records: files that exist in stored state but are gone from both
+  // remote and local (Case 6)
+  for (const id of Object.keys(storedState.files)) {
+    if (!processedIds.has(id)) continue;
+    const stored = storedState.files[id];
+    const remoteFile = remote.files.get(id);
+    const localStat = stored.localPath ? localFiles.get(stored.localPath) : undefined;
+    if (!remoteFile && !localStat) {
+      delete storedState.files[id];
+    }
+  }
+
+  return actions;
+}

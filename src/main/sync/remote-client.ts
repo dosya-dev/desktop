@@ -1,0 +1,670 @@
+import { app, session } from "electron";
+import { createReadStream, createWriteStream } from "fs";
+import { stat, rename as fsRename, unlink as fsUnlink } from "fs/promises";
+import { basename, extname, resolve as pathResolve } from "path";
+import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
+import http from "http";
+import https from "https";
+import { URL } from "url";
+
+const isDev = !app.isPackaged;
+function debugLog(...args: unknown[]): void {
+  if (isDev) console.log(...args);
+}
+
+const RETRY_DELAYS = [1000, 3000, 8000]; // exponential-ish backoff
+const NON_RETRYABLE = new Set(["SESSION_EXPIRED", "RATE_LIMITED"]);
+const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+
+const MIME_MAP: Record<string, string> = {
+  pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+  gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+  mp4: "video/mp4", mov: "video/quicktime", avi: "video/x-msvideo", webm: "video/webm",
+  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg",
+  zip: "application/zip", gz: "application/gzip", tar: "application/x-tar", "7z": "application/x-7z-compressed", rar: "application/vnd.rar",
+  doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  txt: "text/plain", csv: "text/csv", json: "application/json", js: "text/javascript", ts: "text/typescript",
+  html: "text/html", css: "text/css", xml: "application/xml", md: "text/markdown",
+  py: "text/x-python", rb: "text/x-ruby", go: "text/x-go", rs: "text/x-rust",
+  java: "text/x-java-source", c: "text/x-c", cpp: "text/x-c++", h: "text/x-c",
+  sh: "application/x-sh", yaml: "application/x-yaml", yml: "application/x-yaml",
+  ico: "image/x-icon", ttf: "font/ttf", woff: "font/woff", woff2: "font/woff2",
+};
+
+/** Custom error class that carries rate-limit metadata. */
+export class RateLimitError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super("RATE_LIMITED");
+    this.name = "RateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** Rate limit budget tracked from server response headers. */
+export interface RateBudget {
+  remaining: number;
+  resetAt: number; // epoch seconds
+  limit: number;
+}
+
+/**
+ * HTTP client for dosya.dev API, using Electron session cookies.
+ * Includes retry with jittered backoff for transient failures.
+ * Uses streaming for file uploads/downloads to prevent OOM on large files.
+ * Tracks rate limit budget from response headers.
+ */
+export class RemoteClient {
+  /** Current rate limit budget, updated from every API response. */
+  rateBudget: RateBudget = { remaining: Infinity, resetAt: 0, limit: 300 };
+
+  constructor(private apiBase: string) {}
+
+  /**
+   * Update rate budget from response headers.
+   * Called after every successful or failed response.
+   */
+  private updateBudget(headers: Record<string, string | string[] | undefined>): void {
+    const remaining = headers["x-ratelimit-remaining"];
+    const reset = headers["x-ratelimit-reset"];
+    const limit = headers["x-ratelimit-limit"];
+    if (remaining != null) this.rateBudget.remaining = parseInt(String(remaining), 10);
+    if (reset != null) this.rateBudget.resetAt = parseInt(String(reset), 10);
+    if (limit != null) this.rateBudget.limit = parseInt(String(limit), 10);
+  }
+
+  /**
+   * If budget is nearly exhausted, wait until the reset window.
+   * This proactively prevents 429 responses.
+   */
+  private async waitForBudget(): Promise<void> {
+    if (this.rateBudget.remaining <= 5 && this.rateBudget.remaining < Infinity) {
+      const waitMs = Math.max(0, this.rateBudget.resetAt * 1000 - Date.now());
+      if (waitMs > 0 && waitMs < 120_000) {
+        debugLog(`[sync] Rate budget low (${this.rateBudget.remaining}), waiting ${Math.round(waitMs / 1000)}s`);
+        await sleep(waitMs + 500); // +500ms buffer
+      }
+    }
+  }
+
+  /**
+   * Parse the Retry-After header value into milliseconds.
+   */
+  private parseRetryAfter(headers: Record<string, string | string[] | undefined>): number {
+    const value = headers["retry-after"];
+    if (value == null) return 60_000;
+    const seconds = parseInt(String(value), 10);
+    if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
+    return 60_000;
+  }
+
+  /**
+   * Create a RateLimitError from response headers.
+   */
+  private createRateLimitError(headers: Record<string, string | string[] | undefined>): RateLimitError {
+    const retryAfterMs = this.parseRetryAfter(headers);
+    this.rateBudget.remaining = 0;
+    debugLog(`[sync] Rate limited. Retry-After: ${retryAfterMs}ms`);
+    return new RateLimitError(retryAfterMs);
+  }
+
+  /**
+   * Check if a dosya_session cookie exists (without making an API call).
+   * Used by the sync engine to decide whether to start.
+   */
+  async hasSession(): Promise<boolean> {
+    const cookie = await this.getSessionCookie();
+    return cookie !== null;
+  }
+
+  private async getSessionCookie(): Promise<string | null> {
+    const apiHost = new URL(this.apiBase).hostname;
+
+    const allSession = await session.defaultSession.cookies.get({ name: "dosya_session" });
+    debugLog("[sync] dosya_session cookies:", allSession.map(c => `${c.domain} (len=${c.value.length})`).join(", ") || "NONE");
+
+    // Exact domain match
+    const exact = allSession.find(c => c.domain === apiHost);
+    if (exact) {
+      debugLog("[sync] Using cookie from domain:", exact.domain);
+      return exact.value;
+    }
+
+    // Dot-prefixed domain match (e.g. ".dosya.dev" for https://dosya.dev)
+    const dotMatch = allSession.find(c => {
+      if (!c.domain) return false;
+      const bare = c.domain.replace(/^\./, "");
+      return apiHost === bare || apiHost.endsWith(`.${bare}`);
+    });
+    if (dotMatch) {
+      debugLog("[sync] Using cookie from domain:", dotMatch.domain);
+      return dotMatch.value;
+    }
+
+    debugLog("[sync] No matching dosya_session cookie for host:", apiHost);
+    return null;
+  }
+
+  // ── Core fetch for JSON API calls ─────────────────────────────────
+
+  private async fetchOnce(
+    path: string,
+    opts: { method?: string; body?: Buffer | string; headers?: Record<string, string>; timeout?: number } = {},
+  ): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; json: () => Promise<any>; buffer: () => Promise<Buffer> }> {
+    const sessionCookie = await this.getSessionCookie();
+    if (!sessionCookie) throw new Error("SESSION_EXPIRED");
+
+    const fullUrl = `${this.apiBase}${path}`;
+    const parsed = new URL(fullUrl);
+    const isHttps = parsed.protocol === "https:";
+    const lib = isHttps ? https : http;
+
+    let bodyBuf: Buffer | undefined;
+    if (opts.body != null) {
+      bodyBuf = Buffer.isBuffer(opts.body) ? opts.body : Buffer.from(opts.body, "utf-8");
+    }
+
+    const headers: Record<string, string> = {
+      Cookie: `dosya_session=${sessionCookie}`,
+      ...opts.headers,
+    };
+    if (bodyBuf) {
+      headers["Content-Length"] = String(bodyBuf.length);
+    }
+
+    debugLog("[sync] HTTP request:", opts.method ?? "GET", fullUrl, "body-len:", bodyBuf?.length ?? 0);
+
+    return new Promise((resolve, reject) => {
+      const timeout = opts.timeout ?? 30_000;
+      const req = lib.request(
+        fullUrl,
+        { method: opts.method ?? "GET", headers, timeout },
+        (res) => {
+          debugLog("[sync] HTTP response:", res.statusCode, fullUrl);
+
+          // Follow redirects (301, 302, 303, 307, 308)
+          const redirectCodes = [301, 302, 303, 307, 308];
+          if (redirectCodes.includes(res.statusCode ?? 0) && res.headers.location) {
+            res.resume(); // drain original response
+            const redirectUrl = res.headers.location;
+            const rParsed = new URL(redirectUrl);
+            const rLib = rParsed.protocol === "https:" ? https : http;
+            // Preserve method for 307/308; use GET for 301/302/303
+            const redirectMethod = [307, 308].includes(res.statusCode!) ? (opts.method ?? "GET") : "GET";
+            // FIX: Include cookie for same-host redirects (previously dropped)
+            const isSameHost = rParsed.hostname === parsed.hostname;
+            const rHeaders: Record<string, string> = {};
+            if (isSameHost) rHeaders.Cookie = `dosya_session=${sessionCookie}`;
+
+            const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout }, (rRes) => {
+              const chunks: Buffer[] = [];
+              rRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+              rRes.on("end", () => {
+                const body = Buffer.concat(chunks);
+                const resHeaders = rRes.headers as Record<string, string | string[] | undefined>;
+                resolve({
+                  status: rRes.statusCode ?? 200,
+                  headers: resHeaders,
+                  json: () => {
+                    try { return Promise.resolve(JSON.parse(body.toString("utf-8"))); }
+                    catch { return Promise.resolve({ error: "Invalid JSON response" }); }
+                  },
+                  buffer: () => Promise.resolve(body),
+                });
+              });
+              rRes.on("error", reject);
+            });
+            rReq.on("error", reject);
+            rReq.on("timeout", () => { rReq.destroy(); reject(new Error("Redirect timed out")); });
+            // Send body for 307/308 redirects (preserves method + body)
+            if ([307, 308].includes(res.statusCode!) && bodyBuf) {
+              rReq.write(bodyBuf);
+            }
+            rReq.end();
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            const body = Buffer.concat(chunks);
+            const resHeaders = res.headers as Record<string, string | string[] | undefined>;
+            resolve({
+              status: res.statusCode ?? 500,
+              headers: resHeaders,
+              json: () => {
+                try { return Promise.resolve(JSON.parse(body.toString("utf-8"))); }
+                catch { return Promise.resolve({ error: "Invalid JSON response" }); }
+              },
+              buffer: () => Promise.resolve(body),
+            });
+          });
+          res.on("error", reject);
+        },
+      );
+
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("Request timed out"));
+      });
+      req.on("error", reject);
+
+      if (bodyBuf) {
+        req.write(bodyBuf);
+      }
+      req.end();
+    });
+  }
+
+  // ── Fetch with retry + jitter ─────────────────────────────────────
+
+  private async fetch(
+    path: string,
+    opts: { method?: string; body?: Buffer | string; headers?: Record<string, string> } = {},
+  ): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; json: () => Promise<any>; buffer: () => Promise<Buffer> }> {
+    // Proactively wait if budget is nearly exhausted
+    await this.waitForBudget();
+
+    let lastErr: Error | null = null;
+
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+      try {
+        const res = await this.fetchOnce(path, opts);
+
+        // Update rate budget from every response
+        this.updateBudget(res.headers);
+
+        // Handle 429 — throw RateLimitError with Retry-After info
+        if (res.status === 429) {
+          throw this.createRateLimitError(res.headers);
+        }
+
+        // Don't retry on client errors (4xx) — they won't change
+        if (res.status >= 400 && res.status < 500) return res;
+
+        // Retry on server errors (5xx)
+        if (res.status >= 500 && attempt < RETRY_DELAYS.length) {
+          const delay = RETRY_DELAYS[attempt] * (0.5 + Math.random());
+          debugLog("[sync] Server error", res.status, "retrying in", Math.round(delay), "ms");
+          await sleep(delay);
+          continue;
+        }
+
+        return res;
+      } catch (err: any) {
+        lastErr = err;
+        // Don't retry auth/rate-limit errors
+        if (err instanceof RateLimitError) throw err;
+        if (NON_RETRYABLE.has(err.message)) throw err;
+
+        if (attempt < RETRY_DELAYS.length) {
+          const delay = RETRY_DELAYS[attempt] * (0.5 + Math.random());
+          debugLog("[sync] Request failed, retrying in", Math.round(delay), "ms:", err.message);
+          await sleep(delay);
+        }
+      }
+    }
+
+    throw lastErr ?? new Error("Request failed after retries");
+  }
+
+  // ── Streaming download ────────────────────────────────────────────
+  //
+  // Downloads to a temp file, verifies size, then atomically renames.
+  // Streams to disk to prevent OOM on large files.
+
+  async downloadFile(
+    fileId: string,
+    localPath: string,
+    expectedSize: number = -1,
+    onProgress?: (bytesTransferred: number) => void,
+  ): Promise<number> {
+    // Windows MAX_PATH workaround
+    if (process.platform === "win32" && localPath.length > 259 && !localPath.startsWith("\\\\?\\")) {
+      localPath = `\\\\?\\${pathResolve(localPath)}`;
+    }
+
+    const tmpPath = `${localPath}.dosya-sync-tmp`;
+    let lastErr: Error | null = null;
+
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+      try {
+        const sessionCookie = await this.getSessionCookie();
+        if (!sessionCookie) throw new Error("SESSION_EXPIRED");
+
+        const bytesWritten = await this.streamDownload(
+          `/api/files/${fileId}/download`,
+          tmpPath,
+          sessionCookie,
+          onProgress,
+        );
+
+        // Verify size when expected is known.
+        // FIX: Allow zero-byte files (expectedSize === 0 && bytesWritten === 0 is valid).
+        if (expectedSize >= 0 && bytesWritten !== expectedSize) {
+          await fsUnlink(tmpPath).catch(() => {});
+          throw new Error(`Download size mismatch: expected ${expectedSize}, got ${bytesWritten}`);
+        }
+
+        // Atomic rename to final path
+        await fsRename(tmpPath, localPath);
+        return bytesWritten;
+      } catch (err: any) {
+        lastErr = err;
+        await fsUnlink(tmpPath).catch(() => {});
+        if (err instanceof RateLimitError) throw err;
+        if (NON_RETRYABLE.has(err.message)) throw err;
+        if (attempt < RETRY_DELAYS.length) {
+          const delay = RETRY_DELAYS[attempt] * (0.5 + Math.random());
+          debugLog("[sync] Download retry in", Math.round(delay), "ms:", err.message);
+          await sleep(delay);
+        }
+      }
+    }
+
+    throw lastErr ?? new Error("Download failed after retries");
+  }
+
+  private streamDownload(
+    path: string,
+    destPath: string,
+    cookie: string,
+    onProgress?: (bytes: number) => void,
+  ): Promise<number> {
+    const apiHostname = new URL(this.apiBase).hostname;
+
+    return new Promise((resolve, reject) => {
+      const makeRequest = (url: string, redirectCount: number): void => {
+        if (redirectCount > 5) {
+          reject(new Error("Too many redirects"));
+          return;
+        }
+
+        const urlParsed = new URL(url);
+        const reqLib = urlParsed.protocol === "https:" ? https : http;
+        // Include cookie for same-host redirects only
+        const isSameHost = urlParsed.hostname === apiHostname;
+        const headers: Record<string, string> = {};
+        if (isSameHost) headers.Cookie = `dosya_session=${cookie}`;
+
+        const req = reqLib.get(url, { headers, timeout: 300_000 }, (res) => {
+          if (res.statusCode === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
+          if (res.statusCode === 429) {
+            // Read Retry-After header before draining
+            const retryAfterMs = this.parseRetryAfter(
+              res.headers as Record<string, string | string[] | undefined>,
+            );
+            this.rateBudget.remaining = 0;
+            res.resume();
+            reject(new RateLimitError(retryAfterMs));
+            return;
+          }
+
+          // Update rate budget from download response headers
+          this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
+
+          if ([301, 302, 303, 307, 308].includes(res.statusCode ?? 0) && res.headers.location) {
+            res.resume();
+            makeRequest(res.headers.location, redirectCount + 1);
+            return;
+          }
+
+          if ((res.statusCode ?? 500) >= 400) {
+            res.resume();
+            reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+            return;
+          }
+
+          const ws = createWriteStream(destPath);
+          let bytes = 0;
+
+          res.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            onProgress?.(bytes);
+          });
+
+          res.pipe(ws);
+          ws.on("finish", () => resolve(bytes));
+          ws.on("error", (err) => { res.destroy(); reject(err); });
+          res.on("error", (err) => { ws.destroy(); reject(err); });
+        });
+
+        req.on("timeout", () => { req.destroy(); reject(new Error("Download timed out")); });
+        req.on("error", reject);
+      };
+
+      makeRequest(`${this.apiBase}${path}`, 0);
+    });
+  }
+
+  // ── Streaming upload ──────────────────────────────────────────────
+  //
+  // Init step uses JSON fetch. PUT step streams from disk to prevent OOM.
+
+  async uploadFile(
+    localPath: string,
+    workspaceId: string,
+    folderId: string | null,
+    region: string,
+    fileId?: string | null,
+    onProgress?: (bytesTransferred: number) => void,
+  ): Promise<{ fileId: string; name: string }> {
+    const fileName = basename(localPath);
+    const fileStat = await stat(localPath);
+    const ext = extname(fileName).slice(1).toLowerCase();
+    const mimeType = MIME_MAP[ext] || "application/octet-stream";
+
+    if (fileStat.size > MAX_FILE_SIZE) {
+      throw new Error(
+        `File too large (${Math.round(fileStat.size / 1024 / 1024)} MB). Maximum supported size is ${MAX_FILE_SIZE / 1024 / 1024 / 1024} GB.`,
+      );
+    }
+
+    const initBody: Record<string, unknown> = {
+      workspace_id: workspaceId,
+      file_name: fileName,
+      file_size: fileStat.size,
+      mime_type: mimeType,
+      folder_id: folderId,
+      region,
+    };
+
+    if (fileId) {
+      initBody.file_id = fileId;
+    }
+
+    const initRes = await this.fetch("/api/upload/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(initBody),
+    });
+
+    if (initRes.status === 401) throw new Error("SESSION_EXPIRED");
+    // 429 is now handled inside fetch() via RateLimitError — no need to check here
+
+    const initData = await initRes.json();
+    if (!initData.ok) throw new Error(initData.error || "Upload init failed");
+
+    // Stream the file body via PUT
+    const sessionCookie = await this.getSessionCookie();
+    if (!sessionCookie) throw new Error("SESSION_EXPIRED");
+
+    const putData = await this.streamUpload(
+      `/api/upload/${initData.session_id}`,
+      localPath,
+      fileStat.size,
+      sessionCookie,
+      onProgress,
+    );
+
+    if (!putData.ok) throw new Error(putData.error || "Upload failed");
+
+    return { fileId: putData.file?.id ?? initData.session_id, name: fileName };
+  }
+
+  private streamUpload(
+    path: string,
+    filePath: string,
+    fileSize: number,
+    cookie: string,
+    onProgress?: (bytes: number) => void,
+  ): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const fullUrl = `${this.apiBase}${path}`;
+      const urlParsed = new URL(fullUrl);
+      const lib = urlParsed.protocol === "https:" ? https : http;
+
+      const req = lib.request(fullUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(fileSize),
+          Cookie: `dosya_session=${cookie}`,
+        },
+        timeout: 300_000, // 5 minutes for large uploads
+      }, (res) => {
+        // Update budget from upload response
+        this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
+
+        if (res.statusCode === 429) {
+          const retryAfterMs = this.parseRetryAfter(
+            res.headers as Record<string, string | string[] | undefined>,
+          );
+          res.resume();
+          reject(new RateLimitError(retryAfterMs));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8");
+          try { resolve(JSON.parse(body)); }
+          catch { resolve({ error: "Invalid JSON response" }); }
+        });
+        res.on("error", reject);
+      });
+
+      req.on("timeout", () => { req.destroy(); reject(new Error("Upload timed out")); });
+      req.on("error", reject);
+
+      const stream = createReadStream(filePath);
+      let transferred = 0;
+
+      stream.on("data", (chunk: string | Buffer) => {
+        transferred += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+        onProgress?.(transferred);
+      });
+
+      stream.on("error", (err) => {
+        req.destroy();
+        reject(err);
+      });
+
+      stream.pipe(req);
+    });
+  }
+
+  // ── Public API ────────────────────────────────────────────────────
+
+  async listFiles(
+    workspaceId: string,
+    folderId: string | null,
+    page = 1,
+    perPage = 500,
+  ): Promise<{ files: RemoteFileInfo[]; folders: RemoteFolderInfo[]; totalPages: number }> {
+    const params = new URLSearchParams({
+      workspace_id: workspaceId,
+      page: String(page),
+      per_page: String(perPage),
+    });
+    if (folderId) params.set("folder_id", folderId);
+
+    const res = await this.fetch(`/api/files?${params}`);
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    // 429 is now handled inside fetch() — no need to check here
+
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Failed to list files");
+
+    return {
+      files: data.files ?? [],
+      folders: data.folders ?? [],
+      totalPages: data.pagination?.total_pages ?? 1,
+    };
+  }
+
+  async getWorkspaceRegion(workspaceId: string): Promise<string> {
+    const res = await this.fetch(`/api/workspaces/${workspaceId}`);
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    return data.workspace?.default_region || "auto";
+  }
+
+  async getFolderTree(workspaceId: string): Promise<RemoteFolderInfo[]> {
+    const res = await this.fetch(`/api/folders/tree?workspace_id=${workspaceId}`);
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Failed to get folder tree");
+    return data.folders ?? [];
+  }
+
+  async deleteFile(fileId: string): Promise<void> {
+    const res = await this.fetch(`/api/files/${fileId}`, { method: "DELETE" });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    if (res.status !== 200 && res.status !== 404) {
+      const data = await res.json();
+      throw new Error(data.error || "Delete failed");
+    }
+  }
+
+  async getFolderSyncFlag(folderId: string): Promise<boolean> {
+    const res = await this.fetch(`/api/folders/${folderId}`);
+    if (res.status === 404) return false;
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    return data.folder?.is_synced === 1 || data.folder?.is_synced === true;
+  }
+
+  async setFolderSyncFlag(folderId: string, enabled: boolean): Promise<void> {
+    const res = await this.fetch(`/api/folders/${folderId}/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+  }
+
+  async setFileSyncFlag(fileId: string, enabled: boolean): Promise<void> {
+    const res = await this.fetch(`/api/files/${fileId}/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+  }
+
+  async createFolder(
+    workspaceId: string,
+    name: string,
+    parentId: string | null,
+  ): Promise<string> {
+    const res = await this.fetch("/api/folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspaceId, name, parent_id: parentId }),
+    });
+
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Create folder failed");
+    return data.folder?.id ?? data.id;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}

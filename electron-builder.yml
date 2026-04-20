@@ -1,0 +1,63 @@
+appId: dev.dosya.desktop
+productName: dosya
+artifactName: "${productName}-${version}-${arch}.${ext}"
+copyright: Copyright 2025 dosya.dev
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - "out/**/*"
+  - "build/*.png"
+  - "!node_modules"
+
+# Disable auto-update publish — we upload to R2 via our own API
+publish: []
+
+# ── macOS ───────────────────────────────────────────────────────────
+mac:
+  target:
+    - target: dmg
+      arch:
+        - universal
+  icon: build/icon.png
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+# ── Windows ─────────────────────────────────────────────────────────
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+  icon: build/icon.png
+  signingHashAlgorithms:
+    - sha256
+
+# ── Linux ───────────────────────────────────────────────────────────
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  icon: build/icon.png
+  category: Utility
+
+# ── Installer options ──────────────────────────────────────────────
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+# ── Protocol registration ──────────────────────────────────────────
+protocols:
+  - name: dosya
+    schemes:
+      - dosya
