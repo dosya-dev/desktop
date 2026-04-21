@@ -1,7 +1,7 @@
-// Patch fs to handle EMFILE (too many open files) gracefully.
-// Must run before anything touches fs. Uses require() to avoid missing type declarations.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-(require("graceful-fs") as { gracefulify: (fs: any) => void }).gracefulify(require("fs"));
+// Patch fs to handle EMFILE (too many open files) gracefully — must run before anything touches fs.
+import { gracefulify } from "graceful-fs";
+import fs from "fs";
+gracefulify(fs);
 
 import { app, BrowserWindow, shell, powerMonitor, session } from "electron";
 import { join } from "path";
