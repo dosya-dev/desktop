@@ -68,15 +68,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           };
         }
 
+        // Wait for Electron to fix the session cookie (SameSite=Lax → None)
+        // BEFORE setting user state. Setting user triggers workspace queries
+        // via `enabled: isAuthenticated`, and those need the fixed cookie.
+        await window.electronAPI.waitForSession();
+
         if (data.user) {
           setUser(data.user);
         } else {
           await refreshUser();
         }
-
-        // Wait for Electron to fix the session cookie (SameSite=Lax → None)
-        // before navigating, so subsequent API calls include the cookie.
-        await window.electronAPI.waitForSession();
 
         return { ok: true };
       } catch (err) {
