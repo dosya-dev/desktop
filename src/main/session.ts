@@ -21,8 +21,14 @@ export function setupSession(apiBase: string): void {
     callback({ requestHeaders: details.requestHeaders });
   });
 
-  // Set CSP in production to restrict what the renderer can load/execute.
-  // Skipped in dev because Vite injects inline scripts for HMR.
+  // Set CSP in production and manually capture the session cookie.
+  //
+  // Chromium 120+ blocks third-party cookies by default. Since the renderer
+  // (file:// or localhost) and the API (dosya.dev) are different origins,
+  // Set-Cookie headers from API responses are silently discarded by the
+  // renderer. We intercept the response headers here in the main process
+  // and manually store the cookie via Electron's cookies API, which bypasses
+  // the renderer-level third-party cookie restrictions.
   ses.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
 
@@ -39,6 +45,31 @@ export function setupSession(apiBase: string): void {
           "base-uri 'self'",
         ].join("; "),
       ];
+    }
+
+    // Capture dosya_session from Set-Cookie and store it manually.
+    // This is the primary mechanism for cookie storage — the cookies.on("changed")
+    // listener below is a safety net for cookies that Chromium does store natively.
+    if (details.url.startsWith(apiBase)) {
+      const setCookies = responseHeaders["set-cookie"] || responseHeaders["Set-Cookie"] || [];
+      for (const raw of setCookies) {
+        if (!raw.startsWith("dosya_session=")) continue;
+        const value = raw.split(";")[0].split("=").slice(1).join("=");
+        if (!value) {
+          // Empty value = cookie cleared (logout). Remove it from the store.
+          ses.cookies.remove(apiBase, "dosya_session").catch(() => {});
+        } else {
+          ses.cookies.set({
+            url: apiBase,
+            name: "dosya_session",
+            value,
+            httpOnly: true,
+            secure: true,
+            sameSite: "no_restriction",
+            expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+          }).catch(() => {});
+        }
+      }
     }
 
     callback({ responseHeaders });
