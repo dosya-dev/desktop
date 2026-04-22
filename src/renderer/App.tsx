@@ -30,7 +30,7 @@ import { AppShell } from "./components/layout/AppShell";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading: authLoading } = useAuth();
-  const { workspaces, isLoading: wsLoading } = useWorkspace();
+  const { workspaces, isLoading: wsLoading, isError, refetch } = useWorkspace();
 
   if (authLoading || wsLoading) {
     return (
@@ -42,6 +42,24 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/onboarding" replace />;
+  }
+
+  // Workspace query failed (e.g. 401) — show retry instead of create-workspace
+  if (isError && workspaces.length === 0) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-4">
+        <p className="text-sm text-[var(--color-text-secondary)]">
+          Failed to load workspaces. Please try again.
+        </p>
+        <button
+          onClick={() => refetch()}
+          className="rounded-lg px-4 py-2 text-sm font-medium text-white"
+          style={{ background: "var(--color-primary)" }}
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
 
   // No workspaces — force the user to create one first

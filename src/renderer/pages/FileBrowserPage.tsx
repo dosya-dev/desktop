@@ -758,10 +758,10 @@ export function FileBrowserPage() {
             onClick={() => setContextMenu(null)}
           />
           <div
-            className="fixed z-50 w-48 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
+            className="fixed z-50 w-48 origin-top-left rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg animate-[ctx-in_0.15s_ease-out]"
             style={{
-              left: contextMenu.x,
-              top: contextMenu.y,
+              left: Math.min(contextMenu.x, window.innerWidth - 208),
+              top: Math.min(contextMenu.y, window.innerHeight - 400),
               borderColor: "var(--color-border)",
             }}
           >

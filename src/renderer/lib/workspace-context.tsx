@@ -16,6 +16,8 @@ interface WorkspaceState {
   active: Workspace | null;
   setActive: (ws: Workspace) => void;
   isLoading: boolean;
+  isError: boolean;
+  refetch: () => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceState | null>(null);
@@ -32,7 +34,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   });
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["workspaces"],
     queryFn: () =>
       api.get<{ ok: boolean; workspaces: Workspace[] }>("/api/workspaces"),
@@ -61,7 +63,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   return (
     <WorkspaceContext.Provider
-      value={{ workspaces, active, setActive, isLoading }}
+      value={{ workspaces, active, setActive, isLoading, isError, refetch }}
     >
       {children}
     </WorkspaceContext.Provider>

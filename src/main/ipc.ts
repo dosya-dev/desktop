@@ -59,13 +59,34 @@ export function registerIpcHandlers(apiBase: string): void {
   // Wait for the dosya_session cookie to be ready (SameSite fixed).
   // After login, the server sets SameSite=Lax which doesn't work for
   // cross-origin fetch. session.ts fixes it to SameSite=None async.
-  // This handler polls until the fix is applied before the renderer
-  // makes authenticated requests.
+  // This handler polls until the fix is applied, and applies it directly
+  // if the cookies.on("changed") listener hasn't done so yet.
   ipcMain.handle("auth:wait-for-session", async () => {
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 30; i++) {
       const cookies = await session.defaultSession.cookies.get({ name: "dosya_session" });
       const ready = cookies.some((c) => c.sameSite === "no_restriction");
       if (ready) return;
+
+      // Cookie exists but hasn't been fixed yet — apply the fix directly
+      // instead of waiting for the cookies.on("changed") listener.
+      const unfixed = cookies.find((c) => c.sameSite !== "no_restriction");
+      if (unfixed) {
+        try {
+          await session.defaultSession.cookies.set({
+            url: apiBase,
+            name: unfixed.name,
+            value: unfixed.value,
+            httpOnly: unfixed.httpOnly,
+            secure: true,
+            expirationDate: unfixed.expirationDate || Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+            sameSite: "no_restriction",
+          });
+          return;
+        } catch {
+          // set() failed — fall through and retry on next iteration
+        }
+      }
+
       await new Promise((r) => setTimeout(r, 100));
     }
   });
@@ -125,7 +146,7 @@ export function registerIpcHandlers(apiBase: string): void {
         let path: string;
         try { path = new URL(url).pathname; } catch { return; }
 
-        if (path.startsWith("/dashboard") || path.startsWith("/verify") || path.startsWith("/login/2fa")) {
+        if (path.startsWith("/dashboard") || path.startsWith("/create-workspace") || path.startsWith("/verify") || path.startsWith("/login/2fa")) {
           // Poll for the session cookie instead of relying on a fixed delay
           for (let i = 0; i < 20; i++) {
             const cookies = await session.defaultSession.cookies.get({ name: "dosya_session" });

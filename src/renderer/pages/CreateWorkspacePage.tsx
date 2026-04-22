@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useAuth } from "@/lib/auth-context";
-import { FolderOpen, Upload, RefreshCw, Shield, Users, Zap, LogOut } from "lucide-react";
+import { FolderOpen, Upload, RefreshCw, Shield, Users, Zap, LogOut, ArrowRight } from "lucide-react";
 import logoSvg from "@/assets/logo.svg";
 import { toast } from "sonner";
 
@@ -18,8 +19,9 @@ const COLORS = [
 ];
 
 export function CreateWorkspacePage() {
-  const { setActive } = useWorkspace();
+  const { workspaces, setActive } = useWorkspace();
   const { logout } = useAuth();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [color, setColor] = useState("#22c55e");
@@ -141,6 +143,17 @@ export function CreateWorkspacePage() {
               {createMut.isPending ? "Creating..." : "Create workspace"}
             </button>
           </form>
+
+          {workspaces.length > 0 && (
+            <button
+              onClick={() => navigate("/dashboard")}
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium transition-colors hover:bg-[var(--color-bg-secondary)]"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              <ArrowRight size={14} />
+              Go to dashboard
+            </button>
+          )}
 
           <button
             onClick={logout}
