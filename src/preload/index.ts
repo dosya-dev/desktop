@@ -14,6 +14,7 @@ const electronAPI = {
   // Auth
   getApiBase: (): Promise<string> => ipcRenderer.invoke("auth:get-api-base"),
   clearSession: (): Promise<void> => ipcRenderer.invoke("auth:clear-session"),
+  waitForSession: (): Promise<void> => ipcRenderer.invoke("auth:wait-for-session"),
   oauth: (provider: string): Promise<{ ok: boolean; redirectedTo?: string; error?: string }> =>
     ipcRenderer.invoke("auth:oauth", provider),
 

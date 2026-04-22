@@ -2,7 +2,8 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
-import { FolderOpen, Upload, RefreshCw, Shield, Users, Zap } from "lucide-react";
+import { useAuth } from "@/lib/auth-context";
+import { FolderOpen, Upload, RefreshCw, Shield, Users, Zap, LogOut } from "lucide-react";
 import logoSvg from "@/assets/logo.svg";
 import { toast } from "sonner";
 
@@ -18,6 +19,7 @@ const COLORS = [
 
 export function CreateWorkspacePage() {
   const { setActive } = useWorkspace();
+  const { logout } = useAuth();
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [color, setColor] = useState("#22c55e");
@@ -139,6 +141,15 @@ export function CreateWorkspacePage() {
               {createMut.isPending ? "Creating..." : "Create workspace"}
             </button>
           </form>
+
+          <button
+            onClick={logout}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-secondary)]"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <LogOut size={14} />
+            Log out
+          </button>
         </div>
       </div>
 

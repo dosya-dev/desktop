@@ -39,6 +39,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     staleTime: 10_000,
     refetchOnWindowFocus: true,
     enabled: isAuthenticated,
+    // Override global no-retry-on-401: the cookie may not be ready yet
+    // right after login (SameSite fix is async).
+    retry: 3,
+    retryDelay: 500,
   });
 
   const workspaces = data?.workspaces ?? [];

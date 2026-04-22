@@ -35,7 +35,8 @@ export function TwoFactorPage() {
         is_recovery: isRecovery,
       });
 
-      // Refresh user context to pick up the new session
+      // Wait for cookie SameSite fix, then refresh user context
+      await window.electronAPI.waitForSession();
       await refreshUser();
       navigate("/dashboard");
     } catch (err) {

@@ -41,6 +41,8 @@ export function LoginPage() {
     try {
       const result = await ipc.oauth(provider);
       if (result.ok) {
+        // Wait for cookie SameSite fix before making authenticated calls
+        await window.electronAPI.waitForSession();
         // Refresh user state so ProtectedRoute sees the session
         await refreshUser();
         navigate("/dashboard");

@@ -56,6 +56,20 @@ export function registerIpcHandlers(apiBase: string): void {
 
   ipcMain.handle("auth:get-api-base", () => apiBase);
 
+  // Wait for the dosya_session cookie to be ready (SameSite fixed).
+  // After login, the server sets SameSite=Lax which doesn't work for
+  // cross-origin fetch. session.ts fixes it to SameSite=None async.
+  // This handler polls until the fix is applied before the renderer
+  // makes authenticated requests.
+  ipcMain.handle("auth:wait-for-session", async () => {
+    for (let i = 0; i < 20; i++) {
+      const cookies = await session.defaultSession.cookies.get({ name: "dosya_session" });
+      const ready = cookies.some((c) => c.sameSite === "no_restriction");
+      if (ready) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  });
+
   // OAuth via popup BrowserWindow
   ipcMain.handle("auth:oauth", async (_event, provider: string) => {
     if (!ALLOWED_OAUTH_PROVIDERS.has(provider)) {
