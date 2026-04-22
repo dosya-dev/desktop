@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   RefreshCw,
@@ -69,8 +69,150 @@ export function SyncPage() {
   const transfers = allTransfers.filter((t) => pairIds.has(t.pairId));
   const wsConflicts = allConflicts.filter((c) => pairIds.has(c.pairId));
 
+  // Aggregate progress across all syncing pairs
+  const syncProgress = useMemo(() => {
+    // Show banner if any pair has a batch in progress OR there are active transfers
+    // (a single large file upload has transfers but totalFilesInBatch may be 1).
+    const syncing = pairs.filter(p => p.totalFilesInBatch > 0 || p.status === "syncing");
+    const hasActiveTransfers = transfers.length > 0;
+    if (syncing.length === 0 && !hasActiveTransfers) return null;
+
+    const totalFiles = syncing.reduce((s, p) => s + p.totalFilesInBatch, 0);
+    const completedFiles = syncing.reduce((s, p) => s + p.completedFilesInBatch, 0);
+    const totalBytes = syncing.reduce((s, p) => s + (p.totalBytesInBatch || 0), 0);
+    const completedBytes = syncing.reduce((s, p) => s + (p.completedBytesInBatch || 0), 0);
+
+    // In-flight transfer bytes (partially uploaded/downloaded files)
+    const activeBytes = transfers.reduce((s, t) => s + t.bytesTransferred, 0);
+    const activeTotalBytes = transfers.reduce((s, t) => s + t.bytesTotal, 0);
+
+    // Use batch bytes when available, otherwise fall back to active transfer bytes
+    // (handles single large file where batch total = file size)
+    const effectiveTotalBytes = totalBytes > 0 ? totalBytes : activeTotalBytes;
+    const effectiveCompletedBytes = completedBytes + activeBytes;
+
+    let pct = 0;
+    if (effectiveTotalBytes > 0) {
+      pct = Math.min(100, Math.round((effectiveCompletedBytes / effectiveTotalBytes) * 100));
+    } else if (totalFiles > 0) {
+      pct = Math.min(100, Math.round((completedFiles / totalFiles) * 100));
+    }
+
+    // ETA from earliest batch start, or from earliest active transfer
+    let earliest = syncing.reduce((min, p) => (p.batchStartedAt && (min === 0 || p.batchStartedAt < min)) ? p.batchStartedAt : min, 0);
+    if (!earliest && transfers.length > 0) {
+      earliest = transfers.reduce((min, t) => {
+        const started = (t as any).startedAt || 0;
+        return started && (min === 0 || started < min) ? started : min;
+      }, 0);
+    }
+
+    let eta = "";
+    if (earliest && effectiveTotalBytes > 0 && effectiveCompletedBytes > 0) {
+      const elapsed = Date.now() - earliest;
+      const speed = effectiveCompletedBytes / elapsed; // bytes/ms
+      const remaining = effectiveTotalBytes - effectiveCompletedBytes;
+      if (speed > 0 && remaining > 0) {
+        const sec = Math.ceil(remaining / speed / 1000);
+        if (sec < 60) eta = `${sec}s remaining`;
+        else if (sec < 3600) eta = `${Math.ceil(sec / 60)}m remaining`;
+        else { const h = Math.floor(sec / 3600); const m = Math.ceil((sec % 3600) / 60); eta = `${h}h ${m}m remaining`; }
+      }
+    }
+
+    // Speed
+    let speed = "";
+    if (earliest && effectiveCompletedBytes > 0) {
+      const elapsed = Date.now() - earliest;
+      const bps = effectiveCompletedBytes / (elapsed / 1000);
+      speed = `${formatBytes(bps)}/s`;
+    }
+
+    // Check if any pair is still in scanning phase (walking tree, no uploads yet)
+    const scanning = syncing.some(p => p.phase === "scanning");
+    const scannedFiles = syncing.reduce((s, p) => s + (p.scannedFiles || 0), 0);
+    const scannedFolders = syncing.reduce((s, p) => s + (p.scannedFolders || 0), 0);
+
+    const displayTotalFiles = totalFiles || transfers.length;
+    const displayCompletedFiles = completedFiles;
+
+    return {
+      totalFiles: displayTotalFiles,
+      completedFiles: displayCompletedFiles,
+      totalBytes: effectiveTotalBytes,
+      completedBytes: effectiveCompletedBytes,
+      pct, eta, speed,
+      pairCount: syncing.length || 1,
+      scanning,
+      scannedFiles,
+      scannedFolders,
+    };
+  }, [pairs, transfers]);
+
   return (
     <div className="space-y-5">
+      {/* Overall sync progress banner */}
+      {syncProgress && (
+        <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-primary)", background: "var(--color-primary-bg, var(--color-bg-secondary))" }}>
+          {syncProgress.scanning ? (
+            /* ── Scanning phase: animated bar + discovered count ── */
+            <>
+              <div className="flex items-center gap-2 mb-2">
+                <Loader2 size={16} className="animate-spin text-[var(--color-primary)]" />
+                <span className="text-sm font-semibold">
+                  Scanning folder{syncProgress.pairCount > 1 ? "s" : ""}...
+                </span>
+                <span className="text-xs text-[var(--color-text-secondary)]">
+                  {syncProgress.scannedFiles.toLocaleString()} file{syncProgress.scannedFiles !== 1 ? "s" : ""}
+                  {syncProgress.scannedFolders > 0 ? `, ${syncProgress.scannedFolders.toLocaleString()} folder${syncProgress.scannedFolders !== 1 ? "s" : ""} found` : " found"}
+                </span>
+              </div>
+              <div className="h-2 w-full rounded-full bg-[var(--color-border)] overflow-hidden">
+                <div
+                  className="h-2 w-1/3 rounded-full"
+                  style={{
+                    background: "var(--color-primary)",
+                    animation: "indeterminate 1.5s ease-in-out infinite",
+                  }}
+                />
+              </div>
+              <style>{`@keyframes indeterminate { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }`}</style>
+            </>
+          ) : (
+            /* ── Transferring phase: real progress bar with ETA ── */
+            <>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Loader2 size={16} className="animate-spin text-[var(--color-primary)]" />
+                  <span className="text-sm font-semibold">
+                    {syncProgress.totalFiles > 1
+                      ? `Syncing ${syncProgress.completedFiles} of ${syncProgress.totalFiles} files`
+                      : "Syncing file"}
+                    {syncProgress.pairCount > 1 ? ` across ${syncProgress.pairCount} folders` : ""}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 text-xs text-[var(--color-text-secondary)]">
+                  {syncProgress.speed && <span>{syncProgress.speed}</span>}
+                  {syncProgress.eta && <span>{syncProgress.eta}</span>}
+                  <span className="font-semibold text-[var(--color-primary)]">{syncProgress.pct}%</span>
+                </div>
+              </div>
+              <div className="h-2 w-full rounded-full bg-[var(--color-border)]">
+                <div
+                  className="h-2 rounded-full transition-all duration-500"
+                  style={{ width: `${Math.max(syncProgress.pct, 1)}%`, background: "var(--color-primary)" }}
+                />
+              </div>
+              {syncProgress.totalBytes > 0 && (
+                <p className="mt-1.5 text-[11px] text-[var(--color-text-muted)]">
+                  {formatBytes(syncProgress.completedBytes)} of {formatBytes(syncProgress.totalBytes)}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Sync</h1>
@@ -396,15 +538,47 @@ function SyncPairRow({
   const isSyncing = transfers.length > 0 || pair.totalFilesInBatch > 0;
   let progressPct = 0;
   let progressLabel = "";
+  let etaLabel = "";
   if (isSyncing) {
     const total = pair.totalFilesInBatch || transfers.length;
     const completed = pair.completedFilesInBatch || 0;
+
+    // Byte-level progress for smooth bar (includes partial progress of active transfers)
+    const completedBytes = pair.completedBytesInBatch || 0;
+    const totalBytes = pair.totalBytesInBatch || 0;
     const activeBytes = transfers.reduce((a, t) => a + t.bytesTransferred, 0);
     const activeTotalBytes = transfers.reduce((a, t) => a + t.bytesTotal, 0);
-    const activeFraction = activeTotalBytes > 0 ? activeBytes / activeTotalBytes : 0;
-    const effective = completed + activeFraction * transfers.length;
-    progressPct = total > 0 ? Math.min(100, Math.round((effective / total) * 100)) : 0;
+
+    if (totalBytes > 0) {
+      const effectiveBytes = completedBytes + activeBytes;
+      progressPct = Math.min(100, Math.round((effectiveBytes / totalBytes) * 100));
+    } else {
+      // Fallback: file-count based
+      const activeFraction = activeTotalBytes > 0 ? activeBytes / activeTotalBytes : 0;
+      const effective = completed + activeFraction * transfers.length;
+      progressPct = total > 0 ? Math.min(100, Math.round((effective / total) * 100)) : 0;
+    }
+
     progressLabel = `${completed}/${total} files`;
+
+    // ETA based on byte throughput
+    if (pair.batchStartedAt && totalBytes > 0 && completedBytes > 0) {
+      const elapsed = Date.now() - pair.batchStartedAt;
+      const bytesPerMs = (completedBytes + activeBytes) / elapsed;
+      const remainingBytes = totalBytes - completedBytes - activeBytes;
+      if (bytesPerMs > 0 && remainingBytes > 0) {
+        const remainingSec = Math.ceil(remainingBytes / bytesPerMs / 1000);
+        if (remainingSec < 60) {
+          etaLabel = `~${remainingSec}s left`;
+        } else if (remainingSec < 3600) {
+          etaLabel = `~${Math.ceil(remainingSec / 60)}m left`;
+        } else {
+          const h = Math.floor(remainingSec / 3600);
+          const m = Math.ceil((remainingSec % 3600) / 60);
+          etaLabel = `~${h}h ${m}m left`;
+        }
+      }
+    }
   }
 
   return (
@@ -436,16 +610,24 @@ function SyncPairRow({
         {/* Status */}
         <td className="py-2.5 px-2">
           {isSyncing ? (
-            <div className="space-y-1">
-              <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: s.color }}>
-                {s.icon} {progressLabel}
-              </span>
-              <div className="h-1 w-20 rounded-full bg-[var(--color-border)]">
+            <div className="space-y-1 min-w-[120px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: s.color }}>
+                  {s.icon} {progressPct}%
+                </span>
+                <span className="text-[10px] text-[var(--color-text-muted)]">
+                  {progressLabel}
+                </span>
+              </div>
+              <div className="h-1.5 w-full rounded-full bg-[var(--color-border)]">
                 <div
-                  className="h-1 rounded-full transition-all"
+                  className="h-1.5 rounded-full transition-all duration-300"
                   style={{ width: `${Math.max(progressPct, 2)}%`, background: s.color }}
                 />
               </div>
+              {etaLabel && (
+                <p className="text-[10px] text-[var(--color-text-muted)]">{etaLabel}</p>
+              )}
             </div>
           ) : (
             <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: s.color }}>
@@ -469,8 +651,9 @@ function SyncPairRow({
           <div className="flex items-center justify-end gap-0.5">
             <button
               onClick={() => { window.electronAPI.syncNow(pair.pairId); onRefresh(); }}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]"
-              title="Sync now"
+              disabled={pair.status === "syncing" || isSyncing}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)] disabled:opacity-30 disabled:pointer-events-none"
+              title={isSyncing ? "Sync in progress" : "Sync now"}
             >
               <RefreshCw size={13} />
             </button>

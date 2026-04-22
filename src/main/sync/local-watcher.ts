@@ -169,6 +169,10 @@ export class LocalWatcher extends EventEmitter {
     super();
   }
 
+  isWatching(): boolean {
+    return this.watcher !== null;
+  }
+
   start(): void {
     if (this.watcher) return;
     this.emfileWarned = false;
@@ -195,10 +199,10 @@ export class LocalWatcher extends EventEmitter {
       // Polling fallback: uses setInterval instead of OS watchers.
       // Slower (checks every 2s) but never hits fd limits.
       ...(usePolling ? { usePolling: true, interval: 2000 } : {}),
-      awaitWriteFinish: {
-        stabilityThreshold: 2000,
-        pollInterval: 500,
-      },
+      // awaitWriteFinish DISABLED — it allocates a stat-polling interval for
+      // every file event (100K files = 100K timers + cached Stats = GBs of RAM).
+      // Instead we rely on our debounce + maxWait batching in scheduleBatch().
+      // The stabilityThreshold was 2s anyway which our 1-2s debounce already covers.
       depth: 50,
     });
 

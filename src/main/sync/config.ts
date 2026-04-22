@@ -7,6 +7,7 @@ import {
   DEFAULT_SYNC_CONFIG,
   EMPTY_PAIR_STATE,
 } from "./types";
+import { stringifyOffThread } from "./state-writer";
 
 function syncDir(): string {
   return join(app.getPath("userData"), "sync");
@@ -84,7 +85,11 @@ export async function loadPairState(pairId: string): Promise<SyncPairState> {
 export async function savePairState(state: SyncPairState): Promise<void> {
   const dir = join(syncDir(), "sync-state");
   await ensureDir(dir);
-  await atomicWriteFile(statePath(state.pairId), JSON.stringify(state, null, 2));
+  // Serialize off the main thread — JSON.stringify on 50K entries blocks
+  // the event loop for 50-200ms. The worker thread handles it so IPC,
+  // watcher events, and UI updates keep flowing.
+  const json = await stringifyOffThread(state);
+  await atomicWriteFile(statePath(state.pairId), json);
 }
 
 export async function deletePairState(pairId: string): Promise<void> {

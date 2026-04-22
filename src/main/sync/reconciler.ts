@@ -26,12 +26,16 @@ const MAX_FOLDER_DEPTH = 50;
  * Uses the shared shouldIgnoreEntry() filter so the scanner and watcher
  * have identical ignore semantics.
  */
+const STAT_BATCH_SIZE = 50;
+const YIELD_INTERVAL = 200;
+
 async function scanLocal(
   rootPath: string,
   userPatterns?: string[],
 ): Promise<{ files: Map<string, LocalFileStat>; dirs: Set<string> }> {
   const files = new Map<string, LocalFileStat>();
   const dirs = new Set<string>();
+  let yieldCounter = 0;
 
   async function walk(dir: string, depth: number): Promise<void> {
     if (depth > MAX_FOLDER_DEPTH) return;
@@ -43,28 +47,44 @@ async function scanLocal(
       return;
     }
 
+    // Collect file entries for batch stat
+    const fileEntries: { fullPath: string; relPath: string }[] = [];
+
     for (const entry of entries) {
-      // Use shared ignore filter (matches watcher + initial scan)
       if (shouldIgnoreEntry(entry.name, entry.isDirectory(), userPatterns)) continue;
 
       const fullPath = join(dir, entry.name);
-      // Always normalize to forward slashes for cross-platform consistency
       const relPath = relative(rootPath, fullPath).split(sep).join("/");
 
       if (entry.isDirectory()) {
         dirs.add(relPath);
+        // Yield periodically to keep event loop responsive
+        if (++yieldCounter % YIELD_INTERVAL === 0) {
+          await new Promise<void>(r => setImmediate(r));
+        }
         await walk(fullPath, depth + 1);
       } else if (entry.isFile()) {
-        try {
-          const s = await stat(fullPath);
-          files.set(relPath, {
-            sizeBytes: s.size,
-            mtimeMs: s.mtimeMs,
-            isDirectory: false,
-          });
-        } catch {
-          // skip unreadable files
-        }
+        fileEntries.push({ fullPath, relPath });
+      }
+    }
+
+    // Stat files in parallel batches instead of one-at-a-time
+    for (let i = 0; i < fileEntries.length; i += STAT_BATCH_SIZE) {
+      const batch = fileEntries.slice(i, i + STAT_BATCH_SIZE);
+      const stats = await Promise.all(
+        batch.map(f => stat(f.fullPath).catch(() => null)),
+      );
+      for (let j = 0; j < batch.length; j++) {
+        const s = stats[j];
+        if (!s) continue;
+        files.set(batch[j].relPath, {
+          sizeBytes: s.size,
+          mtimeMs: s.mtimeMs,
+          isDirectory: false,
+        });
+      }
+      if (++yieldCounter % YIELD_INTERVAL === 0) {
+        await new Promise<void>(r => setImmediate(r));
       }
     }
   }
@@ -150,6 +170,16 @@ export async function reconcile(
     pathToRemoteFolder.set(path, id);
   }
 
+  // Reverse index for stored state: localPath → remoteId (avoids O(n) finds)
+  const storedPathToId = new Map<string, string>();
+  for (const [id, record] of Object.entries(storedState.files)) {
+    storedPathToId.set(record.localPath, id);
+  }
+  const storedFolderPaths = new Set<string>();
+  for (const record of Object.values(storedState.folders)) {
+    storedFolderPaths.add(record.localPath);
+  }
+
   // ── Folder reconciliation ──────────────────────────────────────
 
   // New remote folders → create locally
@@ -169,8 +199,7 @@ export async function reconcile(
   // New local folders → create remotely
   for (const relPath of localDirs) {
     if (!pathToRemoteFolder.has(relPath)) {
-      const known = Object.values(storedState.folders).find((f) => f.localPath === relPath);
-      if (!known) {
+      if (!storedFolderPaths.has(relPath)) {
         const parts = relPath.split("/");
         const parentRelPath = parts.slice(0, -1).join("/");
         const parentRemoteId = parentRelPath ? (pathToRemoteFolder.get(parentRelPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
@@ -191,10 +220,11 @@ export async function reconcile(
     ...Object.keys(storedState.files),
   ]);
 
-  // Also check local-only files
+  // Also check local-only files (O(1) via reverse index instead of O(n) find)
   for (const [relPath] of localFiles) {
     if (!pathToRemoteFile.has(relPath)) {
-      const storedByPath = Object.values(storedState.files).find((f) => f.localPath === relPath);
+      const storedId = storedPathToId.get(relPath);
+      const storedByPath = storedId ? storedState.files[storedId] : undefined;
       if (storedByPath) {
         allFileIds.add(storedByPath.remoteId);
       }

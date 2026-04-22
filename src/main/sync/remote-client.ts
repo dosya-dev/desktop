@@ -7,6 +7,18 @@ import http from "http";
 import https from "https";
 import { URL } from "url";
 
+// Persistent HTTP agents with keep-alive and higher socket pool.
+// Without these, each request opens a new TCP+TLS handshake (~100ms).
+// With keep-alive, connections are reused — critical when uploading
+// 38K files (saves ~38K x 100ms = ~63 min of handshake overhead).
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 16 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 16 });
+
+function agentFor(url: string | URL): http.Agent | https.Agent {
+  const protocol = typeof url === "string" ? new URL(url).protocol : url.protocol;
+  return protocol === "https:" ? httpsAgent : httpAgent;
+}
+
 const isDev = !app.isPackaged;
 function debugLog(...args: unknown[]): void {
   if (isDev) console.log(...args);
@@ -61,7 +73,18 @@ export class RemoteClient {
   /** Current rate limit budget, updated from every API response. */
   rateBudget: RateBudget = { remaining: Infinity, resetAt: 0, limit: 300 };
 
+  /** Cached session cookie to avoid IPC round-trip to Chromium on every request. */
+  private cachedCookie: string | null = null;
+  private cookieCachedAt = 0;
+  private static readonly COOKIE_CACHE_TTL = 60_000; // 60s
+
   constructor(private apiBase: string) {}
+
+  /** Invalidate the cached cookie (call on login/logout). */
+  clearCookieCache(): void {
+    this.cachedCookie = null;
+    this.cookieCachedAt = 0;
+  }
 
   /**
    * Update rate budget from response headers.
@@ -121,31 +144,40 @@ export class RemoteClient {
   }
 
   private async getSessionCookie(): Promise<string | null> {
-    const apiHost = new URL(this.apiBase).hostname;
+    // Return cached cookie if still fresh — avoids IPC round-trip per request.
+    // For a 10K-file sync this saves ~30K–40K async IPC calls.
+    if (this.cachedCookie && Date.now() - this.cookieCachedAt < RemoteClient.COOKIE_CACHE_TTL) {
+      return this.cachedCookie;
+    }
 
+    const apiHost = new URL(this.apiBase).hostname;
     const allSession = await session.defaultSession.cookies.get({ name: "dosya_session" });
-    debugLog("[sync] dosya_session cookies:", allSession.map(c => `${c.domain} (len=${c.value.length})`).join(", ") || "NONE");
+
+    let value: string | null = null;
 
     // Exact domain match
     const exact = allSession.find(c => c.domain === apiHost);
     if (exact) {
-      debugLog("[sync] Using cookie from domain:", exact.domain);
-      return exact.value;
+      value = exact.value;
+    } else {
+      // Dot-prefixed domain match (e.g. ".dosya.dev" for https://dosya.dev)
+      const dotMatch = allSession.find(c => {
+        if (!c.domain) return false;
+        const bare = c.domain.replace(/^\./, "");
+        return apiHost === bare || apiHost.endsWith(`.${bare}`);
+      });
+      if (dotMatch) value = dotMatch.value;
     }
 
-    // Dot-prefixed domain match (e.g. ".dosya.dev" for https://dosya.dev)
-    const dotMatch = allSession.find(c => {
-      if (!c.domain) return false;
-      const bare = c.domain.replace(/^\./, "");
-      return apiHost === bare || apiHost.endsWith(`.${bare}`);
-    });
-    if (dotMatch) {
-      debugLog("[sync] Using cookie from domain:", dotMatch.domain);
-      return dotMatch.value;
+    if (value) {
+      this.cachedCookie = value;
+      this.cookieCachedAt = Date.now();
+    } else {
+      this.cachedCookie = null;
+      this.cookieCachedAt = 0;
     }
 
-    debugLog("[sync] No matching dosya_session cookie for host:", apiHost);
-    return null;
+    return value;
   }
 
   // ── Core fetch for JSON API calls ─────────────────────────────────
@@ -155,7 +187,10 @@ export class RemoteClient {
     opts: { method?: string; body?: Buffer | string; headers?: Record<string, string>; timeout?: number } = {},
   ): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; json: () => Promise<any>; buffer: () => Promise<Buffer> }> {
     const sessionCookie = await this.getSessionCookie();
-    if (!sessionCookie) throw new Error("SESSION_EXPIRED");
+    if (!sessionCookie) {
+      this.clearCookieCache();
+      throw new Error("SESSION_EXPIRED");
+    }
 
     const fullUrl = `${this.apiBase}${path}`;
     const parsed = new URL(fullUrl);
@@ -169,6 +204,7 @@ export class RemoteClient {
 
     const headers: Record<string, string> = {
       Cookie: `dosya_session=${sessionCookie}`,
+      "X-Dosya-Sync": "1",
       ...opts.headers,
     };
     if (bodyBuf) {
@@ -181,7 +217,7 @@ export class RemoteClient {
       const timeout = opts.timeout ?? 30_000;
       const req = lib.request(
         fullUrl,
-        { method: opts.method ?? "GET", headers, timeout },
+        { method: opts.method ?? "GET", headers, timeout, agent: agentFor(fullUrl) },
         (res) => {
           debugLog("[sync] HTTP response:", res.statusCode, fullUrl);
 
@@ -199,7 +235,7 @@ export class RemoteClient {
             const rHeaders: Record<string, string> = {};
             if (isSameHost) rHeaders.Cookie = `dosya_session=${sessionCookie}`;
 
-            const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout }, (rRes) => {
+            const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout, agent: agentFor(redirectUrl) }, (rRes) => {
               const chunks: Buffer[] = [];
               rRes.on("data", (chunk: Buffer) => chunks.push(chunk));
               rRes.on("end", () => {
@@ -390,7 +426,7 @@ export class RemoteClient {
         const headers: Record<string, string> = {};
         if (isSameHost) headers.Cookie = `dosya_session=${cookie}`;
 
-        const req = reqLib.get(url, { headers, timeout: 300_000 }, (res) => {
+        const req = reqLib.get(url, { headers, timeout: 300_000, agent: agentFor(url) }, (res) => {
           if (res.statusCode === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
           if (res.statusCode === 429) {
             // Read Retry-After header before draining
@@ -523,8 +559,10 @@ export class RemoteClient {
           "Content-Type": "application/octet-stream",
           "Content-Length": String(fileSize),
           Cookie: `dosya_session=${cookie}`,
+          "X-Dosya-Sync": "1",
         },
-        timeout: 300_000, // 5 minutes for large uploads
+        timeout: 300_000,
+        agent: agentFor(fullUrl),
       }, (res) => {
         // Update budget from upload response
         this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
@@ -645,6 +683,54 @@ export class RemoteClient {
       body: JSON.stringify({ enabled }),
     });
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
+  }
+
+  /**
+   * Set sync flag on multiple files in a single burst.
+   * Fires requests concurrently (up to 10 at a time) to reduce wall-clock time
+   * compared to sequential per-file calls. Errors are logged but not thrown
+   * because the flag is non-critical metadata.
+   */
+  async batchSetFileSyncFlags(fileIds: string[], enabled: boolean): Promise<void> {
+    const BATCH = 10;
+    for (let i = 0; i < fileIds.length; i += BATCH) {
+      const chunk = fileIds.slice(i, i + BATCH);
+      await Promise.allSettled(
+        chunk.map(id =>
+          this.setFileSyncFlag(id, enabled).catch(err => {
+            if (err.message === "SESSION_EXPIRED") throw err;
+            // Non-critical — log and continue
+          }),
+        ),
+      );
+    }
+  }
+
+  /**
+   * Create multiple folders in a single HTTP request.
+   * Returns a map of "parentId:name" → folderId for all created/existing folders.
+   * Folders must be sorted by depth (parents before children).
+   */
+  async createFoldersBatch(
+    workspaceId: string,
+    folders: { name: string; parent_id: string | null }[],
+  ): Promise<Map<string, string>> {
+    const res = await this.fetch("/api/folders/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspaceId, folders }),
+    });
+
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Batch folder create failed");
+
+    const map = new Map<string, string>();
+    for (const f of data.folders ?? []) {
+      const key = `${f.parent_id ?? "null"}:${f.name}`;
+      map.set(key, f.id);
+    }
+    return map;
   }
 
   async createFolder(

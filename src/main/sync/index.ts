@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { access, readdir, stat, unlink, mkdir } from "fs/promises";
 import { join, relative, resolve, sep, basename, dirname } from "path";
 import { loadConfig, saveConfig, loadPairState, savePairState, deletePairState } from "./config";
+import { terminateStateWriter } from "./state-writer";
 import { RemoteClient, RateLimitError } from "./remote-client";
 import { LocalWatcher, type WatchEvent, shouldIgnoreEntry } from "./local-watcher";
 import { RemotePoller, type RemoteSnapshot } from "./remote-poller";
@@ -55,8 +56,8 @@ class Semaphore {
 
 // ── Constants ───────��────────────────────────────────���──────────────
 
-const RECENT_DOWNLOAD_TTL_MS = 10_000; // suppress watcher events for 10s after download
-const STATE_SAVE_INTERVAL = 10; // save state every N file operations
+const RECENT_DOWNLOAD_TTL_MS = 120_000; // suppress watcher events for 2 min after download (large files can take >10s)
+const STATE_SAVE_INTERVAL = 50; // save state every N file operations (was 10 — too frequent for large syncs)
 const SESSION_RECOVERY_MS = 30_000; // check for session recovery every 30s
 const MAX_FILE_RETRIES = 5; // max retry attempts per persistently failing file
 
@@ -79,6 +80,18 @@ interface PairRuntime {
   totalFilesInBatch: number;
   /** Files completed so far in the current batch. */
   completedFilesInBatch: number;
+  /** Total bytes across all files in the current batch. */
+  totalBytesInBatch: number;
+  /** Bytes completed so far in the current batch (finished files only). */
+  completedBytesInBatch: number;
+  /** When the current batch started (epoch ms). */
+  batchStartedAt: number;
+  /** Current sync phase. */
+  phase: "scanning" | "transferring" | null;
+  /** Files discovered so far during scan walk. */
+  scannedFiles: number;
+  /** Folders discovered so far during scan walk. */
+  scannedFolders: number;
 }
 
 /**
@@ -107,7 +120,7 @@ export class SyncEngine extends EventEmitter {
   private config: SyncConfig | null = null;
   private client: RemoteClient;
   private runtimes = new Map<string, PairRuntime>();
-  private activeTransfers: ActiveTransfer[] = [];
+  private activeTransfers = new Set<ActiveTransfer>();
   private started = false;
   private conflicts: SyncConflict[] = [];
 
@@ -119,6 +132,25 @@ export class SyncEngine extends EventEmitter {
 
   /** Periodic timer to recover pairs stuck in SESSION_EXPIRED or RATE_LIMITED error. */
   private recoveryTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Throttle emitStatus to avoid flooding IPC during large batch operations. */
+  private statusTimer: ReturnType<typeof setTimeout> | null = null;
+  private statusDirty = false;
+
+  /** File IDs that need sync-flag set after a batch upload completes. */
+  private pendingSyncFlagIds: string[] = [];
+
+  /** Serialize state saves to prevent concurrent writes to the same file. */
+  private savePending = new Map<string, Promise<void>>();
+
+  private async safeSaveState(state: SyncPairState): Promise<void> {
+    const key = state.pairId;
+    // Chain onto the previous save for this pair so writes are serialized
+    const prev = this.savePending.get(key) ?? Promise.resolve();
+    const next = prev.then(() => savePairState(state)).catch(() => {});
+    this.savePending.set(key, next);
+    await next;
+  }
 
   constructor(private apiBase: string) {
     super();
@@ -159,19 +191,38 @@ export class SyncEngine extends EventEmitter {
       clearInterval(this.recoveryTimer);
       this.recoveryTimer = null;
     }
+    if (this.statusTimer) {
+      clearTimeout(this.statusTimer);
+      this.statusTimer = null;
+      this.statusDirty = false;
+    }
+
+    // Phase 1: Signal all pairs to stop. In-flight workers check rt.status
+    // and this.stopped — both must be set before we do anything destructive.
     for (const [, rt] of this.runtimes) {
+      rt.watcher?.removeAllListeners();
       rt.watcher?.stop();
+      rt.poller?.removeAllListeners();
       rt.poller?.stop();
       if (rt.rateLimitResumeTimer) clearTimeout(rt.rateLimitResumeTimer);
-      // Mark pair as stopped so in-flight operations bail out
       rt.status = "paused";
       rt.syncing = false;
-      await savePairState(rt.state);
+    }
+
+    // Phase 2: Let the event loop tick so in-flight workers see the paused
+    // status and bail out before we save state and clear runtimes.
+    await new Promise<void>(r => setTimeout(r, 100));
+
+    // Phase 3: Persist state and tear down.
+    for (const [, rt] of this.runtimes) {
+      try { await this.safeSaveState(rt.state); } catch {}
     }
     this.runtimes.clear();
-    this.activeTransfers = [];
+    this.activeTransfers.clear();
     this.conflicts = [];
-    this.emitStatus();
+    this.pendingSyncFlagIds = [];
+    terminateStateWriter();
+    try { this.emitStatus(); } catch {}
   }
 
   /** Check if engine is stopped. In-flight operations should bail out when true. */
@@ -186,6 +237,7 @@ export class SyncEngine extends EventEmitter {
       // Recover from session expiry
       if (rt.status === "error" && rt.errorMessage?.includes("Session expired")) {
         try {
+          this.client.clearCookieCache();
           await this.client.getWorkspaceRegion(rt.pair.workspaceId);
           console.log("[sync] Session recovered for pair:", pairId);
           rt.status = "idle";
@@ -324,6 +376,12 @@ export class SyncEngine extends EventEmitter {
         rateLimitResumeTimer: null,
         totalFilesInBatch: 0,
         completedFilesInBatch: 0,
+        totalBytesInBatch: 0,
+        completedBytesInBatch: 0,
+        batchStartedAt: 0,
+        phase: null,
+        scannedFiles: 0,
+        scannedFolders: 0,
       };
       this.runtimes.set(pair.id, rt);
       this.emitStatus();
@@ -375,7 +433,7 @@ export class SyncEngine extends EventEmitter {
             await saveConfig(this.config);
           }
         }
-        await savePairState(state);
+        await this.safeSaveState(state);
       } catch (err: any) {
         console.error("[sync] Failed to create root folder:", err.message);
       }
@@ -415,6 +473,12 @@ export class SyncEngine extends EventEmitter {
       rateLimitResumeTimer: null,
       totalFilesInBatch: 0,
       completedFilesInBatch: 0,
+      totalBytesInBatch: 0,
+      completedBytesInBatch: 0,
+      batchStartedAt: 0,
+      phase: null,
+      scannedFiles: 0,
+      scannedFolders: 0,
     };
 
     this.runtimes.set(pair.id, rt);
@@ -455,7 +519,7 @@ export class SyncEngine extends EventEmitter {
         watcher.on("error", (err: Error) => {
           console.error(`[sync] watcher error for ${pair.id}:`, err.message);
         });
-        watcher.start();
+        // Deferred: watcher starts after initial scan (see runInitialScan)
       }
       // ── Pull / pull-safe modes: poller handles downloads ─��
       if (poller && !needsLocalWatch) {
@@ -484,13 +548,20 @@ export class SyncEngine extends EventEmitter {
   private async stopPair(pairId: string): Promise<void> {
     const rt = this.runtimes.get(pairId);
     if (!rt) return;
+    // Signal workers to stop before tearing down
+    rt.status = "paused";
+    rt.syncing = false;
+    rt.watcher?.removeAllListeners();
     rt.watcher?.stop();
+    rt.poller?.removeAllListeners();
     rt.poller?.stop();
     if (rt.rateLimitResumeTimer) {
       clearTimeout(rt.rateLimitResumeTimer);
       rt.rateLimitResumeTimer = null;
     }
-    await savePairState(rt.state);
+    // Let workers see the paused status and bail out
+    await new Promise<void>(r => setTimeout(r, 100));
+    try { await this.safeSaveState(rt.state); } catch {}
     this.runtimes.delete(pairId);
   }
 
@@ -508,11 +579,16 @@ export class SyncEngine extends EventEmitter {
       const actions = await reconcile(rt.pair, rt.state, snapshot);
       await this.executeActions(rt, actions);
 
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+
+      await this.flushSyncFlags();
+
       rt.status = "idle";
       rt.state.lastFullSyncAt = Date.now();
       rt.state.lastRemotePollAt = Date.now();
-      await savePairState(rt.state);
+      await this.safeSaveState(rt.state);
     } catch (err: any) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
         this.setError(rt, "Session expired. Please log in again.");
       } else if (isRateLimitError(err)) {
@@ -540,7 +616,7 @@ export class SyncEngine extends EventEmitter {
     this.emitStatus();
 
     for (const action of actions) {
-      if (this.stopped) return;
+      if (this.stopped || rt.status === "paused") return;
       try {
         switch (action.type) {
           case "download-new": {
@@ -615,7 +691,7 @@ export class SyncEngine extends EventEmitter {
         // Save state periodically (not just at end of batch)
         opCount++;
         if (opCount % STATE_SAVE_INTERVAL === 0) {
-          await savePairState(rt.state);
+          await this.safeSaveState(rt.state);
         }
       } catch (err: any) {
         if (err.message === "SESSION_EXPIRED") throw err;
@@ -664,13 +740,42 @@ export class SyncEngine extends EventEmitter {
 
     try {
       await this.scanAndUpload(rt);
+
+      // If the pair was paused/stopped while we were scanning, don't
+      // overwrite its status or start the watcher — just bail out.
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") {
+        return;
+      }
+
+      // Batch-set sync flags for all uploaded files (instead of per-file API calls)
+      await this.flushSyncFlags();
+      // Now that the scan is done, start the watcher for ongoing changes.
+      // Deferred from startPair() to avoid double-walking the tree.
+      if (rt.watcher && !rt.watcher.isWatching()) {
+        rt.watcher.start();
+      }
       rt.status = "idle";
       rt.totalFilesInBatch = 0;
       rt.completedFilesInBatch = 0;
+      rt.totalBytesInBatch = 0;
+      rt.completedBytesInBatch = 0;
+      rt.batchStartedAt = 0;
+      rt.phase = null;
+      rt.scannedFiles = 0;
+      // Prune stale file errors older than 7 days to prevent unbounded growth
+      const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      for (const [path, err] of Object.entries(rt.state.fileErrors)) {
+        if (err.lastAttemptAt < weekAgo) delete rt.state.fileErrors[path];
+      }
+      rt.scannedFolders = 0;
       rt.state.lastFullSyncAt = Date.now();
-      await savePairState(rt.state);
+      await this.safeSaveState(rt.state);
       console.log("[sync] Initial scan complete:", pairId);
     } catch (err: any) {
+      // If paused/stopped during sync, don't set error state
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") {
+        return;
+      }
       console.error("[sync] Initial scan failed:", pairId, err.message);
       if (err.message === "SESSION_EXPIRED") {
         this.setError(rt, "Session expired. Please log in again.");
@@ -687,6 +792,12 @@ export class SyncEngine extends EventEmitter {
       if ((rt.status as SyncPairStatus) !== "rate-limited") {
         rt.totalFilesInBatch = 0;
         rt.completedFilesInBatch = 0;
+        rt.totalBytesInBatch = 0;
+        rt.completedBytesInBatch = 0;
+        rt.batchStartedAt = 0;
+        rt.phase = null;
+        rt.scannedFiles = 0;
+        rt.scannedFolders = 0;
       }
       rt.syncing = false;
       this.emitStatus();
@@ -696,15 +807,29 @@ export class SyncEngine extends EventEmitter {
   private async scanAndUpload(rt: PairRuntime): Promise<void> {
     const { pair, state } = rt;
 
-    const toUpload: { absPath: string; relPath: string; isNew: boolean }[] = [];
-    let opCount = 0;
+    // Phase 1: Walk the tree and collect files + new directories.
+    // No API calls here — just filesystem reads. Yields to the event loop
+    // every YIELD_INTERVAL entries to prevent blocking UI/IPC.
+    const YIELD_INTERVAL = 200;
+    const STAT_BATCH_SIZE = 50;
+    const toUpload: { absPath: string; relPath: string; isNew: boolean; sizeBytes: number }[] = [];
+    const newFolders: string[] = [];
+    let walkCount = 0;
+
+    // ── Scanning phase: walk the tree, report discovered counts to the UI ──
+    rt.phase = "scanning";
+    rt.scannedFiles = 0;
+    rt.scannedFolders = 0;
+    this.emitStatus();
 
     const walk = async (dir: string): Promise<void> => {
+      if (this.stopped || rt.status === "paused") return;
       let entries;
       try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
 
+      const fileEntries: { absPath: string; relPath: string }[] = [];
+
       for (const entry of entries) {
-        // FIX: Use shared ignore filter (matches watcher patterns)
         if (shouldIgnoreEntry(entry.name, entry.isDirectory(), pair.excludedPatterns)) continue;
 
         const absPath = join(dir, entry.name);
@@ -712,81 +837,191 @@ export class SyncEngine extends EventEmitter {
 
         if (entry.isDirectory()) {
           if (!state.folders[relPath]) {
-            await this.ensureRemoteFolder(rt, relPath);
+            newFolders.push(relPath);
+          }
+          rt.scannedFolders++;
+          if (++walkCount % YIELD_INTERVAL === 0) {
+            this.emitStatus(); // update UI with discovered count
+            await new Promise<void>(r => setImmediate(r));
           }
           await walk(absPath);
         } else if (entry.isFile()) {
-          const s = await stat(absPath).catch(() => null);
-          if (!s) continue;
+          fileEntries.push({ absPath, relPath });
+        }
+      }
 
-          // FIX: Use pathIndex for O(1) lookup instead of O(n) find
+      for (let i = 0; i < fileEntries.length; i += STAT_BATCH_SIZE) {
+        const batch = fileEntries.slice(i, i + STAT_BATCH_SIZE);
+        const stats = await Promise.all(
+          batch.map(f => stat(f.absPath).catch(() => null)),
+        );
+        for (let j = 0; j < batch.length; j++) {
+          const s = stats[j];
+          if (!s) continue;
+          const { relPath, absPath } = batch[j];
+          rt.scannedFiles++;
           const existing = this.lookupByPath(rt, relPath);
           if (!existing) {
-            toUpload.push({ absPath, relPath, isNew: true });
+            toUpload.push({ absPath, relPath, isNew: true, sizeBytes: s.size });
           } else if (s.mtimeMs !== existing.record.localMtimeMs || s.size !== existing.record.localSizeBytes) {
-            toUpload.push({ absPath, relPath, isNew: false });
+            toUpload.push({ absPath, relPath, isNew: false, sizeBytes: s.size });
           }
+        }
+        // Yield between stat batches
+        if (++walkCount % YIELD_INTERVAL === 0) {
+          await new Promise<void>(r => setImmediate(r));
         }
       }
     };
 
     await walk(pair.localPath);
 
-    // Track batch progress for UI
-    rt.totalFilesInBatch = toUpload.length;
-    rt.completedFilesInBatch = 0;
-    this.emitStatus();
+    // Phase 2: Create remote folders via batch API.
+    // One HTTP request per batch of 500 folders (API limit), sorted by depth
+    // so parents are created before children within each request.
+    // For 29K folders: ~58 requests instead of 29K individual calls.
+    newFolders.sort((a, b) => a.split("/").length - b.split("/").length);
+    const FOLDER_BATCH_SIZE = 500;
 
-    // Upload files
-    for (const file of toUpload) {
-      // Bail out immediately if engine was stopped (e.g. user logged out)
-      if (this.stopped) return;
+    for (let i = 0; i < newFolders.length; i += FOLDER_BATCH_SIZE) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
-      // Skip files that have permanently failed
-      const fileError = state.fileErrors[file.relPath];
-      if (fileError && fileError.permanent) continue;
-      if (fileError && fileError.retryCount >= MAX_FILE_RETRIES) {
-        state.fileErrors[file.relPath].permanent = true;
-        console.error(`[sync] File permanently failed (${MAX_FILE_RETRIES} retries): ${file.relPath}`);
-        continue;
+      const chunk = newFolders.slice(i, i + FOLDER_BATCH_SIZE);
+
+      // Build the batch request: resolve parent IDs from already-created folders
+      const batchEntries: { name: string; parent_id: string | null }[] = [];
+      for (const relPath of chunk) {
+        const parts = relPath.split("/");
+        const folderName = parts[parts.length - 1];
+        const parentRelPath = parts.slice(0, -1).join("/");
+        const parentId = parentRelPath
+          ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
+          : pair.remoteFolderId;
+        batchEntries.push({ name: folderName, parent_id: parentId });
       }
 
       try {
-        await this.uploadLocalFile(rt, file.absPath, file.relPath);
-        // Clear any previous errors on success
-        delete state.fileErrors[file.relPath];
-        rt.completedFilesInBatch++;
-        this.emitStatus();
+        const resultMap = await this.client.createFoldersBatch(pair.workspaceId, batchEntries);
+
+        // Update local state with created folder IDs
+        for (let j = 0; j < chunk.length; j++) {
+          const relPath = chunk[j];
+          const entry = batchEntries[j];
+          const key = `${entry.parent_id ?? "null"}:${entry.name}`;
+          const folderId = resultMap.get(key);
+          if (folderId) {
+            state.folders[relPath] = {
+              remoteId: folderId,
+              remoteName: entry.name,
+              remoteParentId: entry.parent_id,
+              localPath: relPath,
+              syncedAt: Date.now(),
+            };
+          }
+        }
       } catch (err: any) {
         if (err.message === "SESSION_EXPIRED") throw err;
+        if (isRateLimitError(err)) throw err;
+        // Batch failed — fall back to individual creation for this chunk
+        console.error("[sync] Batch folder creation failed, falling back to individual:", err.message);
+        for (const relPath of chunk) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+          await this.ensureRemoteFolder(rt, relPath);
+        }
+      }
+    }
 
-        // CRITICAL FIX: Rate limiting affects all subsequent requests.
-        // Stop the loop immediately. Don't increment retryCount (it's not a file-specific error).
-        // Save state and let pauseForRateLimit schedule a delayed retry.
-        if (isRateLimitError(err)) {
-          const remaining = toUpload.length - toUpload.indexOf(file) - 1;
-          console.log(`[sync] Rate limited during batch upload. ${remaining} files remaining.`);
-          await savePairState(rt.state);
-          throw err; // propagate to runInitialScan which calls pauseForRateLimit
+    // ── Transferring phase: upload files (smallest first) ──
+    // Uploading small files first gives faster visible progress and quicker
+    // file-count completion. Large files are uploaded last when the bulk
+    // of the tree is already synced.
+    toUpload.sort((a, b) => a.sizeBytes - b.sizeBytes);
+
+    rt.phase = "transferring";
+    const totalBytes = toUpload.reduce((sum, f) => sum + f.sizeBytes, 0);
+    rt.totalFilesInBatch = toUpload.length;
+    rt.completedFilesInBatch = 0;
+    rt.totalBytesInBatch = totalBytes;
+    rt.completedBytesInBatch = 0;
+    rt.batchStartedAt = Date.now();
+    this.emitStatus();
+
+    let opCount = 0;
+    let rateLimitErr: Error | null = null;
+    let sessionExpiredErr: Error | null = null;
+
+    // Worker function: pulls files from the queue and uploads them.
+    // Multiple workers run concurrently (one per semaphore slot).
+    let fileIdx = 0;
+    const paused = () => rt.status === "paused";
+    const worker = async (): Promise<void> => {
+      while (fileIdx < toUpload.length) {
+        if (this.stopped || paused() || rateLimitErr || sessionExpiredErr) return;
+
+        const idx = fileIdx++;
+        const file = toUpload[idx];
+
+        // Skip files that have permanently failed
+        const fileError = state.fileErrors[file.relPath];
+        if (fileError && fileError.permanent) continue;
+        if (fileError && fileError.retryCount >= MAX_FILE_RETRIES) {
+          state.fileErrors[file.relPath].permanent = true;
+          continue;
         }
 
-        console.error(`[sync] upload failed for ${file.relPath}:`, err.message);
-        // Track per-file error
-        const existing = state.fileErrors[file.relPath];
-        state.fileErrors[file.relPath] = {
-          filePath: file.relPath,
-          error: err.message,
-          retryCount: (existing?.retryCount ?? 0) + 1,
-          lastAttemptAt: Date.now(),
-          permanent: err.message.includes("permission") || err.message.includes("EPERM") || err.message.includes("quota"),
-        };
-      }
+        try {
+          await this.uploadLocalFile(rt, file.absPath, file.relPath);
+          delete state.fileErrors[file.relPath];
+          rt.completedFilesInBatch++;
+          rt.completedBytesInBatch += file.sizeBytes;
+          this.emitStatus();
+        } catch (err: any) {
+          if (err.message === "SESSION_EXPIRED") {
+            sessionExpiredErr = err;
+            return;
+          }
+          if (isRateLimitError(err)) {
+            rateLimitErr = err;
+            const remaining = toUpload.length - idx - 1;
+            console.log(`[sync] Rate limited during batch upload. ${remaining} files remaining.`);
+            return;
+          }
+          console.error(`[sync] upload failed for ${file.relPath}:`, err.message);
+          const existing = state.fileErrors[file.relPath];
+          state.fileErrors[file.relPath] = {
+            filePath: file.relPath,
+            error: err.message,
+            retryCount: (existing?.retryCount ?? 0) + 1,
+            lastAttemptAt: Date.now(),
+            permanent: err.message.includes("permission") || err.message.includes("EPERM") || err.message.includes("quota"),
+          };
+        }
 
-      // Save state periodically
-      opCount++;
-      if (opCount % STATE_SAVE_INTERVAL === 0) {
-        await savePairState(rt.state);
+        // Save state periodically
+        if (++opCount % STATE_SAVE_INTERVAL === 0) {
+          await this.safeSaveState(rt.state);
+        }
       }
+    };
+
+    // Auto-scale concurrency for large batches. The user-configured value
+    // is the baseline, but for initial syncs with thousands of files we
+    // scale up so API round-trip latency doesn't bottleneck the sync.
+    // The server exempts desktop sync from rate limits, so this is safe.
+    const baseConcurrency = this.config?.maxConcurrentTransfers || 3;
+    const concurrency = toUpload.length > 1000 ? Math.max(baseConcurrency, 8)
+                       : toUpload.length > 100  ? Math.max(baseConcurrency, 5)
+                       : baseConcurrency;
+    this.transferSemaphore.updateMax(concurrency);
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    // Restore original concurrency after batch completes
+    this.transferSemaphore.updateMax(baseConcurrency);
+
+    // Propagate fatal errors after all workers finish
+    if (sessionExpiredErr) throw sessionExpiredErr;
+    if (rateLimitErr) {
+      await this.safeSaveState(rt.state);
+      throw rateLimitErr;
     }
   }
 
@@ -809,7 +1044,7 @@ export class SyncEngine extends EventEmitter {
 
     try {
       for (const event of events) {
-        if (this.stopped) break;
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
         const relPath = relative(rt.pair.localPath, event.path).split(sep).join("/");
         const fileName = relPath.split("/").pop()!;
 
@@ -885,19 +1120,22 @@ export class SyncEngine extends EventEmitter {
         // Save state periodically
         opCount++;
         if (opCount % STATE_SAVE_INTERVAL === 0) {
-          await savePairState(rt.state);
+          await this.safeSaveState(rt.state);
         }
       }
 
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+
       rt.status = "idle";
       rt.state.lastFullSyncAt = Date.now();
-      await savePairState(rt.state);
+      await this.safeSaveState(rt.state);
     } catch (err: any) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
         this.setError(rt, "Session expired. Please log in again.");
       } else if (isRateLimitError(err)) {
         this.pauseForRateLimit(rt, getRetryAfterMs(err));
-        return; // pauseForRateLimit sets syncing = false
+        return;
       } else {
         this.setError(rt, err.message);
       }
@@ -905,7 +1143,12 @@ export class SyncEngine extends EventEmitter {
       rt.syncing = false;
       this.emitStatus();
 
-      if (rt.queuedSync) {
+      // Don't re-trigger scan if paused, stopped, rate-limited, or in error
+      const canRescan = !this.stopped
+        && (rt.status as SyncPairStatus) !== "paused"
+        && (rt.status as SyncPairStatus) !== "rate-limited"
+        && (rt.status as SyncPairStatus) !== "error";
+      if (rt.queuedSync && canRescan) {
         rt.queuedSync = false;
         this.runInitialScan(pairId);
       }
@@ -949,7 +1192,7 @@ export class SyncEngine extends EventEmitter {
 
       // Download new/changed remote files
       for (const [remoteId, file] of snapshot.files) {
-        if (this.stopped) break;
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
         const folderId = file.folder_id;
         let relDir = "";
         if (folderId && folderId !== rt.pair.remoteFolderId) {
@@ -978,7 +1221,7 @@ export class SyncEngine extends EventEmitter {
 
         opCount++;
         if (opCount % STATE_SAVE_INTERVAL === 0) {
-          await savePairState(rt.state);
+          await this.safeSaveState(rt.state);
         }
       }
 
@@ -1018,16 +1261,19 @@ export class SyncEngine extends EventEmitter {
         }
       }
 
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+
       rt.status = "idle";
       rt.state.lastFullSyncAt = Date.now();
       rt.state.lastRemotePollAt = Date.now();
-      await savePairState(rt.state);
+      await this.safeSaveState(rt.state);
     } catch (err: any) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
         this.setError(rt, "Session expired. Please log in again.");
       } else if (isRateLimitError(err)) {
         this.pauseForRateLimit(rt, getRetryAfterMs(err));
-        return; // pauseForRateLimit sets syncing = false
+        return;
       } else {
         this.setError(rt, err.message);
       }
@@ -1058,20 +1304,23 @@ export class SyncEngine extends EventEmitter {
       bytesTransferred: 0,
       startedAt: Date.now(),
     };
-    this.activeTransfers.push(transfer);
+    this.activeTransfers.add(transfer);
     this.emitStatus();
 
     try {
-      // FIX: Download streams to temp file, verifies size, atomically renames.
-      // FIX: Progress is now updated via callback.
-      // FIX: Zero-byte files are allowed (expectedSize = 0 is valid).
+      let lastProgressEmit = 0;
       await this.client.downloadFile(
         file.id,
         absPath,
         file.size_bytes,
         (bytes) => {
           transfer.bytesTransferred = bytes;
-          this.emitStatus();
+          // Throttle progress updates to avoid flooding IPC on large files
+          const now = Date.now();
+          if (now - lastProgressEmit > 500) {
+            lastProgressEmit = now;
+            this.emitStatus();
+          }
         },
       );
 
@@ -1094,12 +1343,9 @@ export class SyncEngine extends EventEmitter {
       };
       rt.pathIndex.set(relPath, file.id);
 
-      // Clear any previous errors
       delete rt.state.fileErrors[relPath];
-
-      console.log(`[sync] Downloaded: ${relPath} (${file.size_bytes} bytes)`);
     } finally {
-      this.activeTransfers = this.activeTransfers.filter(t => t !== transfer);
+      this.activeTransfers.delete(transfer);
       this.transferSemaphore.release();
       this.emitStatus();
     }
@@ -1130,15 +1376,14 @@ export class SyncEngine extends EventEmitter {
       bytesTransferred: 0,
       startedAt: Date.now(),
     };
-    this.activeTransfers.push(transfer);
+    this.activeTransfers.add(transfer);
     this.emitStatus();
 
     try {
-      // FIX: Use pathIndex for O(1) lookup
       const existing = this.lookupByPath(rt, relPath);
       const existingFileId = existing?.remoteId ?? null;
 
-      // FIX: Progress is now updated via callback
+      let lastUploadEmit = 0;
       const result = await this.client.uploadFile(
         absPath,
         rt.pair.workspaceId,
@@ -1147,14 +1392,17 @@ export class SyncEngine extends EventEmitter {
         existingFileId,
         (bytes) => {
           transfer.bytesTransferred = bytes;
-          this.emitStatus();
+          const now = Date.now();
+          if (now - lastUploadEmit > 500) {
+            lastUploadEmit = now;
+            this.emitStatus();
+          }
         },
       );
 
       // Re-stat after upload to get the actual mtime (file may have been modified during upload)
       const postStat = await stat(absPath).catch(() => s);
 
-      // Track in state
       const version = existing ? existing.record.remoteVersion + 1 : 1;
 
       // Clean up old entry if fileId changed
@@ -1176,27 +1424,36 @@ export class SyncEngine extends EventEmitter {
       };
       rt.pathIndex.set(relPath, result.fileId);
 
-      // Mark file as synced on server (skip if engine stopped, e.g. logout)
-      if (!this.stopped) {
-        try {
-          await this.client.setFileSyncFlag(result.fileId, true);
-        } catch (e: any) {
-          console.error(`[sync] Failed to set file sync flag: ${e.message}`);
-        }
+      // Collect file ID for batched sync-flag call (done at end of scan, not per-file).
+      // For individual watcher events, set the flag inline.
+      if (rt.totalFilesInBatch > 0) {
+        this.pendingSyncFlagIds.push(result.fileId);
+      } else if (!this.stopped) {
+        this.client.setFileSyncFlag(result.fileId, true).catch(() => {});
       }
 
-      // Clear any previous errors
       delete rt.state.fileErrors[relPath];
-
-      if (existingFileId) {
-        console.log(`[sync] Updated (v${version}): ${relPath} (${postStat.size} bytes)`);
-      } else {
-        console.log(`[sync] Uploaded: ${relPath} (${postStat.size} bytes)`);
-      }
     } finally {
-      this.activeTransfers = this.activeTransfers.filter(t => t !== transfer);
+      this.activeTransfers.delete(transfer);
       this.transferSemaphore.release();
       this.emitStatus();
+    }
+  }
+
+  /**
+   * Flush accumulated sync-flag IDs in one batched burst.
+   * Called at the end of scan/reconcile instead of after every file upload.
+   */
+  private async flushSyncFlags(): Promise<void> {
+    if (this.pendingSyncFlagIds.length === 0 || this.stopped) return;
+    const ids = this.pendingSyncFlagIds.splice(0);
+    console.log(`[sync] Setting sync flag on ${ids.length} files`);
+    try {
+      await this.client.batchSetFileSyncFlags(ids, true);
+    } catch (err: any) {
+      if (err.message !== "SESSION_EXPIRED") {
+        console.error("[sync] Batch sync-flag failed:", err.message);
+      }
     }
   }
 
@@ -1278,12 +1535,18 @@ export class SyncEngine extends EventEmitter {
         filesInQueue: 0,
         totalFilesInBatch: rt.totalFilesInBatch,
         completedFilesInBatch: rt.completedFilesInBatch,
+        totalBytesInBatch: rt.totalBytesInBatch,
+        completedBytesInBatch: rt.completedBytesInBatch,
+        batchStartedAt: rt.batchStartedAt,
+        phase: rt.phase,
+        scannedFiles: rt.scannedFiles,
+        scannedFolders: rt.scannedFolders,
       });
     }
     return {
       pairs,
       globalPaused: this.config?.pausedGlobally ?? false,
-      activeTransfers: this.activeTransfers,
+      activeTransfers: [...this.activeTransfers],
       unresolvedConflicts: this.conflicts,
     };
   }
@@ -1355,11 +1618,20 @@ export class SyncEngine extends EventEmitter {
         clearTimeout(rt.rateLimitResumeTimer);
         rt.rateLimitResumeTimer = null;
       }
+      // Set paused FIRST — in-flight workers check this and bail out.
       rt.status = "paused";
       rt.errorMessage = null;
       rt.syncing = false;
       rt.totalFilesInBatch = 0;
       rt.completedFilesInBatch = 0;
+      rt.totalBytesInBatch = 0;
+      rt.completedBytesInBatch = 0;
+      rt.batchStartedAt = 0;
+      rt.phase = null;
+      rt.scannedFiles = 0;
+      rt.scannedFolders = 0;
+      // Save state so already-uploaded files aren't re-uploaded on resume.
+      await this.safeSaveState(rt.state);
       this.emitStatus();
     }
   }
@@ -1371,6 +1643,8 @@ export class SyncEngine extends EventEmitter {
         clearTimeout(rt.rateLimitResumeTimer);
         rt.rateLimitResumeTimer = null;
       }
+      // Rebuild path index from persisted state in case it drifted during pause
+      this.rebuildPathIndex(rt);
       rt.watcher?.start();
       rt.poller?.start();
       rt.status = "idle";
@@ -1406,7 +1680,7 @@ export class SyncEngine extends EventEmitter {
     }
   }
 
-  resolveConflict(conflictId: string, resolution: "keep-local" | "keep-remote" | "keep-both"): void {
+  async resolveConflict(conflictId: string, resolution: "keep-local" | "keep-remote" | "keep-both"): Promise<void> {
     const idx = this.conflicts.findIndex(c => c.id === conflictId);
     if (idx === -1) return;
 
@@ -1418,46 +1692,44 @@ export class SyncEngine extends EventEmitter {
       return;
     }
 
-    // Schedule resolution asynchronously
-    (async () => {
-      try {
-        if (resolution === "keep-local") {
-          // Upload local version, overwriting remote
-          const relPath = relative(rt.pair.localPath, conflict.localPath).split(sep).join("/");
-          await this.uploadLocalFile(rt, conflict.localPath, relPath);
-        } else if (resolution === "keep-remote") {
-          // Download remote version, overwriting local
-          const relPath = relative(rt.pair.localPath, conflict.localPath).split(sep).join("/");
-          const remoteFile = rt.state.files[conflict.remoteId];
-          if (remoteFile) {
-            // Re-fetch file info is not available here; use stored info to trigger download
-            // The next reconcile cycle will handle the actual download
-          }
-        } else if (resolution === "keep-both") {
-          // Rename local file with conflict suffix, then download remote version
-          const ext = conflict.localPath.includes(".") ? conflict.localPath.substring(conflict.localPath.lastIndexOf(".")) : "";
-          const base = conflict.localPath.substring(0, conflict.localPath.length - ext.length);
-          const dateStr = new Date().toISOString().slice(0, 10);
-          const conflictPath = `${base} (conflict ${dateStr})${ext}`;
+    // Remove from list immediately to prevent double-resolution
+    this.conflicts.splice(idx, 1);
+    this.emitStatus();
 
-          // Rename existing local file
-          const { rename: fsRename } = await import("fs/promises");
-          await fsRename(conflict.localPath, conflictPath);
-
-          // Upload the conflict copy
-          const conflictRelPath = relative(rt.pair.localPath, conflictPath).split(sep).join("/");
-          await this.uploadLocalFile(rt, conflictPath, conflictRelPath);
+    // Resolve asynchronously — awaited so IPC handler propagates errors
+    try {
+      if (resolution === "keep-local") {
+        const relPath = relative(rt.pair.localPath, conflict.localPath).split(sep).join("/");
+        await this.uploadLocalFile(rt, conflict.localPath, relPath);
+      } else if (resolution === "keep-remote") {
+        // Trigger a reconcile to download the remote version on the next poll cycle.
+        // We don't have the full RemoteFileInfo here, so let the poller handle it.
+        const existing = rt.state.files[conflict.remoteId];
+        if (existing) {
+          delete rt.state.files[conflict.remoteId];
+          rt.pathIndex.delete(existing.localPath);
         }
+      } else if (resolution === "keep-both") {
+        const ext = conflict.localPath.includes(".") ? conflict.localPath.substring(conflict.localPath.lastIndexOf(".")) : "";
+        const base = conflict.localPath.substring(0, conflict.localPath.length - ext.length);
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const conflictPath = `${base} (conflict ${dateStr})${ext}`;
 
-        // Remove resolved conflict
-        this.conflicts.splice(idx, 1);
-        await savePairState(rt.state);
-        this.emitStatus();
-        console.log(`[sync] Conflict resolved (${resolution}): ${conflict.remoteName}`);
-      } catch (err: any) {
-        console.error(`[sync] Failed to resolve conflict: ${err.message}`);
+        const { rename: fsRename } = await import("fs/promises");
+        await fsRename(conflict.localPath, conflictPath);
+
+        const conflictRelPath = relative(rt.pair.localPath, conflictPath).split(sep).join("/");
+        await this.uploadLocalFile(rt, conflictPath, conflictRelPath);
       }
-    })();
+
+      await this.safeSaveState(rt.state);
+      console.log(`[sync] Conflict resolved (${resolution}): ${conflict.remoteName}`);
+    } catch (err: any) {
+      console.error(`[sync] Failed to resolve conflict: ${err.message}`);
+      // Re-add conflict if resolution failed so user can retry
+      this.conflicts.push(conflict);
+      this.emitStatus();
+    }
   }
 
   getConflicts(): SyncConflict[] {
@@ -1473,6 +1745,24 @@ export class SyncEngine extends EventEmitter {
   }
 
   private emitStatus(): void {
+    // Guard: don't emit after engine is torn down (listeners may be gone)
+    if (!this.started && this.runtimes.size === 0) return;
+
+    // Throttle: during large batch operations (scans, reconciles), status
+    // events fire on every file. Coalesce them into at most one emission
+    // per 500ms to avoid flooding IPC and burning CPU on serialization.
+    if (this.statusTimer) {
+      this.statusDirty = true;
+      return;
+    }
     this.emit("status-changed", this.getStatus());
+    this.statusTimer = setTimeout(() => {
+      this.statusTimer = null;
+      if (this.statusDirty) {
+        this.statusDirty = false;
+        if (!this.started && this.runtimes.size === 0) return;
+        this.emit("status-changed", this.getStatus());
+      }
+    }, 500);
   }
 }

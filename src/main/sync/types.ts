@@ -153,6 +153,18 @@ export interface SyncPairRuntimeStatus {
   totalFilesInBatch: number;
   /** Files completed so far in the current batch. */
   completedFilesInBatch: number;
+  /** Total bytes across all files in the current batch. */
+  totalBytesInBatch: number;
+  /** Bytes completed so far in the current batch. */
+  completedBytesInBatch: number;
+  /** Timestamp when the current batch started (for ETA calculation). */
+  batchStartedAt: number;
+  /** "scanning" while walking the tree, "transferring" during uploads, null when idle. */
+  phase: "scanning" | "transferring" | null;
+  /** Number of files discovered so far during the scan walk. */
+  scannedFiles: number;
+  /** Number of folders discovered so far during the scan walk. */
+  scannedFolders: number;
 }
 
 // ── Remote Data Shapes ──────────────────────────────────────────────

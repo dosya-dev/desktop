@@ -13,6 +13,12 @@ export interface SyncPairRuntimeStatus {
   filesInQueue: number;
   totalFilesInBatch: number;
   completedFilesInBatch: number;
+  totalBytesInBatch: number;
+  completedBytesInBatch: number;
+  batchStartedAt: number;
+  phase: "scanning" | "transferring" | null;
+  scannedFiles: number;
+  scannedFolders: number;
 }
 
 export interface ActiveTransfer {

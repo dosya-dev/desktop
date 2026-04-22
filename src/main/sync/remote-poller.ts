@@ -112,15 +112,26 @@ export class RemotePoller extends EventEmitter {
   }
 
   private hashSnapshot(snapshot: RemoteSnapshot): string {
-    // Quick hash: concatenate file ids + updated_at timestamps
-    const parts: string[] = [];
+    // FNV-1a-inspired numeric hash — O(n) with no string allocation or sorting.
+    // Previous approach concatenated all IDs into a multi-MB string and sorted it.
+    let h = 2166136261;
     for (const [id, f] of snapshot.files) {
-      parts.push(`${id}:${f.updated_at}:${f.size_bytes}`);
+      for (let i = 0; i < id.length; i++) h = (h ^ id.charCodeAt(i)) * 16777619;
+      h = (h ^ f.updated_at) * 16777619;
+      h = (h ^ f.size_bytes) * 16777619;
     }
     for (const [id, f] of snapshot.folders) {
-      parts.push(`d:${id}:${f.name}`);
+      for (let i = 0; i < id.length; i++) h = (h ^ id.charCodeAt(i)) * 16777619;
+      for (let i = 0; i < f.name.length; i++) h = (h ^ f.name.charCodeAt(i)) * 16777619;
+      // Include parent_id so folder moves are detected
+      if (f.parent_id) {
+        for (let i = 0; i < f.parent_id.length; i++) h = (h ^ f.parent_id.charCodeAt(i)) * 16777619;
+      }
     }
-    return parts.sort().join("|");
+    // Include counts to catch additions/deletions
+    h = (h ^ snapshot.files.size) * 16777619;
+    h = (h ^ snapshot.folders.size) * 16777619;
+    return String(h >>> 0);
   }
 
   private async fetchSnapshot(): Promise<RemoteSnapshot> {
