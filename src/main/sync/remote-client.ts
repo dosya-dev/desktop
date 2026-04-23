@@ -548,7 +548,11 @@ export class RemoteClient {
       let transferred = bytesAlreadyDone;
       onProgress?.(transferred);
 
-      // Upload each part with per-part retry
+      // Upload each part by streaming from disk — no buffering the entire
+      // part in memory. For a 1.5GB file with 10MB parts, the old approach
+      // buffered each part as a Buffer (~10MB), passed it through fetch()
+      // which copied it again (~20MB), and GC didn't always free the previous
+      // part before the next one allocated. Result: 1.9GB RAM for a 1.5GB file.
       for (let partNum = 1; partNum <= totalParts; partNum++) {
         if (uploadedParts.has(partNum)) continue;
 
@@ -556,20 +560,20 @@ export class RemoteClient {
         const end = Math.min(start + partSize, fileStat.size);
         const chunkSize = end - start;
 
-        const partData = await this.readFilePart(localPath, start, chunkSize);
-
         let lastErr: Error | null = null;
         for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
           try {
-            const partRes = await this.fetch(
+            const cookie = await this.getSessionCookie();
+            if (!cookie) throw new Error("SESSION_EXPIRED");
+
+            const partResult = await this.streamPartUpload(
               `/api/upload/${sessionId}/part/${partNum}`,
-              { method: "PUT", body: partData },
+              localPath,
+              start,
+              chunkSize,
+              cookie,
             );
-            if (partRes.status === 401) throw new Error("SESSION_EXPIRED");
-            if (partRes.status === 429) {
-              throw this.createRateLimitError(partRes.headers);
-            }
-            const partResult = await partRes.json();
+
             if (!partResult.ok) throw new Error(partResult.error || `Part ${partNum} failed`);
             lastErr = null;
             break;
@@ -629,20 +633,66 @@ export class RemoteClient {
     return { fileId: putData.file?.id ?? sessionId, name: fileName };
   }
 
-  /** Read a specific byte range from a file without loading the whole file. */
-  private readFilePart(filePath: string, start: number, length: number): Promise<Buffer> {
+  /**
+   * Stream a file part directly from disk to the server via HTTP PUT.
+   * No buffering — bytes flow: disk → stream → TCP socket.
+   * Memory usage is ~64KB (Node.js stream highWaterMark) regardless of part size.
+   */
+  private streamPartUpload(
+    path: string,
+    filePath: string,
+    start: number,
+    length: number,
+    cookie: string,
+  ): Promise<{ ok: boolean; error?: string }> {
     return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
+      const fullUrl = `${this.apiBase}${path}`;
+      const parsed = new URL(fullUrl);
+      const lib = parsed.protocol === "https:" ? https : http;
+
+      const req = lib.request(fullUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(length),
+          Cookie: `dosya_session=${cookie}`,
+          "X-Dosya-Sync": "1",
+        },
+        timeout: 300_000,
+        agent: agentFor(fullUrl),
+      }, (res) => {
+        this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
+
+        if (res.statusCode === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
+        if (res.statusCode === 429) {
+          res.resume();
+          reject(new RateLimitError(this.parseRetryAfter(res.headers as Record<string, string | string[] | undefined>)));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8");
+          try { resolve(JSON.parse(body)); }
+          catch { resolve({ ok: false, error: "Invalid JSON response" }); }
+        });
+        res.on("error", reject);
+      });
+
+      req.on("timeout", () => { req.destroy(); reject(new Error("Upload timed out")); });
+      req.on("error", reject);
+
+      // Stream the byte range directly from disk — no intermediate Buffer
       const stream = createReadStream(filePath, { start, end: start + length - 1 });
-      stream.on("data", (chunk: string | Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      stream.on("end", () => resolve(Buffer.concat(chunks)));
-      stream.on("error", reject);
+      stream.on("error", (err) => { req.destroy(); reject(err); });
+      stream.pipe(req);
     });
   }
 
   /** Batch size threshold: files smaller than this can be batched. */
-  static readonly BATCH_FILE_MAX = 1 * 1024 * 1024; // 1 MB
-  static readonly BATCH_MAX_FILES = 50;
+  static readonly BATCH_FILE_MAX = 5 * 1024 * 1024; // 5 MB
+  static readonly BATCH_MAX_FILES = 200;
 
   /**
    * Upload multiple small files in a single HTTP request.
@@ -802,6 +852,158 @@ export class RemoteClient {
 
       stream.pipe(req);
     });
+  }
+
+  // ── Public API ────────────────────────────────────────────────────
+
+  /**
+   * Fetch workspace snapshot via paginated endpoint.
+   * Handles pagination automatically — fetches all pages until hasMore=false.
+   * Supports delta polling via `since` (unix timestamp) — only returns changed files.
+   *
+   * For 1M files: fetches in pages of 5000 (200 requests instead of 1M).
+   * For delta polls: typically 1 request (only changed files since last poll).
+   */
+  async fetchSnapshotFast(
+    workspaceId: string,
+    rootFolderId: string | null,
+    since?: number,
+  ): Promise<{ files: RemoteFileInfo[]; folders: RemoteFolderInfo[] } | null> {
+    try {
+      const files: RemoteFileInfo[] = [];
+      let folders: RemoteFolderInfo[] = [];
+      let cursor: string | null = null;
+      let page = 0;
+
+      while (true) {
+        const params = new URLSearchParams({ workspace_id: workspaceId });
+        if (rootFolderId) params.set("folder_id", rootFolderId);
+        if (cursor) params.set("cursor", cursor);
+        if (since) params.set("since", String(since));
+
+        const res = await this.fetch(`/api/sync/snapshot?${params}`);
+        if (res.status === 401) throw new Error("SESSION_EXPIRED");
+        if (res.status !== 200) return null;
+
+        const data = await res.json();
+        if (!data.ok) return null;
+
+        // Folders only come in the first page
+        if (page === 0 && data.folders) {
+          folders = data.folders;
+        }
+
+        for (const f of data.files ?? []) {
+          files.push(f);
+        }
+
+        if (!data.hasMore) break;
+        cursor = data.nextCursor;
+        page++;
+      }
+
+      return { files, folders };
+    } catch (err: any) {
+      if (err.message === "SESSION_EXPIRED") throw err;
+      return null;
+    }
+  }
+
+  /** Fetch the current user's ID from /api/me. Returns null if not authenticated. */
+  async getCurrentUserId(): Promise<string | null> {
+    try {
+      const res = await this.fetch("/api/me");
+      if (res.status !== 200) return null;
+      const data = await res.json();
+      return data.user?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Presigned URL upload flow (fastest path) ──────────────────────
+
+  /**
+   * Request presigned PUT URLs for files that need uploading.
+   * The server diffs against existing files and returns URLs only for missing ones.
+   */
+  async requestManifest(
+    workspaceId: string,
+    folderId: string | null,
+    region: string,
+    files: { relPath: string; name: string; size: number; folder_id: string | null }[],
+  ): Promise<{
+    uploads: { relPath: string; fileId: string; r2Key: string; name: string; url: string; size: number; folderId: string | null; contentType: string; ext: string | null }[];
+    skipped: number;
+  }> {
+    const res = await this.fetch("/api/sync/manifest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspaceId, folder_id: folderId, region, files }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Manifest request failed");
+    return { uploads: data.uploads ?? [], skipped: data.skipped ?? 0 };
+  }
+
+  /**
+   * Upload a file directly to R2 via presigned URL (bypasses the Worker).
+   * Uses Node.js https.request for streaming from disk.
+   */
+  async uploadToPresignedUrl(
+    presignedUrl: string,
+    filePath: string,
+    fileSize: number,
+    contentType: string,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(presignedUrl);
+      const lib = parsed.protocol === "https:" ? https : http;
+
+      const req = lib.request(presignedUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": String(fileSize),
+        },
+        timeout: 300_000,
+        agent: agentFor(presignedUrl),
+      }, (res) => {
+        res.resume();
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          resolve();
+        } else {
+          reject(new Error(`Presigned upload failed: HTTP ${res.statusCode}`));
+        }
+      });
+
+      req.on("timeout", () => { req.destroy(); reject(new Error("Upload timed out")); });
+      req.on("error", reject);
+
+      const stream = createReadStream(filePath);
+      stream.on("error", (err) => { req.destroy(); reject(err); });
+      stream.pipe(req);
+    });
+  }
+
+  /**
+   * Commit uploaded files to the database.
+   */
+  async commitUploads(
+    workspaceId: string,
+    region: string,
+    files: { file_id: string; r2_key: string; name: string; size: number; folder_id: string | null; content_type: string; ext: string | null }[],
+  ): Promise<{ committed: number }> {
+    const res = await this.fetch("/api/sync/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspaceId, region, files }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Commit failed");
+    return { committed: data.committed ?? 0 };
   }
 
   // ── Public API ────────────────────────────────────────────────────

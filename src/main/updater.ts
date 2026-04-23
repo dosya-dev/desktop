@@ -44,6 +44,13 @@ export async function initAutoUpdater(): Promise<void> {
   try {
     const { autoUpdater } = await import("electron-updater");
 
+    // Use dosya.dev's own update feed instead of GitHub Releases.
+    // Builds are uploaded to R2 and served via /api/desktop/latest.
+    autoUpdater.setFeedURL({
+      provider: "generic",
+      url: "https://dosya.dev/api/desktop",
+    });
+
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
 

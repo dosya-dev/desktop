@@ -36,6 +36,8 @@ export interface SyncConfig {
   globalPollIntervalMs: number;
   pausedGlobally: boolean;
   maxConcurrentTransfers: number;
+  /** User ID that owns this sync config. Used to detect account switches. */
+  userId?: string;
 }
 
 export const DEFAULT_SYNC_CONFIG: SyncConfig = {
@@ -58,6 +60,8 @@ export interface SyncFileRecord {
   localSizeBytes: number;
   localMtimeMs: number;
   syncedAt: number;
+  /** MD5 hash of file content. Used to detect actual changes vs mtime-only changes. */
+  contentHash?: string;
 }
 
 export interface SyncFolderRecord {
@@ -131,11 +135,18 @@ export interface SyncConflict {
   detectedAt: number;
 }
 
+export interface SyncLogEntry {
+  timestamp: number;
+  pairId: string;
+  message: string;
+}
+
 export interface SyncStatus {
   pairs: SyncPairRuntimeStatus[];
   globalPaused: boolean;
   activeTransfers: ActiveTransfer[];
   unresolvedConflicts: SyncConflict[];
+  recentLogs: SyncLogEntry[];
 }
 
 export interface SyncPairRuntimeStatus {
@@ -165,6 +176,8 @@ export interface SyncPairRuntimeStatus {
   scannedFiles: number;
   /** Number of folders discovered so far during the scan walk. */
   scannedFolders: number;
+  /** Human-readable status text describing what the engine is doing right now. */
+  statusText: string;
 }
 
 // ── Remote Data Shapes ──────────────────────────────────────────────

@@ -19,6 +19,7 @@ export interface SyncPairRuntimeStatus {
   phase: "scanning" | "transferring" | null;
   scannedFiles: number;
   scannedFolders: number;
+  statusText: string;
 }
 
 export interface ActiveTransfer {
@@ -42,11 +43,18 @@ export interface SyncConflict {
   detectedAt: number;
 }
 
+export interface SyncLogEntry {
+  timestamp: number;
+  pairId: string;
+  message: string;
+}
+
 export interface SyncStatus {
   pairs: SyncPairRuntimeStatus[];
   globalPaused: boolean;
   activeTransfers: ActiveTransfer[];
   unresolvedConflicts: SyncConflict[];
+  recentLogs: SyncLogEntry[];
 }
 
 interface SyncStore {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   RefreshCw,
@@ -25,14 +25,14 @@ import {
   ShieldCheck,
   HardDriveDownload,
 } from "lucide-react";
-import { useSyncStore, type SyncPairRuntimeStatus, type SyncConflict } from "@/lib/sync-store";
+import { useSyncStore, type SyncPairRuntimeStatus, type SyncConflict, type SyncLogEntry } from "@/lib/sync-store";
 import { useWorkspace } from "@/lib/workspace-context";
 import { api } from "@/lib/api-client";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { FolderIcon, syncIconSrc } from "@/components/files/FileIcon";
 import { toast } from "sonner";
 
-type Tab = "overview" | "conflicts" | "settings";
+type Tab = "overview" | "conflicts" | "activity" | "settings";
 
 const SYNC_MODES = [
   { id: "two-way", label: "Full Sync", desc: "Mirror every action in both directions. Changes on either side are reflected everywhere." },
@@ -128,8 +128,11 @@ export function SyncPage() {
       speed = `${formatBytes(bps)}/s`;
     }
 
-    // Check if any pair is still in scanning phase (walking tree, no uploads yet)
-    const scanning = syncing.some(p => p.phase === "scanning");
+    // Check if any pair is in a preparatory phase (connecting, comparing, scanning, hashing, creating folders).
+    // Show the indeterminate scanning banner for all of these — not just phase === "scanning".
+    const hasStatusText = syncing.some(p => p.statusText);
+    const isTransferring = syncing.some(p => p.phase === "transferring");
+    const scanning = !isTransferring && (syncing.some(p => p.phase === "scanning") || hasStatusText);
     const scannedFiles = syncing.reduce((s, p) => s + (p.scannedFiles || 0), 0);
     const scannedFolders = syncing.reduce((s, p) => s + (p.scannedFolders || 0), 0);
 
@@ -146,6 +149,7 @@ export function SyncPage() {
       scanning,
       scannedFiles,
       scannedFolders,
+      statusText: syncing.map(p => p.statusText).find(t => t) || "",
     };
   }, [pairs, transfers]);
 
@@ -160,12 +164,14 @@ export function SyncPage() {
               <div className="flex items-center gap-2 mb-2">
                 <Loader2 size={16} className="animate-spin text-[var(--color-primary)]" />
                 <span className="text-sm font-semibold">
-                  Scanning folder{syncProgress.pairCount > 1 ? "s" : ""}...
+                  {syncProgress.statusText || `Scanning folder${syncProgress.pairCount > 1 ? "s" : ""}...`}
                 </span>
-                <span className="text-xs text-[var(--color-text-secondary)]">
-                  {syncProgress.scannedFiles.toLocaleString()} file{syncProgress.scannedFiles !== 1 ? "s" : ""}
-                  {syncProgress.scannedFolders > 0 ? `, ${syncProgress.scannedFolders.toLocaleString()} folder${syncProgress.scannedFolders !== 1 ? "s" : ""} found` : " found"}
-                </span>
+                {syncProgress.scannedFiles > 0 && (
+                  <span className="text-xs text-[var(--color-text-secondary)]">
+                    {syncProgress.scannedFiles.toLocaleString()} file{syncProgress.scannedFiles !== 1 ? "s" : ""}
+                    {syncProgress.scannedFolders > 0 ? `, ${syncProgress.scannedFolders.toLocaleString()} folder${syncProgress.scannedFolders !== 1 ? "s" : ""} found` : " found"}
+                  </span>
+                )}
               </div>
               <div className="h-2 w-full rounded-full bg-[var(--color-border)] overflow-hidden">
                 <div
@@ -179,7 +185,7 @@ export function SyncPage() {
               <style>{`@keyframes indeterminate { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }`}</style>
             </>
           ) : (
-            /* ── Transferring phase: real progress bar with ETA ── */
+            /* ── Transferring phase: real progress bar with ETA + active files ── */
             <>
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
@@ -207,6 +213,38 @@ export function SyncPage() {
                 <p className="mt-1.5 text-[11px] text-[var(--color-text-muted)]">
                   {formatBytes(syncProgress.completedBytes)} of {formatBytes(syncProgress.totalBytes)}
                 </p>
+              )}
+              {/* Active transfers — show what's currently uploading/downloading */}
+              {transfers.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {transfers.slice(0, 5).map((t, i) => {
+                    const pct = t.bytesTotal > 0 ? Math.round((t.bytesTransferred / t.bytesTotal) * 100) : 0;
+                    return (
+                      <div key={i} className="flex items-center gap-2 text-[11px]">
+                        {t.direction === "upload" ? (
+                          <Upload size={10} className="shrink-0 text-[var(--color-primary)]" />
+                        ) : (
+                          <Download size={10} className="shrink-0 text-[var(--color-primary)]" />
+                        )}
+                        <span className="truncate text-[var(--color-text-secondary)] max-w-[200px]">{t.fileName}</span>
+                        <span className="ml-auto shrink-0 text-[var(--color-text-muted)]">
+                          {formatBytes(t.bytesTransferred)} / {formatBytes(t.bytesTotal)}
+                        </span>
+                        <div className="w-16 h-1 rounded-full bg-[var(--color-border)] shrink-0">
+                          <div
+                            className="h-1 rounded-full transition-all duration-300"
+                            style={{ width: `${Math.max(pct, 2)}%`, background: "var(--color-primary)" }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {transfers.length > 5 && (
+                    <p className="text-[10px] text-[var(--color-text-muted)]">
+                      +{transfers.length - 5} more transferring...
+                    </p>
+                  )}
+                </div>
               )}
             </>
           )}
@@ -277,6 +315,7 @@ export function SyncPage() {
         {([
           { id: "overview" as Tab, label: "Overview" },
           { id: "conflicts" as Tab, label: "Issues", count: wsConflicts.length + pairs.filter((p) => p.status === "error").length },
+          { id: "activity" as Tab, label: "Activity" },
           { id: "settings" as Tab, label: "Settings" },
         ]).map((t) => (
           <button
@@ -395,6 +434,8 @@ export function SyncPage() {
           </div>
         );
       })()}
+
+      {tab === "activity" && <SyncActivityLog logs={status?.recentLogs ?? []} pairs={allPairs} />}
 
       {tab === "settings" && <SyncSettings />}
 
@@ -758,6 +799,59 @@ function ConflictCard({ conflict, onResolve }: { conflict: SyncConflict; onResol
           Keep both
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── SyncSettings ────────────────────────────────────────────────────
+
+// ── SyncActivityLog ────────────────────────────────────────────────
+
+function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPairRuntimeStatus[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when new logs arrive
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [logs.length]);
+
+  const pairNameMap = new Map(pairs.map(p => [p.pairId, p.remoteFolderName]));
+
+  if (logs.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
+        <Clock size={32} className="mb-2 text-[var(--color-text-muted)]" />
+        <p className="text-sm text-[var(--color-text-muted)]">No sync activity yet</p>
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">Activity will appear here when syncing starts</p>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={scrollRef}
+      className="max-h-[500px] overflow-y-auto rounded-xl border font-mono text-xs"
+      style={{ borderColor: "var(--color-border)" }}
+    >
+      {logs.map((log, i) => {
+        const time = new Date(log.timestamp);
+        const timeStr = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const pairName = pairNameMap.get(log.pairId) || log.pairId.slice(0, 8);
+
+        return (
+          <div
+            key={i}
+            className="flex gap-3 border-b px-3 py-1.5 hover:bg-[var(--color-bg-secondary)]"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <span className="shrink-0 text-[var(--color-text-muted)]">{timeStr}</span>
+            <span className="shrink-0 text-[var(--color-primary)] max-w-[100px] truncate">{pairName}</span>
+            <span className="text-[var(--color-text-secondary)]">{log.message}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { RemoteClient, RateLimitError } from "./remote-client";
 import { LocalWatcher, type WatchEvent, shouldIgnoreEntry } from "./local-watcher";
 import { RemotePoller, type RemoteSnapshot } from "./remote-poller";
 import { reconcile } from "./reconciler";
+import { hashFile } from "./hash";
 import type {
   SyncConfig,
   SyncPair,
@@ -92,6 +93,8 @@ interface PairRuntime {
   scannedFiles: number;
   /** Folders discovered so far during scan walk. */
   scannedFolders: number;
+  /** Human-readable status text. */
+  statusText: string;
 }
 
 /**
@@ -126,6 +129,10 @@ export class SyncEngine extends EventEmitter {
 
   /** Paths recently written by download — watcher events for these are suppressed. */
   private recentDownloads = new Map<string, number>();
+
+  /** Rolling log buffer (last 200 entries) — shown in the UI Activity tab. */
+  private logs: import("./types").SyncLogEntry[] = [];
+  private static readonly MAX_LOGS = 200;
 
   /** Limits concurrent uploads/downloads across all pairs. */
   private transferSemaphore: Semaphore;
@@ -180,6 +187,35 @@ export class SyncEngine extends EventEmitter {
     this.started = true;
     this.config = await loadConfig();
     this.transferSemaphore.updateMax(this.config.maxConcurrentTransfers || 3);
+
+    // Detect account switch: fetch current user ID and compare to stored config.
+    // If the user changed (logout → login with different account), all sync state
+    // is stale and must be wiped to prevent cross-account data leakage.
+    try {
+      const currentUserId = await this.client.getCurrentUserId();
+      if (currentUserId) {
+        if (this.config.userId && this.config.userId !== currentUserId) {
+          console.log(`[sync] Account switch detected (${this.config.userId} → ${currentUserId}). Wiping sync state.`);
+          // Delete all pair state files
+          for (const pair of this.config.pairs) {
+            await deletePairState(pair.id);
+          }
+          // Reset config but keep structure
+          this.config.pairs = [];
+          this.config.userId = currentUserId;
+          await saveConfig(this.config);
+          this.started = false;
+          return;
+        }
+        // Store user ID if not set yet
+        if (!this.config.userId) {
+          this.config.userId = currentUserId;
+          await saveConfig(this.config);
+        }
+      }
+    } catch {
+      // API call failed — continue with existing config (user might be offline)
+    }
 
     // Start session recovery loop
     this.recoveryTimer = setInterval(() => this.checkRecovery(), SESSION_RECOVERY_MS);
@@ -388,6 +424,7 @@ export class SyncEngine extends EventEmitter {
         phase: null,
         scannedFiles: 0,
         scannedFolders: 0,
+        statusText: "",
       };
       this.runtimes.set(pair.id, rt);
       this.emitStatus();
@@ -485,6 +522,7 @@ export class SyncEngine extends EventEmitter {
       phase: null,
       scannedFiles: 0,
       scannedFolders: 0,
+      statusText: "",
     };
 
     this.runtimes.set(pair.id, rt);
@@ -716,6 +754,8 @@ export class SyncEngine extends EventEmitter {
     console.log("[sync] runInitialScan:", pairId);
 
     // Check if the server still has sync enabled for this folder
+    rt.statusText = "Connecting to server...";
+    this.emitStatus();
     if (rt.pair.remoteFolderId) {
       try {
         const isStillSynced = await this.client.getFolderSyncFlag(rt.pair.remoteFolderId);
@@ -774,9 +814,10 @@ export class SyncEngine extends EventEmitter {
         if (err.lastAttemptAt < weekAgo) delete rt.state.fileErrors[path];
       }
       rt.scannedFolders = 0;
+      rt.statusText = "";
       rt.state.lastFullSyncAt = Date.now();
       await this.safeSaveState(rt.state);
-      console.log("[sync] Initial scan complete:", pairId);
+      this.log(pairId, "Sync complete");
     } catch (err: any) {
       // If paused/stopped during sync, don't set error state
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") {
@@ -804,6 +845,7 @@ export class SyncEngine extends EventEmitter {
         rt.phase = null;
         rt.scannedFiles = 0;
         rt.scannedFolders = 0;
+        rt.statusText = "";
       }
       rt.syncing = false;
       this.emitStatus();
@@ -813,12 +855,92 @@ export class SyncEngine extends EventEmitter {
   private async scanAndUpload(rt: PairRuntime): Promise<void> {
     const { pair, state } = rt;
 
+    // ── Pre-populate state from remote if empty (reinstall / fresh pair) ──
+    // Without this, every file is treated as "new" and re-uploaded even if
+    // identical content already exists on the server. Fetching the remote
+    // snapshot first lets us match local files by name+size and skip them.
+    if (Object.keys(state.files).length === 0 && pair.remoteFolderId) {
+      try {
+        rt.statusText = "Comparing with server...";
+        this.log(pair.id, "Fetching remote file list...");
+        this.emitStatus();
+        const fast = await this.client.fetchSnapshotFast(pair.workspaceId, pair.remoteFolderId);
+        if (!fast) throw new Error("Could not fetch remote snapshot");
+        const snapshot = {
+          files: new Map(fast.files.map(f => [f.id, f] as const)),
+          folders: new Map(fast.folders.map(f => [f.id, f] as const)),
+        };
+
+        // Build folder path map
+        const folderPaths = new Map<string, string>();
+        for (const [id, f] of snapshot.folders) {
+          const buildPath = (fid: string): string => {
+            if (folderPaths.has(fid)) return folderPaths.get(fid)!;
+            const folder = snapshot.folders.get(fid);
+            if (!folder) return "";
+            if (!folder.parent_id || folder.parent_id === pair.remoteFolderId) {
+              folderPaths.set(fid, folder.name);
+              return folder.name;
+            }
+            const parentPath = buildPath(folder.parent_id);
+            const p = parentPath ? `${parentPath}/${folder.name}` : folder.name;
+            folderPaths.set(fid, p);
+            return p;
+          };
+          buildPath(id);
+        }
+
+        // Pre-populate folder state
+        for (const [id, f] of snapshot.folders) {
+          const relPath = folderPaths.get(id);
+          if (relPath) {
+            state.folders[relPath] = {
+              remoteId: id,
+              remoteName: f.name,
+              remoteParentId: f.parent_id,
+              localPath: relPath,
+              syncedAt: Date.now(),
+            };
+          }
+        }
+
+        // Pre-populate file state — these will be matched during the walk
+        for (const [id, f] of snapshot.files) {
+          const dir = f.folder_id && f.folder_id !== pair.remoteFolderId
+            ? folderPaths.get(f.folder_id) ?? ""
+            : "";
+          const relPath = dir ? `${dir}/${f.name}` : f.name;
+
+          state.files[id] = {
+            remoteId: id,
+            remoteName: f.name,
+            remoteFolderId: f.folder_id,
+            remoteSizeBytes: f.size_bytes,
+            remoteUpdatedAt: f.updated_at,
+            remoteVersion: f.current_version,
+            localPath: relPath,
+            localSizeBytes: f.size_bytes,  // assume same until local stat
+            localMtimeMs: 0,               // will be checked during walk
+            syncedAt: Date.now(),
+          };
+          rt.pathIndex.set(relPath, id);
+        }
+
+        this.log(pair.id, `Found ${snapshot.files.size.toLocaleString()} files and ${snapshot.folders.size.toLocaleString()} folders on server`);
+        await this.safeSaveState(state);
+      } catch (err: any) {
+        console.error("[sync] Failed to fetch remote snapshot for pre-population:", err.message);
+        // Continue with empty state — files will be uploaded as new (safe, just slower)
+      }
+    }
+
     // Phase 1: Walk the tree and collect files + new directories.
     // No API calls here — just filesystem reads. Yields to the event loop
     // every YIELD_INTERVAL entries to prevent blocking UI/IPC.
     const YIELD_INTERVAL = 200;
     const STAT_BATCH_SIZE = 50;
     const toUpload: { absPath: string; relPath: string; isNew: boolean; sizeBytes: number }[] = [];
+    const needsHash: { absPath: string; relPath: string; sizeBytes: number; record: import("./types").SyncFileRecord }[] = [];
     const newFolders: string[] = [];
     let walkCount = 0;
 
@@ -826,6 +948,8 @@ export class SyncEngine extends EventEmitter {
     rt.phase = "scanning";
     rt.scannedFiles = 0;
     rt.scannedFolders = 0;
+    rt.statusText = "Scanning local files...";
+    this.log(pair.id, "Scanning local folder for changes...");
     this.emitStatus();
 
     const walk = async (dir: string): Promise<void> => {
@@ -869,8 +993,18 @@ export class SyncEngine extends EventEmitter {
           const existing = this.lookupByPath(rt, relPath);
           if (!existing) {
             toUpload.push({ absPath, relPath, isNew: true, sizeBytes: s.size });
-          } else if (s.mtimeMs !== existing.record.localMtimeMs || s.size !== existing.record.localSizeBytes) {
+          } else if (existing.record.localMtimeMs === 0 && s.size === existing.record.localSizeBytes) {
+            // Pre-populated from remote snapshot (reinstall). Size matches.
+            existing.record.localMtimeMs = s.mtimeMs;
+            existing.record.localSizeBytes = s.size;
+          } else if (s.size !== existing.record.localSizeBytes) {
+            // Size changed — definitely modified, no need to hash
             toUpload.push({ absPath, relPath, isNew: false, sizeBytes: s.size });
+          } else if (s.mtimeMs !== existing.record.localMtimeMs) {
+            // mtime changed but size same — hash to check if content actually changed.
+            // This catches editors that touch mtime without modifying content,
+            // git checkout, rsync --times, backup restores, etc.
+            needsHash.push({ absPath, relPath, sizeBytes: s.size, record: existing.record });
           }
         }
         // Yield between stat batches
@@ -882,6 +1016,43 @@ export class SyncEngine extends EventEmitter {
 
     await walk(pair.localPath);
 
+    this.log(pair.id, `Scan complete: ${toUpload.filter(f => f.isNew).length.toLocaleString()} new, ${toUpload.filter(f => !f.isNew).length.toLocaleString()} modified, ${needsHash.length.toLocaleString()} to verify, ${newFolders.length.toLocaleString()} new folders`);
+
+    // ── Hash phase: check files where mtime changed but size didn't ──
+    // Only these files get hashed — not all 150K. Typically ~1-2% of files.
+    if (needsHash.length > 0) {
+      this.log(pair.id, `Verifying ${needsHash.length.toLocaleString()} files (mtime changed, checking content)...`);
+      rt.statusText = `Checking ${needsHash.length} changed files...`;
+      this.emitStatus();
+      const HASH_CONCURRENCY = 10;
+      let hashIdx = 0;
+      const hashWorker = async () => {
+        while (hashIdx < needsHash.length) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+          const i = hashIdx++;
+          const entry = needsHash[i];
+          try {
+            const hash = await hashFile(entry.absPath);
+            if (hash !== entry.record.contentHash) {
+              // Content actually changed — queue for upload
+              toUpload.push({ absPath: entry.absPath, relPath: entry.relPath, isNew: false, sizeBytes: entry.sizeBytes });
+            } else {
+              // Content identical — just update mtime in state so we don't re-hash next time
+              const s = await stat(entry.absPath).catch(() => null);
+              if (s) entry.record.localMtimeMs = s.mtimeMs;
+            }
+          } catch {
+            // Can't hash (permission error, etc.) — treat as changed to be safe
+            toUpload.push({ absPath: entry.absPath, relPath: entry.relPath, isNew: false, sizeBytes: entry.sizeBytes });
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, needsHash.length) }, () => hashWorker()));
+      const actuallyChanged = toUpload.filter(f => !f.isNew).length;
+      const skippedByHash = needsHash.length - actuallyChanged;
+      this.log(pair.id, `Verification done: ${actuallyChanged} actually changed, ${skippedByHash} unchanged (content identical)`);
+    }
+
     // Phase 2: Create remote folders via batch API.
     // One HTTP request per batch of 500 folders (API limit), sorted by depth
     // so parents are created before children within each request.
@@ -889,6 +1060,13 @@ export class SyncEngine extends EventEmitter {
     newFolders.sort((a, b) => a.split("/").length - b.split("/").length);
     const FOLDER_BATCH_SIZE = 500;
 
+    if (newFolders.length > 0) {
+      rt.statusText = `Creating ${newFolders.length.toLocaleString()} folders on server...`;
+      this.log(pair.id, `Creating ${newFolders.length.toLocaleString()} folders on server...`);
+      this.emitStatus();
+    }
+
+    let foldersCreated = 0;
     for (let i = 0; i < newFolders.length; i += FOLDER_BATCH_SIZE) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
@@ -908,6 +1086,9 @@ export class SyncEngine extends EventEmitter {
 
       try {
         const resultMap = await this.client.createFoldersBatch(pair.workspaceId, batchEntries);
+        foldersCreated += chunk.length;
+        rt.statusText = `Creating folders... ${foldersCreated.toLocaleString()} of ${newFolders.length.toLocaleString()}`;
+        this.emitStatus();
 
         // Update local state with created folder IDs
         for (let j = 0; j < chunk.length; j++) {
@@ -936,13 +1117,15 @@ export class SyncEngine extends EventEmitter {
         }
       }
     }
-    // Free folder list — no longer needed, saves ~5MB for 29K folders
+    if (foldersCreated > 0) {
+      this.log(pair.id, `Created ${foldersCreated.toLocaleString()} folders on server`);
+    }
+    // Free folder list — no longer needed
     newFolders.length = 0;
 
     // ── Transferring phase ──
-    // Split into small files (batchable, <1MB) and large files (individual upload).
-    // Small files are uploaded first in batches of 50 per HTTP request, eliminating
-    // per-file latency. Then large files are uploaded individually with streaming.
+    // Small files use presigned URLs (direct to R2, bypassing Worker).
+    // Large files use individual streaming upload through the Worker.
     toUpload.sort((a, b) => a.sizeBytes - b.sizeBytes);
 
     const BATCH_THRESHOLD = RemoteClient.BATCH_FILE_MAX;
@@ -951,6 +1134,14 @@ export class SyncEngine extends EventEmitter {
     const largeFiles = toUpload.filter(f => f.sizeBytes > BATCH_THRESHOLD);
 
     rt.phase = "transferring";
+    rt.statusText = `Uploading ${toUpload.length.toLocaleString()} files...`;
+    if (toUpload.length > 0) {
+      const totalMB = Math.round(toUpload.reduce((s, f) => s + f.sizeBytes, 0) / 1024 / 1024);
+      this.log(pair.id, `Starting upload: ${toUpload.length.toLocaleString()} files (${totalMB.toLocaleString()} MB) — ${smallFiles.length.toLocaleString()} small, ${largeFiles.length.toLocaleString()} large`);
+    } else {
+      this.log(pair.id, "Everything up to date — nothing to upload");
+    }
+    this.emitStatus();
     const totalBytes = toUpload.reduce((sum, f) => sum + f.sizeBytes, 0);
     rt.totalFilesInBatch = toUpload.length;
     rt.completedFilesInBatch = 0;
@@ -961,109 +1152,160 @@ export class SyncEngine extends EventEmitter {
 
     let opCount = 0;
 
-    // ── Phase 3a: Batch-upload small files (50 per request) ──
-    // For 30K small files: 600 requests instead of 60K (init+PUT per file).
-    for (let i = 0; i < smallFiles.length; i += BATCH_SIZE) {
+    // ── Phase 3a: Presigned URL upload for small files ──
+    // Client → Worker (get presigned URLs) → Client → R2 directly (100 concurrent)
+    // → Client → Worker (commit DB records). Worker never touches file bytes.
+    const MANIFEST_BATCH = 5000; // files per manifest request (Worker CPU limit)
+    const UPLOAD_CONCURRENCY = 100; // concurrent direct-to-R2 uploads
+    const COMMIT_BATCH = 5000; // files per commit request
+
+    // Filter to eligible files
+    const eligibleSmall = smallFiles.filter(f => {
+      const err = state.fileErrors[f.relPath];
+      if (err?.permanent) return false;
+      if (err && err.retryCount >= MAX_FILE_RETRIES) {
+        state.fileErrors[f.relPath].permanent = true;
+        return false;
+      }
+      return true;
+    });
+
+    // Build manifest entries with folder IDs
+    const manifestEntries = eligibleSmall.map(f => {
+      const parentRelPath = f.relPath.split("/").slice(0, -1).join("/");
+      const folderId = parentRelPath
+        ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
+        : pair.remoteFolderId;
+      return { relPath: f.relPath, name: basename(f.absPath), size: f.sizeBytes, folder_id: folderId, absPath: f.absPath };
+    });
+
+    // Process manifest in batches of 5000 (Worker CPU limit for presigned URL generation)
+    for (let mStart = 0; mStart < manifestEntries.length; mStart += MANIFEST_BATCH) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
-      const chunk = smallFiles.slice(i, i + BATCH_SIZE);
+      const mChunk = manifestEntries.slice(mStart, mStart + MANIFEST_BATCH);
 
-      // Skip permanently failed files
-      const eligible = chunk.filter(f => {
-        const err = state.fileErrors[f.relPath];
-        if (err?.permanent) return false;
-        if (err && err.retryCount >= MAX_FILE_RETRIES) {
-          state.fileErrors[f.relPath].permanent = true;
-          return false;
-        }
-        return true;
-      });
-      if (eligible.length === 0) continue;
+      rt.statusText = `Preparing upload batch ${Math.floor(mStart / MANIFEST_BATCH) + 1}...`;
+      this.emitStatus();
 
-      // Resolve folder IDs for each file
-      const batchEntries = eligible.map(f => {
-        const parentRelPath = f.relPath.split("/").slice(0, -1).join("/");
-        const folderId = parentRelPath
-          ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
-          : pair.remoteFolderId;
-        const existing = this.lookupByPath(rt, f.relPath);
-        return {
-          absPath: f.absPath,
-          relPath: f.relPath,
-          folderId,
-          existingFileId: existing?.remoteId ?? null,
-          sizeBytes: f.sizeBytes,
-        };
-      });
-
+      let manifest: Awaited<ReturnType<typeof this.client.requestManifest>>;
       try {
-        const results = await this.client.uploadFilesBatch(
-          batchEntries,
+        manifest = await this.client.requestManifest(
           pair.workspaceId,
+          pair.remoteFolderId,
           pair.region,
+          mChunk.map(f => ({ relPath: f.relPath, name: f.name, size: f.size, folder_id: f.folder_id })),
         );
-
-        // Update state for each successful file
-        for (const r of results) {
-          const entry = batchEntries.find(e => e.relPath === r.relPath);
-          if (!entry) continue;
-
-          const s = await stat(entry.absPath).catch(() => null);
-          if (entry.existingFileId && entry.existingFileId !== r.fileId) {
-            delete state.files[entry.existingFileId];
-          }
-          const existing = this.lookupByPath(rt, r.relPath);
-          const version = existing ? existing.record.remoteVersion + 1 : 1;
-          state.files[r.fileId] = {
-            remoteId: r.fileId,
-            remoteName: r.name,
-            remoteFolderId: entry.folderId,
-            remoteSizeBytes: entry.sizeBytes,
-            remoteUpdatedAt: Math.floor(Date.now() / 1000),
-            remoteVersion: version,
-            localPath: r.relPath,
-            localSizeBytes: s?.size ?? entry.sizeBytes,
-            localMtimeMs: s?.mtimeMs ?? Date.now(),
-            syncedAt: Date.now(),
-          };
-          rt.pathIndex.set(r.relPath, r.fileId);
-          this.pendingSyncFlagIds.push(r.fileId);
-          delete state.fileErrors[r.relPath];
-        }
-
-        rt.completedFilesInBatch += eligible.length;
-        rt.completedBytesInBatch += eligible.reduce((s, f) => s + f.sizeBytes, 0);
-        this.emitStatus();
       } catch (err: any) {
         if (err.message === "SESSION_EXPIRED") throw err;
         if (isRateLimitError(err)) throw err;
+        // Manifest failed — fall back to old batch upload for this chunk
+        console.error("[sync] Presigned manifest failed, falling back to batch:", err.message);
+        // Mark these files for individual upload by pushing to largeFiles
+        for (const f of mChunk) largeFiles.push({ absPath: f.absPath, relPath: f.relPath, isNew: true, sizeBytes: f.size });
+        continue;
+      }
 
-        // Batch failed — fall back to individual uploads for this chunk
-        console.error("[sync] Batch upload failed, falling back to individual:", err.message);
-        for (const entry of eligible) {
-          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+      // Count skipped (already exist on server)
+      rt.completedFilesInBatch += manifest.skipped;
+      rt.completedBytesInBatch += mChunk
+        .filter(f => !manifest.uploads.find(u => u.relPath === f.relPath))
+        .reduce((s, f) => s + f.size, 0);
+      this.emitStatus();
+
+      if (manifest.uploads.length === 0) continue;
+
+      // Upload directly to R2 via presigned URLs — 100 concurrent
+      const uploaded: typeof manifest.uploads = [];
+      let uploadIdx = 0;
+      let uploadFatalErr: Error | null = null;
+
+      const uploadWorker = async (): Promise<void> => {
+        while (uploadIdx < manifest.uploads.length) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused" || uploadFatalErr) return;
+
+          const i = uploadIdx++;
+          const upload = manifest.uploads[i];
+          const entry = mChunk.find(f => f.relPath === upload.relPath);
+          if (!entry) continue;
+
           try {
-            await this.uploadLocalFile(rt, entry.absPath, entry.relPath);
-            delete state.fileErrors[entry.relPath];
+            await this.client.uploadToPresignedUrl(
+              upload.url,
+              entry.absPath,
+              upload.size,
+              upload.contentType,
+            );
+            uploaded.push(upload);
+
+            // Update progress
             rt.completedFilesInBatch++;
-            rt.completedBytesInBatch += entry.sizeBytes;
+            rt.completedBytesInBatch += upload.size;
             this.emitStatus();
-          } catch (fileErr: any) {
-            if (fileErr.message === "SESSION_EXPIRED") throw fileErr;
-            if (isRateLimitError(fileErr)) throw fileErr;
-            const existing = state.fileErrors[entry.relPath];
-            state.fileErrors[entry.relPath] = {
-              filePath: entry.relPath,
-              error: fileErr.message,
+          } catch (err: any) {
+            console.error(`[sync] Presigned upload failed for ${upload.relPath}:`, err.message);
+            const existing = state.fileErrors[upload.relPath];
+            state.fileErrors[upload.relPath] = {
+              filePath: upload.relPath,
+              error: err.message,
               retryCount: (existing?.retryCount ?? 0) + 1,
               lastAttemptAt: Date.now(),
-              permanent: fileErr.message.includes("permission") || fileErr.message.includes("EPERM") || fileErr.message.includes("quota"),
+              permanent: false,
             };
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, manifest.uploads.length) }, () => uploadWorker()));
+
+      // Commit uploaded files to DB in batches
+      if (uploaded.length > 0) {
+        for (let cStart = 0; cStart < uploaded.length; cStart += COMMIT_BATCH) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+
+          const cChunk = uploaded.slice(cStart, cStart + COMMIT_BATCH);
+          try {
+            await this.client.commitUploads(
+              pair.workspaceId,
+              pair.region,
+              cChunk.map(u => ({
+                file_id: u.fileId,
+                r2_key: u.r2Key,
+                name: u.name,
+                size: u.size,
+                folder_id: u.folderId,
+                content_type: u.contentType,
+                ext: u.ext,
+              })),
+            );
+
+            // Update local state
+            for (const u of cChunk) {
+              const entry = mChunk.find(f => f.relPath === u.relPath);
+              const s = entry ? await stat(entry.absPath).catch(() => null) : null;
+              state.files[u.fileId] = {
+                remoteId: u.fileId,
+                remoteName: u.name,
+                remoteFolderId: u.folderId,
+                remoteSizeBytes: u.size,
+                remoteUpdatedAt: Math.floor(Date.now() / 1000),
+                remoteVersion: 1,
+                localPath: u.relPath,
+                localSizeBytes: s?.size ?? u.size,
+                localMtimeMs: s?.mtimeMs ?? Date.now(),
+                syncedAt: Date.now(),
+              };
+              rt.pathIndex.set(u.relPath, u.fileId);
+              delete state.fileErrors[u.relPath];
+            }
+          } catch (err: any) {
+            if (err.message === "SESSION_EXPIRED") throw err;
+            console.error("[sync] Commit failed:", err.message);
           }
         }
       }
 
-      opCount += eligible.length;
+      opCount += mChunk.length;
       if (opCount % STATE_SAVE_INTERVAL === 0) {
         await this.safeSaveState(rt.state);
       }
@@ -1532,6 +1774,16 @@ export class SyncEngine extends EventEmitter {
         delete rt.state.files[existingFileId];
       }
 
+      // Compute content hash for future dedup (mtime change without content change).
+      // Skip hashing for large files (>50MB) — the hash would require re-reading
+      // the entire file from disk after just uploading it. For a 1.5GB file that's
+      // another 1.5GB of I/O. Large files rarely get false-positive mtime changes
+      // and the size check alone is sufficient for them.
+      const HASH_SIZE_LIMIT = 50 * 1024 * 1024; // 50 MB
+      const fileHash = postStat.size <= HASH_SIZE_LIMIT
+        ? await hashFile(absPath).catch(() => undefined)
+        : undefined;
+
       rt.state.files[result.fileId] = {
         remoteId: result.fileId,
         remoteName: result.name,
@@ -1543,6 +1795,7 @@ export class SyncEngine extends EventEmitter {
         localSizeBytes: postStat.size,
         localMtimeMs: postStat.mtimeMs,
         syncedAt: Date.now(),
+        contentHash: fileHash,
       };
       rt.pathIndex.set(relPath, result.fileId);
 
@@ -1663,6 +1916,7 @@ export class SyncEngine extends EventEmitter {
         phase: rt.phase,
         scannedFiles: rt.scannedFiles,
         scannedFolders: rt.scannedFolders,
+        statusText: rt.statusText,
       });
     }
     return {
@@ -1670,6 +1924,7 @@ export class SyncEngine extends EventEmitter {
       globalPaused: this.config?.pausedGlobally ?? false,
       activeTransfers: [...this.activeTransfers],
       unresolvedConflicts: this.conflicts,
+      recentLogs: this.logs.slice(-50),
     };
   }
 
@@ -1752,6 +2007,7 @@ export class SyncEngine extends EventEmitter {
       rt.phase = null;
       rt.scannedFiles = 0;
       rt.scannedFolders = 0;
+      rt.statusText = "";
       // Save state so already-uploaded files aren't re-uploaded on resume.
       await this.safeSaveState(rt.state);
       this.emitStatus();
@@ -1864,6 +2120,14 @@ export class SyncEngine extends EventEmitter {
 
   getClient(): RemoteClient {
     return this.client;
+  }
+
+  /** Add a log entry visible in the UI Activity tab. */
+  private log(pairId: string, message: string): void {
+    this.logs.push({ timestamp: Date.now(), pairId, message });
+    if (this.logs.length > SyncEngine.MAX_LOGS) {
+      this.logs = this.logs.slice(-SyncEngine.MAX_LOGS);
+    }
   }
 
   private emitStatus(): void {

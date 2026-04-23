@@ -22,6 +22,10 @@ export class RemotePoller extends EventEmitter {
   private backedOff = false;
   /** Counter of API requests made during the current poll cycle, for pacing. */
   private pollRequestCount = 0;
+  /** Timestamp of the last successful snapshot fetch. Used for delta polling. */
+  private lastPollTimestamp = 0;
+  /** Cached full snapshot — delta polls merge changes into this. */
+  private cachedSnapshot: RemoteSnapshot | null = null;
 
   constructor(
     private client: RemoteClient,
@@ -134,13 +138,51 @@ export class RemotePoller extends EventEmitter {
     return String(h >>> 0);
   }
 
-  private async fetchSnapshot(): Promise<RemoteSnapshot> {
-    const files = new Map<string, RemoteFileInfo>();
-    const folders = new Map<string, RemoteFolderInfo>();
+  async fetchSnapshot(): Promise<RemoteSnapshot> {
+    // First poll: full snapshot. Subsequent polls: delta (only changes since last poll).
+    // Delta polls are typically 1 HTTP request with 0-100 changed files,
+    // vs full snapshot which could be thousands of files across many pages.
+    const useDelta = this.cachedSnapshot && this.lastPollTimestamp > 0;
+    const since = useDelta ? this.lastPollTimestamp : undefined;
+    const beforePoll = Math.floor(Date.now() / 1000);
 
-    await this.fetchFolder(this.pair.remoteFolderId, files, folders, 0);
+    const fast = await this.client.fetchSnapshotFast(
+      this.pair.workspaceId,
+      this.pair.remoteFolderId,
+      since,
+    );
 
-    return { files, folders };
+    if (fast) {
+      if (useDelta && this.cachedSnapshot) {
+        // Merge delta into cached snapshot
+        for (const f of fast.files) {
+          this.cachedSnapshot.files.set(f.id, f);
+        }
+        // Folders only come in full snapshots (first page, no cursor)
+        if (fast.folders.length > 0) {
+          this.cachedSnapshot.folders.clear();
+          for (const d of fast.folders) {
+            this.cachedSnapshot.folders.set(d.id, d);
+          }
+        }
+        this.lastPollTimestamp = beforePoll;
+        return this.cachedSnapshot;
+      }
+
+      // Full snapshot — build and cache
+      const files = new Map<string, RemoteFileInfo>();
+      const folders = new Map<string, RemoteFolderInfo>();
+      for (const f of fast.files) files.set(f.id, f);
+      for (const d of fast.folders) folders.set(d.id, d);
+      this.cachedSnapshot = { files, folders };
+      this.lastPollTimestamp = beforePoll;
+      return this.cachedSnapshot;
+    }
+
+    // Fast endpoint not available — throw so the caller knows.
+    // Do NOT fall back to recursive per-folder fetching (30K requests for 30K folders).
+    // The /api/sync/snapshot endpoint must be deployed for sync to work efficiently.
+    throw new Error("Snapshot endpoint unavailable — deploy /api/sync/snapshot");
   }
 
   /**
