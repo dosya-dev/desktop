@@ -10,7 +10,6 @@ directories:
 files:
   - "out/**/*"
   - "build/*.png"
-  - "!node_modules"
 
 # Disable auto-update publish — we upload to R2 via our own API
 publish: []
