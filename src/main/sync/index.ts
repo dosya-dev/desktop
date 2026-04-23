@@ -939,11 +939,16 @@ export class SyncEngine extends EventEmitter {
     // Free folder list — no longer needed, saves ~5MB for 29K folders
     newFolders.length = 0;
 
-    // ── Transferring phase: upload files (smallest first) ──
-    // Uploading small files first gives faster visible progress and quicker
-    // file-count completion. Large files are uploaded last when the bulk
-    // of the tree is already synced.
+    // ── Transferring phase ──
+    // Split into small files (batchable, <1MB) and large files (individual upload).
+    // Small files are uploaded first in batches of 50 per HTTP request, eliminating
+    // per-file latency. Then large files are uploaded individually with streaming.
     toUpload.sort((a, b) => a.sizeBytes - b.sizeBytes);
+
+    const BATCH_THRESHOLD = RemoteClient.BATCH_FILE_MAX;
+    const BATCH_SIZE = RemoteClient.BATCH_MAX_FILES;
+    const smallFiles = toUpload.filter(f => f.sizeBytes <= BATCH_THRESHOLD);
+    const largeFiles = toUpload.filter(f => f.sizeBytes > BATCH_THRESHOLD);
 
     rt.phase = "transferring";
     const totalBytes = toUpload.reduce((sum, f) => sum + f.sizeBytes, 0);
@@ -955,24 +960,129 @@ export class SyncEngine extends EventEmitter {
     this.emitStatus();
 
     let opCount = 0;
+
+    // ── Phase 3a: Batch-upload small files (50 per request) ──
+    // For 30K small files: 600 requests instead of 60K (init+PUT per file).
+    for (let i = 0; i < smallFiles.length; i += BATCH_SIZE) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+
+      const chunk = smallFiles.slice(i, i + BATCH_SIZE);
+
+      // Skip permanently failed files
+      const eligible = chunk.filter(f => {
+        const err = state.fileErrors[f.relPath];
+        if (err?.permanent) return false;
+        if (err && err.retryCount >= MAX_FILE_RETRIES) {
+          state.fileErrors[f.relPath].permanent = true;
+          return false;
+        }
+        return true;
+      });
+      if (eligible.length === 0) continue;
+
+      // Resolve folder IDs for each file
+      const batchEntries = eligible.map(f => {
+        const parentRelPath = f.relPath.split("/").slice(0, -1).join("/");
+        const folderId = parentRelPath
+          ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
+          : pair.remoteFolderId;
+        const existing = this.lookupByPath(rt, f.relPath);
+        return {
+          absPath: f.absPath,
+          relPath: f.relPath,
+          folderId,
+          existingFileId: existing?.remoteId ?? null,
+          sizeBytes: f.sizeBytes,
+        };
+      });
+
+      try {
+        const results = await this.client.uploadFilesBatch(
+          batchEntries,
+          pair.workspaceId,
+          pair.region,
+        );
+
+        // Update state for each successful file
+        for (const r of results) {
+          const entry = batchEntries.find(e => e.relPath === r.relPath);
+          if (!entry) continue;
+
+          const s = await stat(entry.absPath).catch(() => null);
+          if (entry.existingFileId && entry.existingFileId !== r.fileId) {
+            delete state.files[entry.existingFileId];
+          }
+          const existing = this.lookupByPath(rt, r.relPath);
+          const version = existing ? existing.record.remoteVersion + 1 : 1;
+          state.files[r.fileId] = {
+            remoteId: r.fileId,
+            remoteName: r.name,
+            remoteFolderId: entry.folderId,
+            remoteSizeBytes: entry.sizeBytes,
+            remoteUpdatedAt: Math.floor(Date.now() / 1000),
+            remoteVersion: version,
+            localPath: r.relPath,
+            localSizeBytes: s?.size ?? entry.sizeBytes,
+            localMtimeMs: s?.mtimeMs ?? Date.now(),
+            syncedAt: Date.now(),
+          };
+          rt.pathIndex.set(r.relPath, r.fileId);
+          this.pendingSyncFlagIds.push(r.fileId);
+          delete state.fileErrors[r.relPath];
+        }
+
+        rt.completedFilesInBatch += eligible.length;
+        rt.completedBytesInBatch += eligible.reduce((s, f) => s + f.sizeBytes, 0);
+        this.emitStatus();
+      } catch (err: any) {
+        if (err.message === "SESSION_EXPIRED") throw err;
+        if (isRateLimitError(err)) throw err;
+
+        // Batch failed — fall back to individual uploads for this chunk
+        console.error("[sync] Batch upload failed, falling back to individual:", err.message);
+        for (const entry of eligible) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+          try {
+            await this.uploadLocalFile(rt, entry.absPath, entry.relPath);
+            delete state.fileErrors[entry.relPath];
+            rt.completedFilesInBatch++;
+            rt.completedBytesInBatch += entry.sizeBytes;
+            this.emitStatus();
+          } catch (fileErr: any) {
+            if (fileErr.message === "SESSION_EXPIRED") throw fileErr;
+            if (isRateLimitError(fileErr)) throw fileErr;
+            const existing = state.fileErrors[entry.relPath];
+            state.fileErrors[entry.relPath] = {
+              filePath: entry.relPath,
+              error: fileErr.message,
+              retryCount: (existing?.retryCount ?? 0) + 1,
+              lastAttemptAt: Date.now(),
+              permanent: fileErr.message.includes("permission") || fileErr.message.includes("EPERM") || fileErr.message.includes("quota"),
+            };
+          }
+        }
+      }
+
+      opCount += eligible.length;
+      if (opCount % STATE_SAVE_INTERVAL === 0) {
+        await this.safeSaveState(rt.state);
+      }
+    }
+
+    // ── Phase 3b: Upload large files individually with streaming ──
     let rateLimitErr: Error | null = null;
     let sessionExpiredErr: Error | null = null;
 
-    // Worker function: pulls files from the queue and uploads them.
-    // Multiple workers run concurrently (one per semaphore slot).
     let fileIdx = 0;
     const paused = () => rt.status === "paused";
     const worker = async (): Promise<void> => {
-      while (fileIdx < toUpload.length) {
+      while (fileIdx < largeFiles.length) {
         if (this.stopped || paused() || rateLimitErr || sessionExpiredErr) return;
 
         const idx = fileIdx++;
-        const file = toUpload[idx];
-        // Release the reference so GC can collect the path strings.
-        // Without this, all 38K entries stay in memory until every upload finishes.
-        toUpload[idx] = null as any;
+        const file = largeFiles[idx];
+        largeFiles[idx] = null as any;
 
-        // Skip files that have permanently failed
         const fileError = state.fileErrors[file.relPath];
         if (fileError && fileError.permanent) continue;
         if (fileError && fileError.retryCount >= MAX_FILE_RETRIES) {
@@ -993,8 +1103,8 @@ export class SyncEngine extends EventEmitter {
           }
           if (isRateLimitError(err)) {
             rateLimitErr = err;
-            const remaining = toUpload.length - idx - 1;
-            console.log(`[sync] Rate limited during batch upload. ${remaining} files remaining.`);
+            const remaining = largeFiles.length - idx - 1;
+            console.log(`[sync] Rate limited during large file upload. ${remaining} files remaining.`);
             return;
           }
           console.error(`[sync] upload failed for ${file.relPath}:`, err.message);
@@ -1020,13 +1130,14 @@ export class SyncEngine extends EventEmitter {
     // scale up so API round-trip latency doesn't bottleneck the sync.
     // The server exempts desktop sync from rate limits, so this is safe.
     const baseConcurrency = this.config?.maxConcurrentTransfers || 3;
-    const concurrency = toUpload.length > 1000 ? Math.max(baseConcurrency, 8)
-                       : toUpload.length > 100  ? Math.max(baseConcurrency, 5)
-                       : baseConcurrency;
-    this.transferSemaphore.updateMax(concurrency);
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
-    // Restore original concurrency after batch completes
-    this.transferSemaphore.updateMax(baseConcurrency);
+    if (largeFiles.length > 0) {
+      const concurrency = largeFiles.length > 100 ? Math.max(baseConcurrency, 8)
+                         : largeFiles.length > 10  ? Math.max(baseConcurrency, 5)
+                         : baseConcurrency;
+      this.transferSemaphore.updateMax(concurrency);
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      this.transferSemaphore.updateMax(baseConcurrency);
+    }
 
     // Propagate fatal errors after all workers finish
     if (sessionExpiredErr) throw sessionExpiredErr;

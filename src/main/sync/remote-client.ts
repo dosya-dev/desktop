@@ -1,6 +1,6 @@
 import { app, session } from "electron";
-import { createReadStream, createWriteStream } from "fs";
-import { stat, rename as fsRename, unlink as fsUnlink } from "fs/promises";
+import { createReadStream, createWriteStream, readFileSync } from "fs";
+import { stat, readFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
 import { basename, extname, resolve as pathResolve } from "path";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
 import http from "http";
@@ -638,6 +638,94 @@ export class RemoteClient {
       stream.on("end", () => resolve(Buffer.concat(chunks)));
       stream.on("error", reject);
     });
+  }
+
+  /** Batch size threshold: files smaller than this can be batched. */
+  static readonly BATCH_FILE_MAX = 1 * 1024 * 1024; // 1 MB
+  static readonly BATCH_MAX_FILES = 50;
+
+  /**
+   * Upload multiple small files in a single HTTP request.
+   * Uses multipart/form-data to bundle files + a JSON manifest.
+   * Returns an array of results matching the input order.
+   */
+  async uploadFilesBatch(
+    files: { absPath: string; relPath: string; folderId: string | null; existingFileId: string | null }[],
+    workspaceId: string,
+    region: string,
+  ): Promise<{ fileId: string; name: string; relPath: string }[]> {
+    const sessionCookie = await this.getSessionCookie();
+    if (!sessionCookie) throw new Error("SESSION_EXPIRED");
+
+    // Build multipart/form-data manually using Node.js Buffers.
+    // We can't use FormData (it's a browser API) in the main process.
+    const boundary = `----DosyaBatch${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const parts: Buffer[] = [];
+
+    const manifest = {
+      workspace_id: workspaceId,
+      region,
+      files: files.map((f, i) => ({
+        name: basename(f.absPath),
+        folder_id: f.folderId,
+        file_id: f.existingFileId,
+        field: `file_${i}`,
+      })),
+    };
+
+    // Manifest part
+    parts.push(Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="manifest"\r\n` +
+      `Content-Type: application/json\r\n\r\n` +
+      JSON.stringify(manifest) + `\r\n`,
+    ));
+
+    // File parts
+    for (let i = 0; i < files.length; i++) {
+      const fileName = basename(files[i].absPath);
+      const fileData = await readFile(files[i].absPath);
+      parts.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file_${i}"; filename="${fileName}"\r\n` +
+        `Content-Type: application/octet-stream\r\n\r\n`,
+      ));
+      parts.push(fileData);
+      parts.push(Buffer.from(`\r\n`));
+    }
+
+    // Closing boundary
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+    const body = Buffer.concat(parts);
+
+    const res = await this.fetchOnce("/api/upload/batch", {
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      body,
+      timeout: 120_000,
+    });
+
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    if (res.status === 429) throw this.createRateLimitError(res.headers);
+    this.updateBudget(res.headers);
+
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Batch upload failed");
+
+    const results: { fileId: string; name: string; relPath: string }[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const r = data.results?.[i];
+      if (r?.ok) {
+        results.push({ fileId: r.fileId, name: r.name, relPath: files[i].relPath });
+      } else {
+        throw new Error(r?.error || `Batch file ${i} failed`);
+      }
+    }
+
+    return results;
   }
 
   private streamUpload(
