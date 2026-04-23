@@ -1050,12 +1050,55 @@ export class RemoteClient {
     return data.folders ?? [];
   }
 
+  async moveFile(fileId: string, folderId: string | null): Promise<void> {
+    const res = await this.fetch(`/api/files/${fileId}/move`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_id: folderId }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    if (res.status >= 400) {
+      const data = await res.json();
+      throw new Error(data.error || "Move failed");
+    }
+  }
+
+  async renameFile(fileId: string, newName: string): Promise<void> {
+    const res = await this.fetch(`/api/files/${fileId}/rename`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    if (res.status >= 400) {
+      const data = await res.json();
+      throw new Error(data.error || "Rename failed");
+    }
+  }
+
   async deleteFile(fileId: string): Promise<void> {
     const res = await this.fetch(`/api/files/${fileId}`, { method: "DELETE" });
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
     if (res.status !== 200 && res.status !== 404) {
       const data = await res.json();
       throw new Error(data.error || "Delete failed");
+    }
+  }
+
+  /**
+   * Batch delete multiple files in a single request.
+   * Used when a user deletes a folder locally — 10K files in 20 requests instead of 10K.
+   */
+  async deleteFilesBatch(workspaceId: string, fileIds: string[]): Promise<void> {
+    const CHUNK = 500;
+    for (let i = 0; i < fileIds.length; i += CHUNK) {
+      const chunk = fileIds.slice(i, i + CHUNK);
+      const res = await this.fetch("/api/files/batch-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace_id: workspaceId, file_ids: chunk }),
+      });
+      if (res.status === 401) throw new Error("SESSION_EXPIRED");
     }
   }
 

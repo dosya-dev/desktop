@@ -316,6 +316,22 @@ export async function reconcile(
       continue;
     }
 
+    // Case 4.5: Remote file moved (different path from stored)
+    // Detect by comparing remote relPath vs stored localPath. If they differ
+    // but the remoteId is the same, the file was moved/renamed on the server.
+    if (remoteFile && stored && relPath && stored.localPath !== relPath) {
+      const oldAbsPath = join(pair.localPath, stored.localPath);
+      const newAbsPath = join(pair.localPath, relPath);
+      actions.push({
+        type: "move-local",
+        oldLocalPath: oldAbsPath,
+        newLocalPath: newAbsPath,
+        remoteFile,
+        record: stored,
+      });
+      continue;
+    }
+
     // Case 5: In remote, In stored, In local → check for changes
     if (remoteFile && stored && localStat && relPath) {
       const remoteChanged =

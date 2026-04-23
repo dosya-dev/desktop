@@ -232,6 +232,7 @@ export type SyncAction =
     }
   | { type: "delete-local"; localPath: string; record: SyncFileRecord }
   | { type: "delete-remote"; remoteId: string; record: SyncFileRecord }
+  | { type: "move-local"; oldLocalPath: string; newLocalPath: string; remoteFile: RemoteFileInfo; record: SyncFileRecord }
   | {
       type: "create-remote-folder";
       localPath: string;

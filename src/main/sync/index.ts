@@ -402,6 +402,11 @@ export class SyncEngine extends EventEmitter {
     if (this.runtimes.has(pair.id)) return;
     console.log("[sync] startPair:", pair.id, "mode:", pair.syncMode, "path:", pair.localPath);
 
+    // Clean up orphaned .dosya-sync-tmp files from crashed downloads
+    try {
+      await this.cleanupTempFiles(pair.localPath);
+    } catch {}
+
     try {
       await access(pair.localPath);
     } catch {
@@ -666,23 +671,48 @@ export class SyncEngine extends EventEmitter {
           case "download-new": {
             const absPath = join(action.localDir, action.remoteFile.name);
             const relPath = relative(rt.pair.localPath, absPath).split(sep).join("/");
-            if (!this.isPathSafe(rt.pair.localPath, relPath)) {
-              console.error("[sync] Path traversal blocked:", relPath);
-              break;
+            if (!this.isPathSafe(rt.pair.localPath, relPath)) break;
+            // Skip files that permanently fail (e.g., R2 object missing, server inconsistency)
+            const dlErr1 = rt.state.fileErrors[relPath];
+            if (dlErr1?.permanent) break;
+            if (dlErr1 && dlErr1.retryCount >= MAX_FILE_RETRIES) { dlErr1.permanent = true; break; }
+            try {
+              await mkdir(dirname(absPath), { recursive: true });
+              await this.downloadRemoteFile(rt, action.remoteFile, absPath, relPath);
+              delete rt.state.fileErrors[relPath];
+            } catch (dlE: any) {
+              if (dlE.message === "SESSION_EXPIRED") throw dlE;
+              if (isRateLimitError(dlE)) throw dlE;
+              const prev = rt.state.fileErrors[relPath];
+              rt.state.fileErrors[relPath] = {
+                filePath: relPath, error: dlE.message,
+                retryCount: (prev?.retryCount ?? 0) + 1, lastAttemptAt: Date.now(),
+                permanent: dlE.message.includes("404") || dlE.message.includes("not found"),
+              };
             }
-            await mkdir(dirname(absPath), { recursive: true });
-            await this.downloadRemoteFile(rt, action.remoteFile, absPath, relPath);
             rt.completedFilesInBatch++;
             this.emitStatus();
             break;
           }
           case "download-update": {
             const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
-            if (!this.isPathSafe(rt.pair.localPath, relPath)) {
-              console.error("[sync] Path traversal blocked:", relPath);
-              break;
+            if (!this.isPathSafe(rt.pair.localPath, relPath)) break;
+            const dlErr2 = rt.state.fileErrors[relPath];
+            if (dlErr2?.permanent) break;
+            if (dlErr2 && dlErr2.retryCount >= MAX_FILE_RETRIES) { dlErr2.permanent = true; break; }
+            try {
+              await this.downloadRemoteFile(rt, action.remoteFile, action.localPath, relPath);
+              delete rt.state.fileErrors[relPath];
+            } catch (dlE: any) {
+              if (dlE.message === "SESSION_EXPIRED") throw dlE;
+              if (isRateLimitError(dlE)) throw dlE;
+              const prev = rt.state.fileErrors[relPath];
+              rt.state.fileErrors[relPath] = {
+                filePath: relPath, error: dlE.message,
+                retryCount: (prev?.retryCount ?? 0) + 1, lastAttemptAt: Date.now(),
+                permanent: dlE.message.includes("404") || dlE.message.includes("not found"),
+              };
             }
-            await this.downloadRemoteFile(rt, action.remoteFile, action.localPath, relPath);
             rt.completedFilesInBatch++;
             this.emitStatus();
             break;
@@ -695,11 +725,33 @@ export class SyncEngine extends EventEmitter {
             this.emitStatus();
             break;
           }
+          case "move-local": {
+            // Remote file was moved/renamed — move local file to match
+            const newRelPath = relative(rt.pair.localPath, action.newLocalPath).split(sep).join("/");
+            try {
+              await mkdir(dirname(action.newLocalPath), { recursive: true });
+              const { rename: fsRename } = await import("fs/promises");
+              await fsRename(action.oldLocalPath, action.newLocalPath);
+              // Update state
+              rt.pathIndex.delete(action.record.localPath);
+              action.record.localPath = newRelPath;
+              action.record.remoteName = action.remoteFile.name;
+              action.record.remoteFolderId = action.remoteFile.folder_id;
+              rt.pathIndex.set(newRelPath, action.record.remoteId);
+              this.markRecentDownload(action.newLocalPath); // suppress watcher re-upload
+              this.log(rt.pair.id, `Moved locally: ${action.record.localPath} → ${newRelPath}`);
+            } catch (e: any) {
+              console.error(`[sync] Local move failed: ${e.message}`);
+              // Fall back to download at new path
+              await mkdir(dirname(action.newLocalPath), { recursive: true });
+              await this.downloadRemoteFile(rt, action.remoteFile, action.newLocalPath, newRelPath);
+            }
+            break;
+          }
           case "delete-local": {
             await unlink(action.localPath).catch(() => {});
             delete rt.state.files[action.record.remoteId];
             rt.pathIndex.delete(action.record.localPath);
-            console.log(`[sync] Deleted local: ${action.record.localPath}`);
             break;
           }
           case "delete-remote": {
@@ -1407,10 +1459,81 @@ export class SyncEngine extends EventEmitter {
     let opCount = 0;
 
     try {
+      // ── Move/rename detection ──
+      // Within this batch, if we see "unlink path A" + "add path B" and A was
+      // tracked with the same size as B, it's a move/rename — no need to
+      // delete + re-upload. We can just call the server's move/rename API.
+      const unlinkEvents = new Map<string, WatchEvent>(); // relPath → event
+      const addEvents = new Map<string, WatchEvent>();
+      for (const event of events) {
+        const relPath = relative(rt.pair.localPath, event.path).split(sep).join("/");
+        if (event.type === "unlink") unlinkEvents.set(relPath, event);
+        else if (event.type === "add") addEvents.set(relPath, event);
+      }
+
+      // Match unlinks to adds by file size (same size = likely a move)
+      const moves = new Map<string, string>(); // oldRelPath → newRelPath
+      const handledPaths = new Set<string>();
+      for (const [oldRel, _unlinkEv] of unlinkEvents) {
+        const existing = this.lookupByPath(rt, oldRel);
+        if (!existing) continue;
+        // Find an add event with same file size
+        for (const [newRel, addEv] of addEvents) {
+          if (moves.has(oldRel) || handledPaths.has(newRel)) continue;
+          const s = await stat(addEv.path).catch(() => null);
+          if (s && s.size === existing.record.localSizeBytes) {
+            moves.set(oldRel, newRel);
+            handledPaths.add(newRel);
+            handledPaths.add(oldRel);
+            break;
+          }
+        }
+      }
+
+      // Process detected moves via server move API
+      for (const [oldRel, newRel] of moves) {
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
+        const existing = this.lookupByPath(rt, oldRel);
+        if (!existing) continue;
+
+        const newParentRelPath = newRel.split("/").slice(0, -1).join("/");
+        const newFolderId = newParentRelPath
+          ? (rt.state.folders[newParentRelPath]?.remoteId ?? rt.pair.remoteFolderId)
+          : rt.pair.remoteFolderId;
+        const newFileName = newRel.split("/").pop()!;
+
+        try {
+          // Move to new folder
+          await this.client.moveFile(existing.remoteId, newFolderId);
+          // Rename if name changed
+          const oldFileName = oldRel.split("/").pop()!;
+          if (oldFileName !== newFileName) {
+            await this.client.renameFile(existing.remoteId, newFileName);
+          }
+          // Update local state
+          existing.record.localPath = newRel;
+          existing.record.remoteFolderId = newFolderId;
+          existing.record.remoteName = newFileName;
+          rt.pathIndex.delete(oldRel);
+          rt.pathIndex.set(newRel, existing.remoteId);
+          this.log(rt.pair.id, `Moved: ${oldRel} → ${newRel}`);
+        } catch (e: any) {
+          if (e.message === "SESSION_EXPIRED") throw e;
+          if (isRateLimitError(e)) throw e;
+          // Move failed — fall through to delete+re-upload in the normal event loop
+          handledPaths.delete(oldRel);
+          handledPaths.delete(newRel);
+          moves.delete(oldRel);
+        }
+      }
+
       for (const event of events) {
         if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
         const relPath = relative(rt.pair.localPath, event.path).split(sep).join("/");
         const fileName = relPath.split("/").pop()!;
+
+        // Skip events already handled as moves
+        if (handledPaths.has(relPath)) continue;
 
         // Use shared ignore filter
         if (shouldIgnoreEntry(fileName, event.type === "addDir" || event.type === "unlinkDir", rt.pair.excludedPatterns)) continue;
@@ -1461,15 +1584,19 @@ export class SyncEngine extends EventEmitter {
               toDelete.push({ remoteId, localPath: record.localPath });
             }
           }
-          for (const { remoteId, localPath } of toDelete) {
+          // Batch delete — 500 files per request instead of 1 per file
+          if (toDelete.length > 0) {
             try {
-              await this.client.deleteFile(remoteId);
-              delete rt.state.files[remoteId];
-              rt.pathIndex.delete(localPath);
-              console.log(`[sync] Deleted remote (folder cleanup): ${localPath}`);
+              await this.client.deleteFilesBatch(rt.pair.workspaceId, toDelete.map(d => d.remoteId));
+              for (const { remoteId, localPath } of toDelete) {
+                delete rt.state.files[remoteId];
+                rt.pathIndex.delete(localPath);
+              }
+              this.log(rt.pair.id, `Deleted ${toDelete.length} files remotely (folder removed)`);
             } catch (e: any) {
               if (isRateLimitError(e)) throw e;
-              console.error(`[sync] Delete remote failed: ${e.message}`);
+              if (e.message === "SESSION_EXPIRED") throw e;
+              console.error(`[sync] Batch delete failed: ${e.message}`);
             }
           }
           // Clean up folder state
@@ -1931,6 +2058,16 @@ export class SyncEngine extends EventEmitter {
   async addPair(pair: SyncPair): Promise<void> {
     this.config = await loadConfig();
 
+    // Prevent overlapping sync pairs — two pairs watching the same or nested
+    // local paths would race on watcher events and corrupt state.
+    const newPath = resolve(pair.localPath);
+    for (const existing of this.config.pairs) {
+      const existingPath = resolve(existing.localPath);
+      if (newPath === existingPath || newPath.startsWith(existingPath + sep) || existingPath.startsWith(newPath + sep)) {
+        throw new Error(`This folder overlaps with an existing sync pair ("${existing.remoteFolderName}"). Choose a different folder.`);
+      }
+    }
+
     if (this.config.pausedGlobally) {
       this.config.pausedGlobally = false;
     }
@@ -2080,13 +2217,16 @@ export class SyncEngine extends EventEmitter {
         const relPath = relative(rt.pair.localPath, conflict.localPath).split(sep).join("/");
         await this.uploadLocalFile(rt, conflict.localPath, relPath);
       } else if (resolution === "keep-remote") {
-        // Trigger a reconcile to download the remote version on the next poll cycle.
-        // We don't have the full RemoteFileInfo here, so let the poller handle it.
+        // Delete local state so the next reconcile treats the remote file as new and downloads it.
         const existing = rt.state.files[conflict.remoteId];
         if (existing) {
+          // Delete the local file so the download doesn't think it's unchanged
+          await unlink(conflict.localPath).catch(() => {});
           delete rt.state.files[conflict.remoteId];
           rt.pathIndex.delete(existing.localPath);
         }
+        // Trigger immediate poll instead of waiting up to 30s
+        if (rt.poller) rt.poller.triggerNow();
       } else if (resolution === "keep-both") {
         const ext = conflict.localPath.includes(".") ? conflict.localPath.substring(conflict.localPath.lastIndexOf(".")) : "";
         const base = conflict.localPath.substring(0, conflict.localPath.length - ext.length);
@@ -2120,6 +2260,20 @@ export class SyncEngine extends EventEmitter {
 
   getClient(): RemoteClient {
     return this.client;
+  }
+
+  /** Clean up orphaned .dosya-sync-tmp files left by crashed downloads. */
+  private async cleanupTempFiles(dir: string): Promise<void> {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isFile() && entry.name.endsWith(".dosya-sync-tmp")) {
+        await unlink(fullPath).catch(() => {});
+      } else if (entry.isDirectory() && !shouldIgnoreEntry(entry.name, true)) {
+        await this.cleanupTempFiles(fullPath);
+      }
+    }
   }
 
   /** Add a log entry visible in the UI Activity tab. */
