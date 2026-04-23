@@ -57,7 +57,7 @@ class Semaphore {
 // ── Constants ───────��────────────────────────────────���──────────────
 
 const RECENT_DOWNLOAD_TTL_MS = 120_000; // suppress watcher events for 2 min after download (large files can take >10s)
-const STATE_SAVE_INTERVAL = 50; // save state every N file operations (was 10 — too frequent for large syncs)
+const STATE_SAVE_INTERVAL = 200; // save state every N file operations
 const SESSION_RECOVERY_MS = 30_000; // check for session recovery every 30s
 const MAX_FILE_RETRIES = 5; // max retry attempts per persistently failing file
 
@@ -140,16 +140,22 @@ export class SyncEngine extends EventEmitter {
   /** File IDs that need sync-flag set after a batch upload completes. */
   private pendingSyncFlagIds: string[] = [];
 
-  /** Serialize state saves to prevent concurrent writes to the same file. */
-  private savePending = new Map<string, Promise<void>>();
+  /** Per-pair save lock to prevent concurrent writes to the same state file. */
+  private saveLocks = new Set<string>();
 
   private async safeSaveState(state: SyncPairState): Promise<void> {
     const key = state.pairId;
-    // Chain onto the previous save for this pair so writes are serialized
-    const prev = this.savePending.get(key) ?? Promise.resolve();
-    const next = prev.then(() => savePairState(state)).catch(() => {});
-    this.savePending.set(key, next);
-    await next;
+    // If a save is already in progress for this pair, skip (the in-progress
+    // save has the latest state since state is a shared reference).
+    if (this.saveLocks.has(key)) return;
+    this.saveLocks.add(key);
+    try {
+      await savePairState(state);
+    } catch {
+      // Swallow — state save should never break sync operations
+    } finally {
+      this.saveLocks.delete(key);
+    }
   }
 
   constructor(private apiBase: string) {
@@ -930,6 +936,8 @@ export class SyncEngine extends EventEmitter {
         }
       }
     }
+    // Free folder list — no longer needed, saves ~5MB for 29K folders
+    newFolders.length = 0;
 
     // ── Transferring phase: upload files (smallest first) ──
     // Uploading small files first gives faster visible progress and quicker
@@ -960,6 +968,9 @@ export class SyncEngine extends EventEmitter {
 
         const idx = fileIdx++;
         const file = toUpload[idx];
+        // Release the reference so GC can collect the path strings.
+        // Without this, all 38K entries stay in memory until every upload finishes.
+        toUpload[idx] = null as any;
 
         // Skip files that have permanently failed
         const fileError = state.fileErrors[file.relPath];

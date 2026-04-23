@@ -480,6 +480,9 @@ export class RemoteClient {
   //
   // Init step uses JSON fetch. PUT step streams from disk to prevent OOM.
 
+  /** Threshold above which we use resumable multipart instead of single PUT. */
+  private static readonly MULTIPART_THRESHOLD = 50 * 1024 * 1024; // 50 MB
+
   async uploadFile(
     localPath: string,
     workspaceId: string,
@@ -507,10 +510,7 @@ export class RemoteClient {
       folder_id: folderId,
       region,
     };
-
-    if (fileId) {
-      initBody.file_id = fileId;
-    }
+    if (fileId) initBody.file_id = fileId;
 
     const initRes = await this.fetch("/api/upload/init", {
       method: "POST",
@@ -519,17 +519,106 @@ export class RemoteClient {
     });
 
     if (initRes.status === 401) throw new Error("SESSION_EXPIRED");
-    // 429 is now handled inside fetch() via RateLimitError — no need to check here
-
     const initData = await initRes.json();
     if (!initData.ok) throw new Error(initData.error || "Upload init failed");
 
-    // Stream the file body via PUT
+    const sessionId = initData.session_id;
+
+    if (fileStat.size > RemoteClient.MULTIPART_THRESHOLD && initData.resumable) {
+      // ── Resumable multipart: per-part retry, survives network drops ──
+      const partSize = initData.resumable.part_size as number;
+      const totalParts = initData.resumable.total_parts as number;
+
+      // Check which parts are already uploaded (for resume after crash)
+      let uploadedParts = new Set<number>();
+      let bytesAlreadyDone = 0;
+      try {
+        const statusRes = await this.fetch(`/api/upload/${sessionId}/status`);
+        if (statusRes.status === 200) {
+          const statusData = await statusRes.json();
+          if (Array.isArray(statusData.uploaded_parts)) {
+            uploadedParts = new Set(statusData.uploaded_parts as number[]);
+            bytesAlreadyDone = (statusData.bytes_uploaded as number) || 0;
+          }
+        }
+      } catch {
+        // Status check failed — upload all parts from scratch
+      }
+
+      let transferred = bytesAlreadyDone;
+      onProgress?.(transferred);
+
+      // Upload each part with per-part retry
+      for (let partNum = 1; partNum <= totalParts; partNum++) {
+        if (uploadedParts.has(partNum)) continue;
+
+        const start = (partNum - 1) * partSize;
+        const end = Math.min(start + partSize, fileStat.size);
+        const chunkSize = end - start;
+
+        const partData = await this.readFilePart(localPath, start, chunkSize);
+
+        let lastErr: Error | null = null;
+        for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+          try {
+            const partRes = await this.fetch(
+              `/api/upload/${sessionId}/part/${partNum}`,
+              { method: "PUT", body: partData },
+            );
+            if (partRes.status === 401) throw new Error("SESSION_EXPIRED");
+            if (partRes.status === 429) {
+              throw this.createRateLimitError(partRes.headers);
+            }
+            const partResult = await partRes.json();
+            if (!partResult.ok) throw new Error(partResult.error || `Part ${partNum} failed`);
+            lastErr = null;
+            break;
+          } catch (err: any) {
+            lastErr = err;
+            if (err instanceof RateLimitError) throw err;
+            if (NON_RETRYABLE.has(err.message)) throw err;
+            if (attempt < RETRY_DELAYS.length) {
+              await sleep(RETRY_DELAYS[attempt] * (0.5 + Math.random()));
+            }
+          }
+        }
+        if (lastErr) throw lastErr;
+
+        transferred += chunkSize;
+        onProgress?.(transferred);
+      }
+
+      // Complete the multipart upload (with retry — all parts are uploaded,
+      // but the complete call itself can fail due to network issues)
+      let completeErr: Error | null = null;
+      for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+        try {
+          const completeRes = await this.fetch(
+            `/api/upload/${sessionId}/complete`,
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+          );
+          if (completeRes.status === 401) throw new Error("SESSION_EXPIRED");
+          const completeData = await completeRes.json();
+          if (!completeData.ok) throw new Error(completeData.error || "Upload complete failed");
+          return { fileId: completeData.file?.id ?? sessionId, name: fileName };
+        } catch (err: any) {
+          completeErr = err;
+          if (err instanceof RateLimitError) throw err;
+          if (NON_RETRYABLE.has(err.message)) throw err;
+          if (attempt < RETRY_DELAYS.length) {
+            await sleep(RETRY_DELAYS[attempt] * (0.5 + Math.random()));
+          }
+        }
+      }
+      throw completeErr ?? new Error("Upload complete failed after retries");
+    }
+
+    // ── Small files: single PUT stream (fast, no multipart overhead) ──
     const sessionCookie = await this.getSessionCookie();
     if (!sessionCookie) throw new Error("SESSION_EXPIRED");
 
     const putData = await this.streamUpload(
-      `/api/upload/${initData.session_id}`,
+      `/api/upload/${sessionId}`,
       localPath,
       fileStat.size,
       sessionCookie,
@@ -537,8 +626,18 @@ export class RemoteClient {
     );
 
     if (!putData.ok) throw new Error(putData.error || "Upload failed");
+    return { fileId: putData.file?.id ?? sessionId, name: fileName };
+  }
 
-    return { fileId: putData.file?.id ?? initData.session_id, name: fileName };
+  /** Read a specific byte range from a file without loading the whole file. */
+  private readFilePart(filePath: string, start: number, length: number): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      const stream = createReadStream(filePath, { start, end: start + length - 1 });
+      stream.on("data", (chunk: string | Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      stream.on("end", () => resolve(Buffer.concat(chunks)));
+      stream.on("error", reject);
+    });
   }
 
   private streamUpload(
@@ -547,6 +646,7 @@ export class RemoteClient {
     fileSize: number,
     cookie: string,
     onProgress?: (bytes: number) => void,
+    signal?: AbortSignal,
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       const fullUrl = `${this.apiBase}${path}`;
@@ -588,6 +688,16 @@ export class RemoteClient {
 
       req.on("timeout", () => { req.destroy(); reject(new Error("Upload timed out")); });
       req.on("error", reject);
+
+      // Abort support: cancel in-flight upload when signal fires (e.g. user paused)
+      if (signal) {
+        if (signal.aborted) { req.destroy(); reject(new Error("Upload cancelled")); return; }
+        signal.addEventListener("abort", () => {
+          stream?.destroy();
+          req.destroy();
+          reject(new Error("Upload cancelled"));
+        }, { once: true });
+      }
 
       const stream = createReadStream(filePath);
       let transferred = 0;
