@@ -10,6 +10,11 @@ directories:
 files:
   - "out/**/*"
   - "build/*.png"
+  - "node_modules/**/*"
+  - "!node_modules/*/{test,tests,__tests__,__mocks__,.github}/**"
+  - "!node_modules/*/{CHANGELOG,README,readme,changelog}*"
+  - "!node_modules/**/*.{ts,map,md}"
+  - "!node_modules/**/{.eslintrc,.prettier*,tsconfig}*"
 
 # Disable auto-update publish — we upload to R2 via our own API
 publish: []
