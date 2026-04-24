@@ -58,7 +58,7 @@ class Semaphore {
 // ── Constants ───────��────────────────────────────────���──────────────
 
 const RECENT_DOWNLOAD_TTL_MS = 120_000; // suppress watcher events for 2 min after download (large files can take >10s)
-const STATE_SAVE_INTERVAL = 200; // save state every N file operations
+const STATE_SAVE_INTERVAL = 500; // save state every N file operations
 const SESSION_RECOVERY_MS = 30_000; // check for session recovery every 30s
 const MAX_FILE_RETRIES = 5; // max retry attempts per persistently failing file
 

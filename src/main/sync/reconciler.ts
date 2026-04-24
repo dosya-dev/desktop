@@ -27,7 +27,7 @@ const MAX_FOLDER_DEPTH = 50;
  * have identical ignore semantics.
  */
 const STAT_BATCH_SIZE = 50;
-const YIELD_INTERVAL = 200;
+const YIELD_INTERVAL = 20; // yield every 20 batches (1000 files) to keep UI responsive
 
 async function scanLocal(
   rootPath: string,
@@ -233,8 +233,13 @@ export async function reconcile(
 
   // Track which stored IDs we've processed, so we can clean up stale ones
   const processedIds = new Set<string>();
+  let reconcileCount = 0;
 
   for (const remoteId of allFileIds) {
+    // Yield to event loop every 500 entries to prevent UI freeze on large trees
+    if (++reconcileCount % 500 === 0) {
+      await new Promise<void>(r => setImmediate(r));
+    }
     processedIds.add(remoteId);
     const remoteFile = remote.files.get(remoteId);
     const stored = storedState.files[remoteId];
