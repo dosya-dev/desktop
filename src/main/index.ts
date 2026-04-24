@@ -34,6 +34,35 @@ let pendingSyncPath: string | null = null;
 function handleDosyaUrl(url: string): void {
   try {
     const parsed = new URL(url);
+
+    // dosya://auth/callback?token=xxx — OAuth login from system browser
+    if (parsed.hostname === "auth" || parsed.pathname === "//auth/callback") {
+      const token = parsed.searchParams.get("token");
+      if (!token) return;
+
+      // Store the session cookie manually (same as login flow)
+      session.defaultSession.cookies.set({
+        url: API_BASE,
+        name: "dosya_session",
+        value: token,
+        httpOnly: true,
+        secure: true,
+        sameSite: "no_restriction",
+        expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+      }).then(() => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+          // Tell the renderer to refresh auth state and navigate to dashboard
+          mainWindow.webContents.send("auth:oauth-complete");
+        }
+      }).catch((err) => {
+        console.error("[auth] Failed to store OAuth cookie:", err);
+      });
+      return;
+    }
+
+    // dosya://sync?path=/Users/john/Documents — sync folder request
     if (parsed.hostname === "sync" || parsed.pathname === "//sync") {
       const folderPath = parsed.searchParams.get("path");
       if (!folderPath) return;
@@ -43,7 +72,6 @@ function handleDosyaUrl(url: string): void {
         mainWindow.focus();
         mainWindow.webContents.send("navigate", `/sync?localPath=${encodeURIComponent(folderPath)}`);
       } else {
-        // Window not ready yet — store for later
         pendingSyncPath = folderPath;
       }
     }
@@ -186,9 +214,14 @@ if (!gotTheLock) {
       syncEngine = new SyncEngine(API_BASE);
       registerSyncIpcHandlers(syncEngine);
       createTray(mainWindow!, syncEngine);
-      syncEngine.start().catch((err) => {
-        console.error("[sync] Failed to start:", err);
-      });
+      // Delay sync start by 3s so the renderer loads and paints first.
+      // Without this, heavy sync operations (state loading, snapshot fetch,
+      // reconcile) block the main thread IPC and the window stays blank.
+      setTimeout(() => {
+        syncEngine?.start().catch((err) => {
+          console.error("[sync] Failed to start:", err);
+        });
+      }, 3000);
     } catch (err) {
       console.error("[sync] Failed to initialize:", err);
       createTray(mainWindow!);

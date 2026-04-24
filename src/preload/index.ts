@@ -56,6 +56,13 @@ const electronAPI = {
     return () => ipcRenderer.removeListener("navigate", handler);
   },
 
+  // OAuth complete event — fired when dosya://auth/callback is handled
+  onOAuthComplete: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("auth:oauth-complete", handler);
+    return () => ipcRenderer.removeListener("auth:oauth-complete", handler);
+  },
+
   // ── Sync ──────────────────────────────────────────────────────
   getSyncConfig: () => ipcRenderer.invoke("sync:get-config"),
   saveSyncConfig: (updates: any) => ipcRenderer.invoke("sync:save-config", updates),

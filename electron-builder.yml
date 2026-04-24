@@ -38,9 +38,23 @@ win:
     - target: nsis
       arch:
         - x64
+    - target: appx
+      arch:
+        - x64
   icon: build/icon.png
   signingHashAlgorithms:
     - sha256
+
+# ── Microsoft Store (MSIX/AppX) ────────────────────────────────────
+appx:
+  identityName: "dosya.dev"
+  displayName: "dosya"
+  publisher: "CN=YOUR_PUBLISHER_ID"  # From Partner Center → App Identity
+  publisherDisplayName: "dosya.dev"
+  applicationId: "dosya"
+  backgroundColor: "#f9f8f6"
+  languages:
+    - en-US
 
 # ── Linux ───────────────────────────────────────────────────────────
 linux:

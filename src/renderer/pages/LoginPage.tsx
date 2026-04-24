@@ -38,22 +38,37 @@ export function LoginPage() {
   async function handleOAuth(provider: string) {
     setError("");
     setLoading(true);
-    try {
-      const result = await ipc.oauth(provider);
-      if (result.ok) {
-        // Wait for cookie SameSite fix before making authenticated calls
+
+    // Open the system browser for OAuth — user is already logged into Google/GitHub there.
+    // The server redirects back to dosya://auth/callback?token=xxx which the app catches.
+    const apiBase = await window.electronAPI.getApiBase();
+    const oauthUrl = `${apiBase}/api/auth/${provider}?desktop=1`;
+
+    // Open in system browser (Chrome, Firefox, etc.)
+    window.open(oauthUrl, "_blank");
+
+    // Listen for the callback from the main process
+    const unsub = window.electronAPI.onOAuthComplete(async () => {
+      unsub();
+      try {
         await window.electronAPI.waitForSession();
-        // Refresh user state so ProtectedRoute sees the session
         await refreshUser();
         navigate("/dashboard");
-      } else if (result.error) {
-        setError(result.error);
+      } catch (err: any) {
+        setError(err.message || "Login failed");
+      } finally {
+        setLoading(false);
       }
-    } catch (err: any) {
-      setError(err.message || "OAuth failed");
-    } finally {
-      setLoading(false);
-    }
+    });
+
+    // Timeout after 2 minutes if user doesn't complete OAuth
+    setTimeout(() => {
+      unsub();
+      if (loading) {
+        setLoading(false);
+        setError("Login timed out. Please try again.");
+      }
+    }, 120_000);
   }
 
   return (
