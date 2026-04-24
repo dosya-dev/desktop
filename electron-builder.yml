@@ -47,9 +47,9 @@ win:
 
 # ── Microsoft Store (MSIX/AppX) ────────────────────────────────────
 appx:
-  identityName: "dosya.dev"
+  identityName: "dosya.dev.dosya.dev"
   displayName: "dosya"
-  publisher: "CN=YOUR_PUBLISHER_ID"  # From Partner Center → App Identity
+  publisher: "CN=9C40EE20-FDD6-4D45-BE36-45A257E76FCA"
   publisherDisplayName: "dosya.dev"
   applicationId: "dosya"
   backgroundColor: "#f9f8f6"
