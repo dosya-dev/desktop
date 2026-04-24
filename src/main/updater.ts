@@ -1,4 +1,6 @@
 import { app, Notification, BrowserWindow, ipcMain, shell } from "electron";
+import { join } from "path";
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -18,6 +20,73 @@ function broadcastStatus(status: UpdateStatus): void {
       win.webContents.send("updater:status-changed", status);
     }
   }
+}
+
+// ── Crash-loop detection ────────────────────────────────────────────
+// If the app crashes within CRASH_WINDOW_MS of launch for MAX_CRASHES
+// consecutive times, disable auto-install to prevent infinite crash loops
+// after a bad update.
+
+const CRASH_WINDOW_MS = 30_000;
+const MAX_CRASHES = 3;
+
+interface LaunchRecord {
+  version: string;
+  timestamps: number[];
+}
+
+function getLaunchRecordPath(): string {
+  return join(app.getPath("userData"), "launch-record.json");
+}
+
+function checkCrashLoop(): boolean {
+  const recordPath = getLaunchRecordPath();
+  const now = Date.now();
+  const currentVersion = app.getVersion();
+
+  let record: LaunchRecord = { version: currentVersion, timestamps: [] };
+  try {
+    const raw = readFileSync(recordPath, "utf-8");
+    record = JSON.parse(raw);
+  } catch {
+    // No record yet — first launch
+  }
+
+  // Reset if version changed (new update installed successfully)
+  if (record.version !== currentVersion) {
+    record = { version: currentVersion, timestamps: [] };
+  }
+
+  // Remove old timestamps outside the crash window
+  record.timestamps = record.timestamps.filter((t) => now - t < CRASH_WINDOW_MS);
+
+  // Check if we're in a crash loop
+  const inCrashLoop = record.timestamps.length >= MAX_CRASHES;
+
+  // Record this launch
+  record.timestamps.push(now);
+
+  try {
+    mkdirSync(app.getPath("userData"), { recursive: true });
+    writeFileSync(recordPath, JSON.stringify(record));
+  } catch {}
+
+  if (inCrashLoop) {
+    console.warn(
+      `[updater] Crash loop detected: ${record.timestamps.length} crashes within ${CRASH_WINDOW_MS / 1000}s. ` +
+      `Auto-update install disabled to prevent infinite restart loop.`,
+    );
+  }
+
+  return inCrashLoop;
+}
+
+/** Mark the current launch as successful (called after app has been running stably). */
+function markStableLaunch(): void {
+  const recordPath = getLaunchRecordPath();
+  try {
+    writeFileSync(recordPath, JSON.stringify({ version: app.getVersion(), timestamps: [] }));
+  } catch {}
 }
 
 /**
@@ -41,6 +110,12 @@ export async function initAutoUpdater(): Promise<void> {
     return;
   }
 
+  // Check for crash loop before enabling auto-install
+  const isCrashLoop = checkCrashLoop();
+
+  // After 60s of stable running, clear the crash counter
+  setTimeout(() => markStableLaunch(), 60_000);
+
   try {
     const { autoUpdater } = await import("electron-updater");
 
@@ -51,8 +126,8 @@ export async function initAutoUpdater(): Promise<void> {
       url: "https://dosya.dev/api/desktop",
     });
 
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoDownload = !isCrashLoop;
+    autoUpdater.autoInstallOnAppQuit = !isCrashLoop;
 
     autoUpdater.on("checking-for-update", () => {
       broadcastStatus({ state: "checking" });
@@ -77,9 +152,9 @@ export async function initAutoUpdater(): Promise<void> {
 
       const isLinux = process.platform === "linux";
       new Notification({
-        title: "Update Ready",
+        title: isLinux ? "Update Downloaded" : "Update Ready",
         body: isLinux
-          ? `dosya ${info.version} has been downloaded. Open the file to install.`
+          ? `dosya ${info.version} has been downloaded. Replace the current AppImage to install.`
           : `dosya ${info.version} is ready to install. Restart to update.`,
       }).show();
     });

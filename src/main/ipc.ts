@@ -21,7 +21,6 @@ const ALLOWED_OAUTH_PROVIDERS = new Set(["google", "github"]);
 const OAUTH_ALLOWED_ORIGINS = [
   "https://accounts.google.com",
   "https://github.com",
-  "https://www.google.com",
 ];
 
 export function registerIpcHandlers(apiBase: string): void {
@@ -192,16 +191,26 @@ export function registerIpcHandlers(apiBase: string): void {
   // ── File System ──────────────────────────────────────────────────
 
   ipcMain.handle("fs:open-file-dialog", async (_event, options) => {
-    const result = await dialog.showOpenDialog({
+    // Whitelist specific fields instead of spreading untrusted renderer options
+    const safeOpts: Electron.OpenDialogOptions = {
       properties: ["openFile", "multiSelections"],
-      ...options,
-    });
-    return result;
+    };
+    if (options && typeof options === "object") {
+      if (typeof options.title === "string") safeOpts.title = options.title.slice(0, 200);
+      if (typeof options.defaultPath === "string") safeOpts.defaultPath = options.defaultPath;
+      if (Array.isArray(options.filters)) safeOpts.filters = options.filters;
+    }
+    return dialog.showOpenDialog(safeOpts);
   });
 
   ipcMain.handle("fs:save-file-dialog", async (_event, options) => {
-    const result = await dialog.showSaveDialog(options);
-    return result;
+    const safeOpts: Electron.SaveDialogOptions = {};
+    if (options && typeof options === "object") {
+      if (typeof options.title === "string") safeOpts.title = options.title.slice(0, 200);
+      if (typeof options.defaultPath === "string") safeOpts.defaultPath = options.defaultPath;
+      if (Array.isArray(options.filters)) safeOpts.filters = options.filters;
+    }
+    return dialog.showSaveDialog(safeOpts);
   });
 
   // ── File Open ─────────────────────────────────────────────────────

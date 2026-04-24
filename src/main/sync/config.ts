@@ -1,6 +1,6 @@
 import { app } from "electron";
 import { join } from "path";
-import { readFile, writeFile, mkdir, rename, unlink } from "fs/promises";
+import { open, readFile, mkdir, rename, unlink } from "fs/promises";
 import {
   type SyncConfig,
   type SyncPairState,
@@ -26,12 +26,19 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 /**
- * Atomic write: write to a temp file, then rename.
- * If the app crashes mid-write, the original file remains intact.
+ * Atomic write: write to a temp file, fsync, then rename.
+ * fsync ensures data is flushed to disk before rename, preventing
+ * 0-byte files on crash (ext4 data=ordered without fsync can lose data).
  */
 async function atomicWriteFile(filePath: string, data: string): Promise<void> {
   const tmpPath = `${filePath}.tmp`;
-  await writeFile(tmpPath, data, "utf-8");
+  const fh = await open(tmpPath, "w");
+  try {
+    await fh.writeFile(data, "utf-8");
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
   await rename(tmpPath, filePath);
 }
 

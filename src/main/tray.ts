@@ -138,10 +138,16 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
   // Initial menu
   buildMenu();
 
-  // Rebuild on sync status changes
+  // Rebuild on sync status changes (debounced to avoid excessive menu rebuilds
+  // during large syncs where status fires many times per minute)
   if (syncEngine) {
+    let menuDebounceTimer: ReturnType<typeof setTimeout> | null = null;
     syncEngine.on("status-changed", (status: SyncStatus) => {
-      buildMenu(status);
+      if (menuDebounceTimer) clearTimeout(menuDebounceTimer);
+      menuDebounceTimer = setTimeout(() => {
+        menuDebounceTimer = null;
+        buildMenu(status);
+      }, 2000);
     });
   }
 

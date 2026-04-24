@@ -174,26 +174,42 @@ export class RemotePoller extends EventEmitter {
   }
 
   private hashSnapshot(snapshot: RemoteSnapshot): string {
-    // FNV-1a-inspired numeric hash — O(n) with no string allocation or sorting.
-    // Previous approach concatenated all IDs into a multi-MB string and sorted it.
-    let h = 2166136261;
+    // Two independent 32-bit FNV-1a hashes concatenated to form a 64-bit fingerprint.
+    // A single 32-bit hash has ~30% collision probability at 50K entries (birthday paradox).
+    // Two independent hashes reduce collision probability to ~1 in 10^18.
+    let h1 = 2166136261;
+    let h2 = 2166136261 ^ 0x811c9dc5; // different seed
     for (const [id, f] of snapshot.files) {
-      for (let i = 0; i < id.length; i++) h = (h ^ id.charCodeAt(i)) * 16777619;
-      h = (h ^ f.updated_at) * 16777619;
-      h = (h ^ f.size_bytes) * 16777619;
+      for (let i = 0; i < id.length; i++) {
+        h1 = (h1 ^ id.charCodeAt(i)) * 16777619;
+        h2 = (h2 ^ id.charCodeAt(i)) * 16777259;
+      }
+      h1 = (h1 ^ f.updated_at) * 16777619;
+      h2 = (h2 ^ f.updated_at) * 16777259;
+      h1 = (h1 ^ f.size_bytes) * 16777619;
+      h2 = (h2 ^ f.size_bytes) * 16777259;
     }
     for (const [id, f] of snapshot.folders) {
-      for (let i = 0; i < id.length; i++) h = (h ^ id.charCodeAt(i)) * 16777619;
-      for (let i = 0; i < f.name.length; i++) h = (h ^ f.name.charCodeAt(i)) * 16777619;
-      // Include parent_id so folder moves are detected
+      for (let i = 0; i < id.length; i++) {
+        h1 = (h1 ^ id.charCodeAt(i)) * 16777619;
+        h2 = (h2 ^ id.charCodeAt(i)) * 16777259;
+      }
+      for (let i = 0; i < f.name.length; i++) {
+        h1 = (h1 ^ f.name.charCodeAt(i)) * 16777619;
+        h2 = (h2 ^ f.name.charCodeAt(i)) * 16777259;
+      }
       if (f.parent_id) {
-        for (let i = 0; i < f.parent_id.length; i++) h = (h ^ f.parent_id.charCodeAt(i)) * 16777619;
+        for (let i = 0; i < f.parent_id.length; i++) {
+          h1 = (h1 ^ f.parent_id.charCodeAt(i)) * 16777619;
+          h2 = (h2 ^ f.parent_id.charCodeAt(i)) * 16777259;
+        }
       }
     }
-    // Include counts to catch additions/deletions
-    h = (h ^ snapshot.files.size) * 16777619;
-    h = (h ^ snapshot.folders.size) * 16777619;
-    return String(h >>> 0);
+    h1 = (h1 ^ snapshot.files.size) * 16777619;
+    h2 = (h2 ^ snapshot.files.size) * 16777259;
+    h1 = (h1 ^ snapshot.folders.size) * 16777619;
+    h2 = (h2 ^ snapshot.folders.size) * 16777259;
+    return `${h1 >>> 0}:${h2 >>> 0}`;
   }
 
   async fetchSnapshot(): Promise<RemoteSnapshot> {

@@ -13,10 +13,12 @@ import { app, session } from "electron";
 export function setupSession(apiBase: string): void {
   const ses = session.defaultSession;
 
-  // Spoof Origin header so the API sees requests as same-origin.
+  // Spoof Origin header so the API sees requests as same-origin,
+  // and add a client identifier so the server can distinguish desktop vs web.
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
     if (details.url.startsWith(apiBase)) {
       details.requestHeaders["Origin"] = apiBase;
+      details.requestHeaders["X-Dosya-Client"] = `desktop/${app.getVersion()}`;
     }
     callback({ requestHeaders: details.requestHeaders });
   });
@@ -32,7 +34,9 @@ export function setupSession(apiBase: string): void {
   ses.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
 
-    if (app.isPackaged && details.resourceType === "mainFrame" && details.url.startsWith("file://")) {
+    // Apply CSP to all frames (mainFrame + subFrame) from file:// in production.
+    // Previously only mainFrame was covered, leaving iframes unprotected.
+    if (app.isPackaged && (details.resourceType === "mainFrame" || details.resourceType === "subFrame") && details.url.startsWith("file://")) {
       responseHeaders["Content-Security-Policy"] = [
         [
           "default-src 'self'",

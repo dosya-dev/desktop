@@ -3,8 +3,17 @@ import { gracefulify } from "graceful-fs";
 import fs from "fs";
 gracefulify(fs);
 
-import { app, BrowserWindow, shell, powerMonitor, session } from "electron";
+import { app, BrowserWindow, shell, powerMonitor, session, crashReporter } from "electron";
 import { join } from "path";
+
+// Enable crash reporter for native crashes (GPU, renderer, main).
+// Captures minidumps locally. Set submitURL to a collection endpoint when ready.
+crashReporter.start({
+  productName: "dosya",
+  submitURL: "", // empty = store locally only, no network upload
+  uploadToServer: false,
+  compress: true,
+});
 import { registerIpcHandlers } from "./ipc";
 import { setupSession } from "./session";
 import { createMenu } from "./menu";
@@ -15,8 +24,11 @@ import { initAutoUpdater } from "./updater";
 import { installQuickAction } from "./macos-services";
 
 // ── Global crash handlers ───────────────────────────────────────────
+// After an uncaught exception the process is in an undefined state.
+// Log the error and exit to avoid silent data corruption.
 process.on("uncaughtException", (err) => {
-  console.error("[crash] Uncaught exception:", err);
+  console.error("[crash] Uncaught exception — exiting:", err);
+  setTimeout(() => app.exit(1), 2000);
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[crash] Unhandled rejection:", reason);
@@ -66,6 +78,12 @@ function handleDosyaUrl(url: string): void {
     if (parsed.hostname === "sync" || parsed.pathname === "//sync") {
       const folderPath = parsed.searchParams.get("path");
       if (!folderPath) return;
+
+      // Validate path: must be absolute, no traversal, reasonable length
+      if (folderPath.length > 1000) return;
+      if (folderPath.includes("..")) return;
+      const { isAbsolute } = require("path");
+      if (!isAbsolute(folderPath)) return;
 
       if (mainWindow) {
         mainWindow.show();
@@ -278,16 +296,35 @@ if (!gotTheLock) {
     });
   });
 
-  // Don't quit when all windows are closed — keep running in tray for sync
+  // Don't quit when all windows are closed — keep running in tray for sync.
+  // Exception: on Linux without a system tray (e.g. GNOME 40+), the user
+  // has no way to reopen the app, so we quit instead.
   app.on("window-all-closed", () => {
-    // Do nothing — app stays alive in tray
+    if (process.platform === "linux") {
+      // On Linux, quit if there's no tray icon to reopen from
+      (app as any).isQuitting = true;
+      app.quit();
+    }
+    // macOS/Windows: do nothing — app stays alive in tray
   });
 
-  // Clean shutdown
-  app.on("before-quit", async () => {
+  // Clean shutdown: prevent quit until sync state is persisted.
+  let isShuttingDown = false;
+  app.on("before-quit", (e) => {
     (app as any).isQuitting = true;
-    if (syncEngine) {
-      await syncEngine.stop().catch(() => {});
-    }
+
+    if (!syncEngine || isShuttingDown) return;
+
+    // Prevent the default quit — we need to await async cleanup
+    e.preventDefault();
+    isShuttingDown = true;
+
+    const SHUTDOWN_TIMEOUT_MS = 5000;
+    const shutdown = syncEngine.stop().catch(() => {});
+    const timeout = new Promise<void>((r) => setTimeout(r, SHUTDOWN_TIMEOUT_MS));
+
+    Promise.race([shutdown, timeout]).finally(() => {
+      app.quit(); // This re-fires before-quit, but isShuttingDown skips it
+    });
   });
 }

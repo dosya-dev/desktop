@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { access, readdir, stat, unlink, mkdir } from "fs/promises";
+import { access, readdir, stat, statfs, unlink, mkdir } from "fs/promises";
 import { join, relative, resolve, sep, basename, dirname } from "path";
 import { loadConfig, saveConfig, loadPairState, savePairState, deletePairState } from "./config";
 import { terminateStateWriter } from "./state-writer";
@@ -144,6 +144,9 @@ export class SyncEngine extends EventEmitter {
   /** Periodic timer to recover pairs stuck in SESSION_EXPIRED or RATE_LIMITED error. */
   private recoveryTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** Periodic timer to evict stale entries from recentDownloads. */
+  private recentDownloadsCleanupTimer: ReturnType<typeof setInterval> | null = null;
+
   /** Throttle emitStatus to avoid flooding IPC during large batch operations. */
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
   private statusDirty = false;
@@ -224,6 +227,14 @@ export class SyncEngine extends EventEmitter {
     // Start session recovery loop
     this.recoveryTimer = setInterval(() => this.checkRecovery(), SESSION_RECOVERY_MS);
 
+    // Periodically evict stale entries from recentDownloads to prevent unbounded growth
+    this.recentDownloadsCleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [path, ts] of this.recentDownloads) {
+        if (now - ts > RECENT_DOWNLOAD_TTL_MS) this.recentDownloads.delete(path);
+      }
+    }, 5 * 60 * 1000); // every 5 minutes
+
     for (const pair of this.config.pairs) {
       if (pair.enabled && !this.config.pausedGlobally) {
         await this.startPair(pair);
@@ -236,6 +247,10 @@ export class SyncEngine extends EventEmitter {
     if (this.recoveryTimer) {
       clearInterval(this.recoveryTimer);
       this.recoveryTimer = null;
+    }
+    if (this.recentDownloadsCleanupTimer) {
+      clearInterval(this.recentDownloadsCleanupTimer);
+      this.recentDownloadsCleanupTimer = null;
     }
     if (this.statusTimer) {
       clearTimeout(this.statusTimer);
@@ -259,14 +274,25 @@ export class SyncEngine extends EventEmitter {
     // status and bail out before we save state and clear runtimes.
     await new Promise<void>(r => setTimeout(r, 100));
 
-    // Phase 3: Persist state and tear down.
-    for (const [, rt] of this.runtimes) {
-      try { await this.safeSaveState(rt.state); } catch {}
-    }
+    // Phase 3: Persist state with a hard timeout.
+    // If any state save hangs (disk I/O stall, full disk, network drive),
+    // we abandon after 4s to avoid blocking shutdown indefinitely.
+    const SAVE_TIMEOUT_MS = 4000;
+    const saveAll = Promise.all(
+      Array.from(this.runtimes.values()).map((rt) =>
+        this.safeSaveState(rt.state).catch(() => {}),
+      ),
+    );
+    await Promise.race([
+      saveAll,
+      new Promise<void>((r) => setTimeout(r, SAVE_TIMEOUT_MS)),
+    ]);
+
     this.runtimes.clear();
     this.activeTransfers.clear();
     this.conflicts = [];
     this.pendingSyncFlagIds = [];
+    this.recentDownloads.clear();
     terminateStateWriter();
     try { this.emitStatus(); } catch {}
   }
@@ -1032,6 +1058,22 @@ export class SyncEngine extends EventEmitter {
 
   private async scanAndUpload(rt: PairRuntime): Promise<void> {
     const { pair, state } = rt;
+
+    // Check available disk space before starting sync.
+    // If below 500MB, warn and skip downloads to prevent data loss.
+    try {
+      const fsStats = await statfs(pair.localPath);
+      const freeBytes = fsStats.bavail * fsStats.bsize;
+      const MIN_FREE_BYTES = 500 * 1024 * 1024; // 500 MB
+      if (freeBytes < MIN_FREE_BYTES) {
+        const freeMB = Math.round(freeBytes / (1024 * 1024));
+        this.setError(rt, `Low disk space (${freeMB} MB free). Free up space to continue syncing.`);
+        this.emitStatus();
+        return;
+      }
+    } catch {
+      // statfs not available or path inaccessible — continue anyway
+    }
 
     // Pre-populate state from remote if empty (reinstall / fresh pair)
     try {

@@ -19,6 +19,28 @@ function agentFor(url: string | URL): http.Agent | https.Agent {
   return protocol === "https:" ? httpsAgent : httpAgent;
 }
 
+/**
+ * Resolve system proxy for a URL using Electron's session.
+ * Returns the proxy URL string (e.g. "http://proxy:8080") or null for DIRECT.
+ * Corporate environments with authenticated proxies, PAC files, etc. are
+ * handled automatically by Chromium's proxy resolver.
+ */
+async function resolveProxy(url: string): Promise<string | null> {
+  try {
+    const proxyInfo = await session.defaultSession.resolveProxy(url);
+    // proxyInfo format: "DIRECT" or "PROXY host:port" or "HTTPS host:port"
+    if (!proxyInfo || proxyInfo === "DIRECT") return null;
+    const match = proxyInfo.match(/^(PROXY|HTTPS)\s+(.+)$/i);
+    if (match) {
+      const scheme = match[1].toUpperCase() === "HTTPS" ? "https" : "http";
+      return `${scheme}://${match[2]}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 const isDev = !app.isPackaged;
 function debugLog(...args: unknown[]): void {
   if (isDev) console.log(...args);
@@ -196,6 +218,13 @@ export class RemoteClient {
     const parsed = new URL(fullUrl);
     const isHttps = parsed.protocol === "https:";
     const lib = isHttps ? https : http;
+
+    // Resolve system proxy (supports corporate proxies, PAC files, etc.)
+    // Log proxy detection so users behind corporate proxies can debug connectivity.
+    const proxyUrl = await resolveProxy(fullUrl);
+    if (proxyUrl) {
+      debugLog("[sync] Using proxy:", proxyUrl, "for", fullUrl);
+    }
 
     let bodyBuf: Buffer | undefined;
     if (opts.body != null) {
@@ -728,6 +757,8 @@ export class RemoteClient {
   /** Batch size threshold: files smaller than this can be batched. */
   static readonly BATCH_FILE_MAX = 5 * 1024 * 1024; // 5 MB
   static readonly BATCH_MAX_FILES = 200;
+  /** Maximum total batch payload size to prevent OOM. */
+  static readonly BATCH_TOTAL_MAX = 50 * 1024 * 1024; // 50 MB
 
   /**
    * Upload multiple small files in a single HTTP request.
@@ -741,6 +772,16 @@ export class RemoteClient {
   ): Promise<{ fileId: string; name: string; relPath: string }[]> {
     const sessionCookie = await this.getSessionCookie();
     if (!sessionCookie) throw new Error("SESSION_EXPIRED");
+
+    // Verify total batch size won't exceed the cap to prevent OOM
+    let totalSize = 0;
+    for (const f of files) {
+      const s = await stat(f.absPath).catch(() => null);
+      totalSize += s?.size ?? 0;
+    }
+    if (totalSize > RemoteClient.BATCH_TOTAL_MAX) {
+      throw new Error(`Batch too large (${Math.round(totalSize / 1024 / 1024)} MB). Maximum is ${RemoteClient.BATCH_TOTAL_MAX / 1024 / 1024} MB.`);
+    }
 
     // Build multipart/form-data manually using Node.js Buffers.
     // We can't use FormData (it's a browser API) in the main process.
