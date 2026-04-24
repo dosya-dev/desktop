@@ -14,33 +14,44 @@ const MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
 const PACE_REQUEST_INTERVAL = 40;
 const PACE_DELAY_MS = 3000;
 
+/** Adaptive poll intervals — slow down when idle, speed up when active. */
+const IDLE_THRESHOLDS = [
+  { afterMs: 60 * 60 * 1000, intervalMs: 300_000 },  // idle >1h → poll every 5 min
+  { afterMs: 5 * 60 * 1000,  intervalMs: 120_000 },  // idle >5 min → poll every 2 min
+] as const;
+
 export class RemotePoller extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private consecutiveErrors = 0;
   private lastSnapshotHash = "";
   private backedOff = false;
-  /** Counter of API requests made during the current poll cycle, for pacing. */
   private pollRequestCount = 0;
-  /** Timestamp of the last successful snapshot fetch. Used for delta polling. */
   private lastPollTimestamp = 0;
-  /** Cached full snapshot — delta polls merge changes into this. */
   private cachedSnapshot: RemoteSnapshot | null = null;
+  /** When the last actual change was detected (for adaptive interval). */
+  private lastChangeAt = Date.now();
+  /** Current effective poll interval (may differ from pair.pollIntervalMs when idle). */
+  private currentIntervalMs: number;
+  /** Whether the app window is visible (affects poll speed). */
+  private appVisible = true;
 
   constructor(
     private client: RemoteClient,
     private pair: SyncPair,
   ) {
     super();
+    this.currentIntervalMs = pair.pollIntervalMs;
   }
 
   start(): void {
     if (this.timer) return;
     this.consecutiveErrors = 0;
     this.backedOff = false;
-    // Immediate first poll
+    this.lastChangeAt = Date.now();
+    this.currentIntervalMs = this.pair.pollIntervalMs;
     this.poll();
-    this.timer = setInterval(() => this.poll(), this.pair.pollIntervalMs);
+    this.timer = setInterval(() => this.poll(), this.currentIntervalMs);
   }
 
   stop(): void {
@@ -52,7 +63,33 @@ export class RemotePoller extends EventEmitter {
   }
 
   triggerNow(): void {
+    // User/watcher triggered — reset to active interval
+    this.lastChangeAt = Date.now();
+    if (this.currentIntervalMs !== this.pair.pollIntervalMs && !this.backedOff) {
+      this.setInterval(this.pair.pollIntervalMs);
+    }
     this.poll();
+  }
+
+  /** Notify poller that the app window visibility changed. */
+  setAppVisible(visible: boolean): void {
+    this.appVisible = visible;
+    if (visible) {
+      // App became visible — speed up polling
+      this.lastChangeAt = Date.now();
+      if (this.currentIntervalMs !== this.pair.pollIntervalMs && !this.backedOff) {
+        this.setInterval(this.pair.pollIntervalMs);
+      }
+      this.poll(); // immediate check
+    }
+  }
+
+  private setInterval(ms: number): void {
+    this.currentIntervalMs = ms;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = setInterval(() => this.poll(), ms);
+    }
   }
 
   private async poll(): Promise<void> {
@@ -67,19 +104,40 @@ export class RemotePoller extends EventEmitter {
       const hash = this.hashSnapshot(snapshot);
       if (hash !== this.lastSnapshotHash) {
         this.lastSnapshotHash = hash;
+        this.lastChangeAt = Date.now(); // reset idle timer
         this.emit("snapshot", snapshot);
       }
 
       this.consecutiveErrors = 0;
 
-      // FIX: Restore original poll interval after recovery from backoff.
-      // Previously the backed-off timer was never replaced on success,
-      // permanently degrading the poll interval.
+      // Restore from error backoff
       if (this.backedOff && this.timer) {
-        clearInterval(this.timer);
-        this.timer = setInterval(() => this.poll(), this.pair.pollIntervalMs);
         this.backedOff = false;
-        console.log(`[sync] Poller restored to ${this.pair.pollIntervalMs / 1000}s interval`);
+        this.setInterval(this.pair.pollIntervalMs);
+      }
+
+      // ── Adaptive interval: slow down when idle ──
+      // If no changes detected for a while and app is in tray, increase interval.
+      if (!this.backedOff) {
+        const idleMs = Date.now() - this.lastChangeAt;
+        let targetInterval = this.pair.pollIntervalMs;
+
+        // If app is hidden (tray), use longer idle intervals
+        if (!this.appVisible) {
+          targetInterval = Math.max(targetInterval, 120_000); // min 2 min when hidden
+        }
+
+        // Apply idle thresholds
+        for (const t of IDLE_THRESHOLDS) {
+          if (idleMs > t.afterMs) {
+            targetInterval = Math.max(targetInterval, t.intervalMs);
+            break; // thresholds sorted longest-first
+          }
+        }
+
+        if (targetInterval !== this.currentIntervalMs) {
+          this.setInterval(targetInterval);
+        }
       }
     } catch (err: any) {
       this.consecutiveErrors++;

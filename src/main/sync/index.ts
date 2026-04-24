@@ -6,7 +6,7 @@ import { terminateStateWriter } from "./state-writer";
 import { RemoteClient, RateLimitError } from "./remote-client";
 import { LocalWatcher, type WatchEvent, shouldIgnoreEntry } from "./local-watcher";
 import { RemotePoller, type RemoteSnapshot } from "./remote-poller";
-import { reconcile } from "./reconciler";
+import { reconcile, reconcileRemoteOnly } from "./reconciler";
 import { hashFile } from "./hash";
 import type {
   SyncConfig,
@@ -95,6 +95,10 @@ interface PairRuntime {
   scannedFolders: number;
   /** Human-readable status text. */
   statusText: string;
+  /** True if the watcher has detected local changes since the last reconcile. */
+  localDirty: boolean;
+  /** Timestamp of the last full local scan (for periodic consistency checks). */
+  lastFullLocalScanAt: number;
 }
 
 /**
@@ -430,6 +434,8 @@ export class SyncEngine extends EventEmitter {
         scannedFiles: 0,
         scannedFolders: 0,
         statusText: "",
+        localDirty: true,
+        lastFullLocalScanAt: 0,
       };
       this.runtimes.set(pair.id, rt);
       this.emitStatus();
@@ -528,23 +534,16 @@ export class SyncEngine extends EventEmitter {
       scannedFiles: 0,
       scannedFolders: 0,
       statusText: "",
+      localDirty: true,
+      lastFullLocalScanAt: 0,
     };
 
     this.runtimes.set(pair.id, rt);
 
     if (mode === "two-way") {
-      // ── Two-way mode: watcher triggers reconcile, poller provides snapshot ──
-      if (watcher) {
-        watcher.on("batch", () => {
-          // Don't upload directly — trigger a reconcile cycle via the poller.
-          // The reconciler will do a three-way diff and compute correct actions.
-          if (poller) poller.triggerNow();
-        });
-        watcher.on("error", (err: Error) => {
-          console.error(`[sync] watcher error for ${pair.id}:`, err.message);
-        });
-        watcher.start();
-      }
+      // ── Two-way mode ──
+      // 1. Run initial reconcile immediately (downloads + uploads)
+      // 2. Then start watcher + poller for ongoing changes
       if (poller) {
         poller.on("snapshot", (snapshot: RemoteSnapshot) => {
           this.runReconcile(pair.id, snapshot);
@@ -557,8 +556,25 @@ export class SyncEngine extends EventEmitter {
             this.pauseForRateLimit(rt, getRetryAfterMs(err));
           }
         });
-        poller.start();
       }
+      if (watcher) {
+        watcher.on("batch", () => {
+          rt.localDirty = true;
+          if (poller) poller.triggerNow();
+        });
+        watcher.on("error", (err: Error) => {
+          console.error(`[sync] watcher error for ${pair.id}:`, err.message);
+        });
+      }
+
+      // Run initial reconcile, then start watcher + poller for ongoing changes
+      this.runInitialReconcile(pair.id).then(() => {
+        const currentRt = this.runtimes.get(pair.id);
+        if (currentRt && currentRt.status !== "paused" && currentRt.status !== "error") {
+          watcher?.start();
+          poller?.start();
+        }
+      });
     } else {
       // ── Push / push-safe modes: direct upload on watcher events ──
       if (watcher) {
@@ -625,7 +641,26 @@ export class SyncEngine extends EventEmitter {
     this.emitStatus();
 
     try {
-      const actions = await reconcile(rt.pair, rt.state, snapshot);
+      // Skip expensive local filesystem scan if:
+      // 1. Watcher hasn't reported any local changes (localDirty = false)
+      // 2. A full scan was done within the last 5 minutes
+      // This saves 15+ seconds of I/O on every 30s poll cycle for 150K files.
+      const FULL_SCAN_INTERVAL = 5 * 60 * 1000; // 5 minutes
+      const needsFullScan = rt.localDirty || Date.now() - rt.lastFullLocalScanAt > FULL_SCAN_INTERVAL;
+
+      let actions: SyncAction[];
+      if (needsFullScan) {
+        rt.statusText = "Scanning for changes...";
+        this.emitStatus();
+        actions = await reconcile(rt.pair, rt.state, snapshot);
+        rt.localDirty = false;
+        rt.lastFullLocalScanAt = Date.now();
+      } else {
+        // Remote-only diff: only check for new/changed/deleted remote files
+        // against stored state. No local filesystem walk.
+        actions = await reconcileRemoteOnly(rt.pair, rt.state, snapshot);
+      }
+
       await this.executeActions(rt, actions);
 
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
@@ -655,94 +690,200 @@ export class SyncEngine extends EventEmitter {
   private async executeActions(rt: PairRuntime, actions: SyncAction[]): Promise<void> {
     let opCount = 0;
 
-    // Count file transfer actions for batch progress tracking
+    // Count file transfer actions and compute total bytes for progress UI
     const fileActions = actions.filter(a =>
       a.type === "download-new" || a.type === "download-update" ||
       a.type === "upload-new" || a.type === "upload-update"
     );
+    let totalBytes = 0;
+    for (const a of fileActions) {
+      if (a.type === "download-new" || a.type === "download-update") {
+        totalBytes += a.remoteFile.size_bytes;
+      } else if (a.type === "upload-new") {
+        totalBytes += a.stat.sizeBytes;
+      } else if (a.type === "upload-update") {
+        totalBytes += a.stat.sizeBytes;
+      }
+    }
+    rt.phase = "transferring";
     rt.totalFilesInBatch = fileActions.length;
     rt.completedFilesInBatch = 0;
+    rt.totalBytesInBatch = totalBytes;
+    rt.completedBytesInBatch = 0;
+    rt.batchStartedAt = Date.now();
+    if (fileActions.length > 0) {
+      rt.statusText = `Syncing ${fileActions.length.toLocaleString()} files...`;
+    }
     this.emitStatus();
 
-    for (const action of actions) {
-      if (this.stopped || rt.status === "paused") return;
+    // ── Partition actions by type for optimal execution order ──
+    // 1. Create local folders (must exist before downloads)
+    // 2. Concurrent downloads (8 workers)
+    // 3. Create remote folders (must exist before uploads)
+    // 4. Concurrent uploads (via uploadLocalFile which uses semaphore)
+    // 5. Sequential: moves, deletes, conflicts
+    const localFolderActions = actions.filter(a => a.type === "create-local-folder");
+    const downloadActions = actions.filter(a => a.type === "download-new" || a.type === "download-update");
+    const remoteFolderActions = actions.filter(a => a.type === "create-remote-folder");
+    const uploadActions = actions.filter(a => a.type === "upload-new" || a.type === "upload-update");
+    const otherActions = actions.filter(a =>
+      a.type === "move-local" || a.type === "delete-local" || a.type === "delete-remote" || a.type === "conflict"
+    );
+
+    // Step 1: Create local folders (parallel, local I/O only)
+    if (localFolderActions.length > 0) {
+      rt.statusText = `Creating ${localFolderActions.length} local folders...`;
+      this.emitStatus();
+      await Promise.all(localFolderActions.map(async (action) => {
+        if (action.type !== "create-local-folder") return;
+        const folderPath = join(action.localDir, action.name);
+        const relPath = relative(rt.pair.localPath, folderPath).split(sep).join("/");
+        if (!this.isPathSafe(rt.pair.localPath, relPath)) return;
+        await mkdir(folderPath, { recursive: true });
+      }));
+    }
+
+    // Step 2: Concurrent downloads via presigned URLs (100 concurrent, direct to R2)
+    if (downloadActions.length > 0) {
+      rt.statusText = `Downloading ${downloadActions.length.toLocaleString()} files...`;
+      this.emitStatus();
+
+      // Collect file IDs for presigned URL batch request
+      const dlFileIds = downloadActions
+        .map(a => a.remoteFile.id)
+        .filter(Boolean);
+
+      // Get presigned URLs in one batch (500 per request)
+      let presignedMap = new Map<string, { url: string; name: string; size: number }>();
+      try {
+        presignedMap = await this.client.requestDownloadManifest(rt.pair.workspaceId, dlFileIds);
+      } catch (err: any) {
+        if (err.message === "SESSION_EXPIRED") throw err;
+        // Presigned endpoint not available — fall back to Worker-proxied downloads
+        this.log(rt.pair.id, "Presigned download not available, using fallback");
+      }
+
+      const DOWNLOAD_CONCURRENCY = presignedMap.size > 0 ? 50 : 8;
+      let dlIdx = 0;
+      let dlFatalErr: Error | null = null;
+
+      const dlWorker = async (): Promise<void> => {
+        while (dlIdx < downloadActions.length) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused" || dlFatalErr) return;
+          const i = dlIdx++;
+          const action = downloadActions[i];
+
+          let absPath: string;
+          let relPath: string;
+          if (action.type === "download-new") {
+            absPath = join(action.localDir, action.remoteFile.name);
+            relPath = relative(rt.pair.localPath, absPath).split(sep).join("/");
+          } else if (action.type === "download-update") {
+            absPath = action.localPath;
+            relPath = relative(rt.pair.localPath, absPath).split(sep).join("/");
+          } else continue;
+
+          if (!this.isPathSafe(rt.pair.localPath, relPath)) continue;
+          const dlErr = rt.state.fileErrors[relPath];
+          if (dlErr?.permanent) continue;
+          if (dlErr && dlErr.retryCount >= MAX_FILE_RETRIES) { dlErr.permanent = true; continue; }
+
+          try {
+            await mkdir(dirname(absPath), { recursive: true });
+            const presigned = presignedMap.get(action.remoteFile.id);
+            if (presigned) {
+              // Direct download from R2 via presigned URL — no Worker proxy
+              await this.client.downloadFromPresignedUrl(
+                presigned.url, absPath, action.remoteFile.size_bytes,
+              );
+              // Update state
+              const s = await stat(absPath);
+              this.markRecentDownload(absPath);
+              rt.state.files[action.remoteFile.id] = {
+                remoteId: action.remoteFile.id,
+                remoteName: action.remoteFile.name,
+                remoteFolderId: action.remoteFile.folder_id,
+                remoteSizeBytes: action.remoteFile.size_bytes,
+                remoteUpdatedAt: action.remoteFile.updated_at,
+                remoteVersion: action.remoteFile.current_version,
+                localPath: relPath,
+                localSizeBytes: s.size,
+                localMtimeMs: s.mtimeMs,
+                syncedAt: Date.now(),
+              };
+              rt.pathIndex.set(relPath, action.remoteFile.id);
+            } else {
+              // Fallback: download through Worker
+              await this.downloadRemoteFile(rt, action.remoteFile, absPath, relPath);
+            }
+            delete rt.state.fileErrors[relPath];
+          } catch (dlE: any) {
+            if (dlE.message === "SESSION_EXPIRED") { dlFatalErr = dlE; return; }
+            if (isRateLimitError(dlE)) { dlFatalErr = dlE; return; }
+            const prev = rt.state.fileErrors[relPath];
+            rt.state.fileErrors[relPath] = {
+              filePath: relPath, error: dlE.message,
+              retryCount: (prev?.retryCount ?? 0) + 1, lastAttemptAt: Date.now(),
+              permanent: dlE.message.includes("404") || dlE.message.includes("not found"),
+            };
+          }
+          rt.completedFilesInBatch++;
+          rt.completedBytesInBatch += action.remoteFile.size_bytes;
+          if (++opCount % STATE_SAVE_INTERVAL === 0) await this.safeSaveState(rt.state);
+          this.emitStatus();
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, downloadActions.length) }, () => dlWorker()));
+      if (dlFatalErr) throw dlFatalErr;
+    }
+
+    // Step 3: Create remote folders (batch API)
+    if (remoteFolderActions.length > 0) {
+      rt.statusText = `Creating ${remoteFolderActions.length} remote folders...`;
+      this.emitStatus();
+      for (const action of remoteFolderActions) {
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+        if (action.type !== "create-remote-folder") continue;
+        const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
+        await this.ensureRemoteFolder(rt, relPath);
+      }
+    }
+
+    // Step 4: Concurrent uploads
+    if (uploadActions.length > 0) {
+      rt.statusText = `Uploading ${uploadActions.length.toLocaleString()} files...`;
+      this.emitStatus();
+      for (const action of uploadActions) {
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+        if (action.type !== "upload-new" && action.type !== "upload-update") continue;
+        const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
+        await this.uploadLocalFile(rt, action.localPath, relPath);
+        rt.completedFilesInBatch++;
+        rt.completedBytesInBatch += action.type === "upload-new" ? action.stat.sizeBytes : action.stat.sizeBytes;
+        if (++opCount % STATE_SAVE_INTERVAL === 0) await this.safeSaveState(rt.state);
+        this.emitStatus();
+      }
+    }
+
+    // Step 5: Sequential actions (moves, deletes, conflicts)
+    for (const action of otherActions) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       try {
         switch (action.type) {
-          case "download-new": {
-            const absPath = join(action.localDir, action.remoteFile.name);
-            const relPath = relative(rt.pair.localPath, absPath).split(sep).join("/");
-            if (!this.isPathSafe(rt.pair.localPath, relPath)) break;
-            // Skip files that permanently fail (e.g., R2 object missing, server inconsistency)
-            const dlErr1 = rt.state.fileErrors[relPath];
-            if (dlErr1?.permanent) break;
-            if (dlErr1 && dlErr1.retryCount >= MAX_FILE_RETRIES) { dlErr1.permanent = true; break; }
-            try {
-              await mkdir(dirname(absPath), { recursive: true });
-              await this.downloadRemoteFile(rt, action.remoteFile, absPath, relPath);
-              delete rt.state.fileErrors[relPath];
-            } catch (dlE: any) {
-              if (dlE.message === "SESSION_EXPIRED") throw dlE;
-              if (isRateLimitError(dlE)) throw dlE;
-              const prev = rt.state.fileErrors[relPath];
-              rt.state.fileErrors[relPath] = {
-                filePath: relPath, error: dlE.message,
-                retryCount: (prev?.retryCount ?? 0) + 1, lastAttemptAt: Date.now(),
-                permanent: dlE.message.includes("404") || dlE.message.includes("not found"),
-              };
-            }
-            rt.completedFilesInBatch++;
-            this.emitStatus();
-            break;
-          }
-          case "download-update": {
-            const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
-            if (!this.isPathSafe(rt.pair.localPath, relPath)) break;
-            const dlErr2 = rt.state.fileErrors[relPath];
-            if (dlErr2?.permanent) break;
-            if (dlErr2 && dlErr2.retryCount >= MAX_FILE_RETRIES) { dlErr2.permanent = true; break; }
-            try {
-              await this.downloadRemoteFile(rt, action.remoteFile, action.localPath, relPath);
-              delete rt.state.fileErrors[relPath];
-            } catch (dlE: any) {
-              if (dlE.message === "SESSION_EXPIRED") throw dlE;
-              if (isRateLimitError(dlE)) throw dlE;
-              const prev = rt.state.fileErrors[relPath];
-              rt.state.fileErrors[relPath] = {
-                filePath: relPath, error: dlE.message,
-                retryCount: (prev?.retryCount ?? 0) + 1, lastAttemptAt: Date.now(),
-                permanent: dlE.message.includes("404") || dlE.message.includes("not found"),
-              };
-            }
-            rt.completedFilesInBatch++;
-            this.emitStatus();
-            break;
-          }
-          case "upload-new":
-          case "upload-update": {
-            const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
-            await this.uploadLocalFile(rt, action.localPath, relPath);
-            rt.completedFilesInBatch++;
-            this.emitStatus();
-            break;
-          }
           case "move-local": {
-            // Remote file was moved/renamed — move local file to match
             const newRelPath = relative(rt.pair.localPath, action.newLocalPath).split(sep).join("/");
             try {
               await mkdir(dirname(action.newLocalPath), { recursive: true });
               const { rename: fsRename } = await import("fs/promises");
               await fsRename(action.oldLocalPath, action.newLocalPath);
-              // Update state
               rt.pathIndex.delete(action.record.localPath);
               action.record.localPath = newRelPath;
               action.record.remoteName = action.remoteFile.name;
               action.record.remoteFolderId = action.remoteFile.folder_id;
               rt.pathIndex.set(newRelPath, action.record.remoteId);
-              this.markRecentDownload(action.newLocalPath); // suppress watcher re-upload
-              this.log(rt.pair.id, `Moved locally: ${action.record.localPath} → ${newRelPath}`);
-            } catch (e: any) {
-              console.error(`[sync] Local move failed: ${e.message}`);
-              // Fall back to download at new path
+              this.markRecentDownload(action.newLocalPath);
+            } catch {
               await mkdir(dirname(action.newLocalPath), { recursive: true });
               await this.downloadRemoteFile(rt, action.remoteFile, action.newLocalPath, newRelPath);
             }
@@ -759,21 +900,6 @@ export class SyncEngine extends EventEmitter {
             delete rt.state.files[action.remoteId];
             rt.pathIndex.delete(action.record.localPath);
             console.log(`[sync] Deleted remote: ${action.record.localPath}`);
-            break;
-          }
-          case "create-local-folder": {
-            const folderPath = join(action.localDir, action.name);
-            const relPath = relative(rt.pair.localPath, folderPath).split(sep).join("/");
-            if (!this.isPathSafe(rt.pair.localPath, relPath)) {
-              console.error("[sync] Path traversal blocked for folder:", relPath);
-              break;
-            }
-            await mkdir(folderPath, { recursive: true });
-            break;
-          }
-          case "create-remote-folder": {
-            const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
-            await this.ensureRemoteFolder(rt, relPath);
             break;
           }
           case "conflict": {
@@ -907,83 +1033,11 @@ export class SyncEngine extends EventEmitter {
   private async scanAndUpload(rt: PairRuntime): Promise<void> {
     const { pair, state } = rt;
 
-    // ── Pre-populate state from remote if empty (reinstall / fresh pair) ──
-    // Without this, every file is treated as "new" and re-uploaded even if
-    // identical content already exists on the server. Fetching the remote
-    // snapshot first lets us match local files by name+size and skip them.
-    if (Object.keys(state.files).length === 0 && pair.remoteFolderId) {
-      try {
-        rt.statusText = "Comparing with server...";
-        this.log(pair.id, "Fetching remote file list...");
-        this.emitStatus();
-        const fast = await this.client.fetchSnapshotFast(pair.workspaceId, pair.remoteFolderId);
-        if (!fast) throw new Error("Could not fetch remote snapshot");
-        const snapshot = {
-          files: new Map(fast.files.map(f => [f.id, f] as const)),
-          folders: new Map(fast.folders.map(f => [f.id, f] as const)),
-        };
-
-        // Build folder path map
-        const folderPaths = new Map<string, string>();
-        for (const [id, f] of snapshot.folders) {
-          const buildPath = (fid: string): string => {
-            if (folderPaths.has(fid)) return folderPaths.get(fid)!;
-            const folder = snapshot.folders.get(fid);
-            if (!folder) return "";
-            if (!folder.parent_id || folder.parent_id === pair.remoteFolderId) {
-              folderPaths.set(fid, folder.name);
-              return folder.name;
-            }
-            const parentPath = buildPath(folder.parent_id);
-            const p = parentPath ? `${parentPath}/${folder.name}` : folder.name;
-            folderPaths.set(fid, p);
-            return p;
-          };
-          buildPath(id);
-        }
-
-        // Pre-populate folder state
-        for (const [id, f] of snapshot.folders) {
-          const relPath = folderPaths.get(id);
-          if (relPath) {
-            state.folders[relPath] = {
-              remoteId: id,
-              remoteName: f.name,
-              remoteParentId: f.parent_id,
-              localPath: relPath,
-              syncedAt: Date.now(),
-            };
-          }
-        }
-
-        // Pre-populate file state — these will be matched during the walk
-        for (const [id, f] of snapshot.files) {
-          const dir = f.folder_id && f.folder_id !== pair.remoteFolderId
-            ? folderPaths.get(f.folder_id) ?? ""
-            : "";
-          const relPath = dir ? `${dir}/${f.name}` : f.name;
-
-          state.files[id] = {
-            remoteId: id,
-            remoteName: f.name,
-            remoteFolderId: f.folder_id,
-            remoteSizeBytes: f.size_bytes,
-            remoteUpdatedAt: f.updated_at,
-            remoteVersion: f.current_version,
-            localPath: relPath,
-            localSizeBytes: f.size_bytes,  // assume same until local stat
-            localMtimeMs: 0,               // will be checked during walk
-            syncedAt: Date.now(),
-          };
-          rt.pathIndex.set(relPath, id);
-        }
-
-        this.log(pair.id, `Found ${snapshot.files.size.toLocaleString()} files and ${snapshot.folders.size.toLocaleString()} folders on server`);
-        await this.safeSaveState(state);
-      } catch (err: any) {
-        console.error("[sync] Failed to fetch remote snapshot for pre-population:", err.message);
-        // Continue with empty state — files will be uploaded as new (safe, just slower)
-      }
+    // Pre-populate state from remote if empty (reinstall / fresh pair)
+    try {
+      await this.prePopulateStateFromRemote(rt);
+    } catch {
+      // Continue with empty state — files will be uploaded as new (safe, just slower)
     }
 
     // Phase 1: Walk the tree and collect files + new directories.
@@ -1023,13 +1077,15 @@ export class SyncEngine extends EventEmitter {
           }
           rt.scannedFolders++;
           if (++walkCount % YIELD_INTERVAL === 0) {
-            this.emitStatus(); // update UI with discovered count
+            this.emitStatus();
             await new Promise<void>(r => setImmediate(r));
           }
           await walk(absPath);
         } else if (entry.isFile()) {
           fileEntries.push({ absPath, relPath });
         }
+        // Symlinks, sockets, FIFOs, device nodes, and FUSE/snap entries
+        // that misreport their type are silently skipped.
       }
 
       for (let i = 0; i < fileEntries.length; i += STAT_BATCH_SIZE) {
@@ -1039,7 +1095,9 @@ export class SyncEngine extends EventEmitter {
         );
         for (let j = 0; j < batch.length; j++) {
           const s = stats[j];
-          if (!s) continue;
+          // Skip non-regular files (dirs, symlinks, sockets, FIFOs)
+          // and files with bogus sizes (Linux /proc, /sys report TB+ sizes)
+          if (!s || !s.isFile() || s.size > 100 * 1024 * 1024 * 1024) continue;
           const { relPath, absPath } = batch[j];
           rt.scannedFiles++;
           const existing = this.lookupByPath(rt, relPath);
@@ -2258,8 +2316,179 @@ export class SyncEngine extends EventEmitter {
     return this.started;
   }
 
+  /** Notify sync engine that the app window visibility changed.
+   *  When hidden (tray), pollers slow down to save API calls. */
+  setAppVisible(visible: boolean): void {
+    for (const [, rt] of this.runtimes) {
+      rt.poller?.setAppVisible(visible);
+    }
+  }
+
   getClient(): RemoteClient {
     return this.client;
+  }
+
+  /**
+   * Pre-populate sync state from a remote snapshot when state is empty.
+   * Matches remote files to local files by name+size so the reconciler
+   * or scanner can skip files that already exist identically on both sides.
+   * Used by both push-mode (scanAndUpload) and two-way (runInitialReconcile).
+   */
+  private async prePopulateStateFromRemote(rt: PairRuntime): Promise<RemoteSnapshot | null> {
+    const { pair, state } = rt;
+    if (Object.keys(state.files).length > 0 || !pair.remoteFolderId) return null;
+
+    rt.statusText = "Comparing with server...";
+    this.log(pair.id, "Fetching remote file list...");
+    this.emitStatus();
+
+    const fast = await this.client.fetchSnapshotFast(pair.workspaceId, pair.remoteFolderId);
+    if (!fast) return null;
+
+    const snapshot: RemoteSnapshot = {
+      files: new Map(fast.files.map(f => [f.id, f] as const)),
+      folders: new Map(fast.folders.map(f => [f.id, f] as const)),
+    };
+
+    // Build folder path map
+    const folderPaths = new Map<string, string>();
+    for (const [id] of snapshot.folders) {
+      const buildPath = (fid: string): string => {
+        if (folderPaths.has(fid)) return folderPaths.get(fid)!;
+        const folder = snapshot.folders.get(fid);
+        if (!folder) return "";
+        if (!folder.parent_id || folder.parent_id === pair.remoteFolderId) {
+          folderPaths.set(fid, folder.name);
+          return folder.name;
+        }
+        const parentPath = buildPath(folder.parent_id);
+        const p = parentPath ? `${parentPath}/${folder.name}` : folder.name;
+        folderPaths.set(fid, p);
+        return p;
+      };
+      buildPath(id);
+    }
+
+    // Pre-populate folder state
+    for (const [id, f] of snapshot.folders) {
+      const relPath = folderPaths.get(id);
+      if (relPath) {
+        state.folders[relPath] = {
+          remoteId: id, remoteName: f.name, remoteParentId: f.parent_id,
+          localPath: relPath, syncedAt: Date.now(),
+        };
+      }
+    }
+
+    // Pre-populate file state with localMtimeMs=0 sentinel
+    for (const [id, f] of snapshot.files) {
+      const dir = f.folder_id && f.folder_id !== pair.remoteFolderId
+        ? folderPaths.get(f.folder_id) ?? "" : "";
+      const relPath = dir ? `${dir}/${f.name}` : f.name;
+      state.files[id] = {
+        remoteId: id, remoteName: f.name, remoteFolderId: f.folder_id,
+        remoteSizeBytes: f.size_bytes, remoteUpdatedAt: f.updated_at,
+        remoteVersion: f.current_version, localPath: relPath,
+        localSizeBytes: f.size_bytes, localMtimeMs: 0, syncedAt: Date.now(),
+      };
+      rt.pathIndex.set(relPath, id);
+    }
+
+    this.log(pair.id, `Found ${snapshot.files.size.toLocaleString()} files and ${snapshot.folders.size.toLocaleString()} folders on server`);
+    await this.safeSaveState(state);
+    return snapshot;
+  }
+
+  /**
+   * Initial reconcile for two-way mode.
+   * Fetches remote snapshot, pre-populates state, runs reconciler,
+   * and executes download/upload actions — all before the poller starts.
+   */
+  private async runInitialReconcile(pairId: string): Promise<void> {
+    const rt = this.runtimes.get(pairId);
+    if (!rt || rt.syncing || rt.status === "rate-limited") return;
+
+    rt.syncing = true;
+    rt.status = "syncing";
+    rt.phase = "scanning";
+    rt.statusText = "Connecting to server...";
+    this.log(pairId, "Starting initial sync...");
+    this.emitStatus();
+
+    try {
+      // Pre-populate state from remote if empty
+      let snapshot = await this.prePopulateStateFromRemote(rt);
+
+      // If we didn't get a snapshot from pre-populate (state wasn't empty), fetch one now
+      if (!snapshot) {
+        rt.statusText = "Checking for changes...";
+        this.emitStatus();
+        const fast = await this.client.fetchSnapshotFast(rt.pair.workspaceId, rt.pair.remoteFolderId);
+        if (fast) {
+          snapshot = {
+            files: new Map(fast.files.map(f => [f.id, f] as const)),
+            folders: new Map(fast.folders.map(f => [f.id, f] as const)),
+          };
+        }
+      }
+
+      if (!snapshot) {
+        this.log(pairId, "Could not fetch remote state — will retry on next poll");
+        rt.status = "idle";
+        return;
+      }
+
+      // Run reconciler
+      rt.statusText = "Scanning local files...";
+      this.emitStatus();
+      const actions = await reconcile(rt.pair, rt.state, snapshot);
+
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+
+      if (actions.length === 0) {
+        this.log(pairId, "Everything up to date");
+      } else {
+        const downloads = actions.filter(a => a.type === "download-new" || a.type === "download-update").length;
+        const uploads = actions.filter(a => a.type === "upload-new" || a.type === "upload-update").length;
+        const deletes = actions.filter(a => a.type === "delete-local" || a.type === "delete-remote").length;
+        this.log(pairId, `Reconcile: ${downloads} downloads, ${uploads} uploads, ${deletes} deletes`);
+      }
+
+      await this.executeActions(rt, actions);
+      await this.flushSyncFlags();
+
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+
+      rt.status = "idle";
+      rt.state.lastFullSyncAt = Date.now();
+      rt.state.lastRemotePollAt = Date.now();
+      await this.safeSaveState(rt.state);
+      this.log(pairId, "Initial sync complete");
+    } catch (err: any) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+      if (err.message === "SESSION_EXPIRED") {
+        this.setError(rt, "Session expired. Please log in again.");
+      } else if (isRateLimitError(err)) {
+        this.pauseForRateLimit(rt, getRetryAfterMs(err));
+        return;
+      } else {
+        this.setError(rt, err.message);
+      }
+    } finally {
+      if ((rt.status as SyncPairStatus) !== "rate-limited") {
+        rt.totalFilesInBatch = 0;
+        rt.completedFilesInBatch = 0;
+        rt.totalBytesInBatch = 0;
+        rt.completedBytesInBatch = 0;
+        rt.batchStartedAt = 0;
+        rt.phase = null;
+        rt.scannedFiles = 0;
+        rt.scannedFolders = 0;
+        rt.statusText = "";
+      }
+      rt.syncing = false;
+      this.emitStatus();
+    }
   }
 
   /** Clean up orphaned .dosya-sync-tmp files left by crashed downloads. */

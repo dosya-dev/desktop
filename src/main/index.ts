@@ -194,6 +194,13 @@ if (!gotTheLock) {
       createTray(mainWindow!);
     }
 
+    // Notify sync engine when window visibility changes.
+    // Hidden (tray) → pollers slow to 2-5 min. Shown → pollers speed up.
+    if (syncEngine && mainWindow) {
+      mainWindow.on("show", () => syncEngine?.setAppVisible(true));
+      mainWindow.on("hide", () => syncEngine?.setAppVisible(false));
+    }
+
     // Watch for login/logout by monitoring the dosya_session cookie.
     // Start sync engine on login, stop on logout.
     session.defaultSession.cookies.on("changed", (_event, cookie, _cause, removed) => {

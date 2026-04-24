@@ -76,7 +76,7 @@ async function scanLocal(
       );
       for (let j = 0; j < batch.length; j++) {
         const s = stats[j];
-        if (!s) continue;
+        if (!s || !s.isFile() || s.size > 100 * 1024 * 1024 * 1024) continue;
         files.set(batch[j].relPath, {
           sizeBytes: s.size,
           mtimeMs: s.mtimeMs,
@@ -416,4 +416,76 @@ export async function reconcile(
   }
 
   return actions;
+}
+
+/**
+ * Lightweight remote-only reconcile — no local filesystem scan.
+ * Only detects remote changes (new, updated, deleted files) by comparing
+ * the remote snapshot against stored state. Used when the watcher reports
+ * no local changes since the last full reconcile.
+ *
+ * This saves 15+ seconds of I/O per poll cycle on large file trees (150K files).
+ */
+export function reconcileRemoteOnly(
+  pair: SyncPair,
+  storedState: SyncPairState,
+  remote: RemoteSnapshot,
+): Promise<SyncAction[]> {
+  const actions: SyncAction[] = [];
+  const { filePathMap, folderPathMap } = buildRemotePaths(
+    remote.files, remote.folders, pair.remoteFolderId,
+  );
+
+  // New remote folders → create locally
+  for (const [folderId] of remote.folders) {
+    const relPath = folderPathMap.get(folderId);
+    if (!relPath) continue;
+    if (!storedState.folders[folderId]) {
+      actions.push({ type: "create-local-folder", remoteFolderId: folderId, localDir: pair.localPath, name: relPath });
+    }
+  }
+
+  // Check each remote file against stored state
+  for (const [remoteId, remoteFile] of remote.files) {
+    const stored = storedState.files[remoteId];
+    const relPath = filePathMap.get(remoteId);
+
+    if (!stored) {
+      // New remote file → download
+      const dir = remoteFile.folder_id ? folderPathMap.get(remoteFile.folder_id) ?? "" : "";
+      actions.push({
+        type: "download-new", remoteFile,
+        localDir: dir ? join(pair.localPath, dir) : pair.localPath,
+      });
+    } else if (relPath && stored.localPath !== relPath) {
+      // Remote file moved → move locally
+      actions.push({
+        type: "move-local",
+        oldLocalPath: join(pair.localPath, stored.localPath),
+        newLocalPath: join(pair.localPath, relPath),
+        remoteFile, record: stored,
+      });
+    } else if (
+      remoteFile.updated_at !== stored.remoteUpdatedAt ||
+      remoteFile.size_bytes !== stored.remoteSizeBytes ||
+      remoteFile.current_version !== stored.remoteVersion
+    ) {
+      // Remote file changed → download update
+      actions.push({
+        type: "download-update", remoteFile,
+        localPath: join(pair.localPath, stored.localPath),
+        existingRecord: stored,
+      });
+    }
+  }
+
+  // Check for remote deletions
+  for (const [id, stored] of Object.entries(storedState.files)) {
+    if (!remote.files.has(id)) {
+      // File deleted remotely → delete locally
+      actions.push({ type: "delete-local", localPath: join(pair.localPath, stored.localPath), record: stored });
+    }
+  }
+
+  return Promise.resolve(actions);
 }

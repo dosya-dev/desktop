@@ -14,6 +14,13 @@ const IGNORED_NAMES = new Set([
 const IGNORED_DIRS = new Set([
   "node_modules", ".git", ".Trash", "$RECYCLE.BIN",
   "__pycache__", ".venv", ".svn", ".hg",
+  // Linux snap mounts contain FUSE entries that misreport types/sizes
+  "snap",
+  // Linux virtual/pseudo filesystems — stat() returns bogus sizes (TB+)
+  "proc", "sys", "dev", "run", "tmp",
+  // Linux system directories that should never be synced
+  "boot", "sbin", "bin", "lib", "lib32", "lib64", "libx32",
+  "lost+found", "mnt", "media", "srv",
 ]);
 
 const IGNORED_EXTENSIONS = new Set([
