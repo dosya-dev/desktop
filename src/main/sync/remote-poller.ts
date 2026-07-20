@@ -28,7 +28,15 @@ export class RemotePoller extends EventEmitter {
   private backedOff = false;
   private pollRequestCount = 0;
   private lastPollTimestamp = 0;
+  private lastFullSnapshotAt = 0;
   private cachedSnapshot: RemoteSnapshot | null = null;
+  /**
+   * How often to discard the delta cache and re-fetch a full snapshot.
+   * Delta polls only ADD/UPDATE files; if the server can't send tombstones,
+   * remote deletions would never be observed. A periodic full snapshot
+   * guarantees deletions converge even without server-side tombstone support.
+   */
+  private static readonly FULL_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
   /** When the last actual change was detected (for adaptive interval). */
   private lastChangeAt = Date.now();
   /** Current effective poll interval (may differ from pair.pollIntervalMs when idle). */
@@ -216,7 +224,12 @@ export class RemotePoller extends EventEmitter {
     // First poll: full snapshot. Subsequent polls: delta (only changes since last poll).
     // Delta polls are typically 1 HTTP request with 0-100 changed files,
     // vs full snapshot which could be thousands of files across many pages.
-    const useDelta = this.cachedSnapshot && this.lastPollTimestamp > 0;
+    //
+    // Periodically we force a full snapshot even when a delta is available, so
+    // remote deletions converge on servers that don't emit tombstones.
+    const now = Date.now();
+    const forceFull = now - this.lastFullSnapshotAt >= RemotePoller.FULL_SNAPSHOT_INTERVAL_MS;
+    const useDelta = this.cachedSnapshot && this.lastPollTimestamp > 0 && !forceFull;
     const since = useDelta ? this.lastPollTimestamp : undefined;
     const beforePoll = Math.floor(Date.now() / 1000);
 
@@ -232,6 +245,10 @@ export class RemotePoller extends EventEmitter {
         for (const f of fast.files) {
           this.cachedSnapshot.files.set(f.id, f);
         }
+        // Apply tombstones so deletions propagate without waiting for a full snapshot
+        for (const id of fast.deleted) {
+          this.cachedSnapshot.files.delete(id);
+        }
         // Folders only come in full snapshots (first page, no cursor)
         if (fast.folders.length > 0) {
           this.cachedSnapshot.folders.clear();
@@ -243,13 +260,14 @@ export class RemotePoller extends EventEmitter {
         return this.cachedSnapshot;
       }
 
-      // Full snapshot — build and cache
+      // Full snapshot — build and cache (authoritative; catches deletions)
       const files = new Map<string, RemoteFileInfo>();
       const folders = new Map<string, RemoteFolderInfo>();
       for (const f of fast.files) files.set(f.id, f);
       for (const d of fast.folders) folders.set(d.id, d);
       this.cachedSnapshot = { files, folders };
       this.lastPollTimestamp = beforePoll;
+      this.lastFullSnapshotAt = now;
       return this.cachedSnapshot;
     }
 

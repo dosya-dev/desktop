@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -18,9 +18,11 @@ import {
   PanelLeftOpen,
   RefreshCw,
   FileUp,
+  Inbox,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useSyncPaused, useSyncPairs } from "@/lib/sync-store";
 import { api, ApiError } from "@/lib/api-client";
 import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
@@ -31,6 +33,7 @@ const navItems = [
   { to: "/files", icon: FolderOpen, label: "Files" },
   { to: "/upload", icon: Upload, label: "Upload" },
   { to: "/shared", icon: Share2, label: "Shared" },
+  { to: "/file-requests", icon: Inbox, label: "Requests" },
   { to: "/team", icon: Users, label: "Team" },
   { to: "/sync", icon: RefreshCw, label: "Sync" },
   { to: "/settings", icon: Settings, label: "Settings" },
@@ -47,53 +50,29 @@ export function Sidebar() {
   const [newWsColor, setNewWsColor] = useState("#22c55e");
   const [collapsed, setCollapsed] = useState(false);
   const [platform, setPlatform] = useState<string>("darwin");
-  const [syncPaused, setSyncPaused] = useState(false);
-  const [syncHasError, setSyncHasError] = useState(false);
-  const [syncHasPairs, setSyncHasPairs] = useState(false);
-  const [syncRunning, setSyncRunning] = useState(false);
-  /** Per-workspace sync summary: workspaceId → { syncing, error, paused, pairs } */
-  const [wsSyncMap, setWsSyncMap] = useState<Record<string, { syncing: boolean; error: boolean; paused: boolean; count: number }>>({});
+
+  // Sync state now comes from the single shared store (see AppShell.init).
+  const syncPaused = useSyncPaused();
+  const syncPairs = useSyncPairs();
+
+  /** Per-workspace sync summary: workspaceId → { syncing, error, paused, count } */
+  const wsSyncMap = useMemo(() => {
+    const map: Record<string, { syncing: boolean; error: boolean; paused: boolean; count: number }> = {};
+    for (const p of syncPairs) {
+      const wsId = p.workspaceId;
+      if (!wsId) continue;
+      if (!map[wsId]) map[wsId] = { syncing: false, error: false, paused: false, count: 0 };
+      map[wsId].count++;
+      if (p.status === "syncing") map[wsId].syncing = true;
+      if (p.status === "error") map[wsId].error = true;
+      if (p.status === "paused") map[wsId].paused = true;
+    }
+    return map;
+  }, [syncPairs]);
 
   useEffect(() => {
     ipc.getPlatform().then(setPlatform);
   }, []);
-
-  // Reset sync indicators when user changes
-  useEffect(() => {
-    if (!user) {
-      setSyncPaused(false);
-      setSyncHasError(false);
-      setSyncHasPairs(false);
-      setSyncRunning(false);
-      setWsSyncMap({});
-      return;
-    }
-
-    const update = (s: any) => {
-      const pairs = s?.pairs ?? [];
-      setSyncHasPairs(pairs.length > 0);
-      setSyncPaused(s?.globalPaused ?? false);
-      setSyncHasError(pairs.some((p: any) => p.status === "error"));
-      setSyncRunning(pairs.some((p: any) => p.status === "syncing" || p.status === "idle"));
-
-      // Build per-workspace sync summary
-      const map: Record<string, { syncing: boolean; error: boolean; paused: boolean; count: number }> = {};
-      for (const p of pairs) {
-        const wsId = p.workspaceId;
-        if (!wsId) continue;
-        if (!map[wsId]) map[wsId] = { syncing: false, error: false, paused: false, count: 0 };
-        map[wsId].count++;
-        if (p.status === "syncing") map[wsId].syncing = true;
-        if (p.status === "error") map[wsId].error = true;
-        if (p.status === "paused") map[wsId].paused = true;
-      }
-      setWsSyncMap(map);
-    };
-
-    window.electronAPI.getSyncStatus?.().then(update).catch(() => {});
-    const unsub = window.electronAPI.onSyncStatusChanged?.(update);
-    return () => unsub?.();
-  }, [user?.id]);
 
   const [apiBase, setApiBase] = useState("");
   useEffect(() => {

@@ -164,8 +164,17 @@ export class LocalWatcher extends EventEmitter {
   private pendingEvents = new Map<string, WatchEvent>();
   /** Prevents EMFILE error from flooding the log. */
   private emfileWarned = false;
-  /** True if we fell back to polling mode after an EMFILE error. */
-  private usingPollingFallback = false;
+  /**
+   * Set once the tree proved too large to watch (EMFILE). Live watching is
+   * abandoned for this pair and the engine falls back to periodic rescans.
+   * start() becomes a no-op so a later scan can't silently re-arm it.
+   */
+  private degraded = false;
+
+  /** True when live watching was abandoned (tree too large). */
+  isDegraded(): boolean {
+    return this.degraded;
+  }
 
   constructor(
     private localPath: string,
@@ -182,13 +191,14 @@ export class LocalWatcher extends EventEmitter {
 
   start(): void {
     if (this.watcher) return;
+    // Once degraded (tree too large to watch), never re-arm — a later scan
+    // calling start() must not trigger another EMFILE storm.
+    if (this.degraded) return;
     this.emfileWarned = false;
-    this.startWatcher(false);
+    this.startWatcher();
   }
 
-  private startWatcher(usePolling: boolean): void {
-    this.usingPollingFallback = usePolling;
-
+  private startWatcher(): void {
     // Merge built-in ignores with user-configured patterns
     const ignored = [
       ...CHOKIDAR_IGNORED,
@@ -200,12 +210,12 @@ export class LocalWatcher extends EventEmitter {
       ignored,
       persistent: true,
       followSymlinks: false,
-      // macOS: chokidar v4 auto-uses fsevents (single fd for entire tree).
-      // Linux: uses inotify (one watch per dir — can hit EMFILE on large trees).
-      // Windows: uses ReadDirectoryChangesW (recursive, no fd issue).
-      // Polling fallback: uses setInterval instead of OS watchers.
-      // Slower (checks every 2s) but never hits fd limits.
-      ...(usePolling ? { usePolling: true, interval: 2000 } : {}),
+      // NOTE: chokidar v4 REMOVED fsevents (its only dep is readdirp), so on
+      // every platform it opens one fd per directory. A big tree (a Gradle
+      // cache can be ~15k dirs) exhausts the process fd limit → EMFILE.
+      // We do NOT fall back to chokidar polling: that stat()s every watched
+      // path each tick (~27k paths / 2s = thousands of syscalls per second),
+      // which is far worse than the problem. See the EMFILE handler below.
       // awaitWriteFinish DISABLED — it allocates a stat-polling interval for
       // every file event (100K files = 100K timers + cached Stats = GBs of RAM).
       // Instead we rely on our debounce + maxWait batching in scheduleBatch().
@@ -232,33 +242,23 @@ export class LocalWatcher extends EventEmitter {
       if (isEmfile) {
         if (!this.emfileWarned) {
           this.emfileWarned = true;
-
-          // If not already on polling, restart with polling fallback
-          if (!this.usingPollingFallback) {
-            console.warn(
-              `[sync] EMFILE: too many open files watching "${this.localPath}". ` +
-              `Falling back to polling mode (2s interval). ` +
-              `To fix: increase fs.inotify.max_user_watches on Linux or ulimit -n on macOS.`
-            );
-            // Close the broken watcher and restart with polling
-            this.watcher?.close();
-            this.watcher = null;
-            this.startWatcher(true);
-            return;
-          }
-
-          // Already on polling — should not happen, but emit once
-          console.error(`[sync] EMFILE even in polling mode for "${this.localPath}"`);
-          this.emit("error", err);
+          this.degraded = true;
+          // Abandon live watching for this tree. Polling would stat() every
+          // path on every tick — on a 15k-directory tree that's thousands of
+          // syscalls per second and murders CPU/battery. Periodic full
+          // rescans (driven by the engine) are the right trade-off here:
+          // a backup doesn't need sub-second change detection.
+          console.warn(
+            `[sync] EMFILE: "${this.localPath}" has too many directories to watch live. ` +
+            `Switching to periodic rescans for this folder (no files are skipped).`,
+          );
+          this.stop();
+          this.emit("degraded", "emfile");
         }
         return; // suppress repeated EMFILE noise
       }
       this.emit("error", err);
     });
-
-    if (usePolling) {
-      console.log(`[sync] Watcher started in polling mode for "${this.localPath}"`);
-    }
   }
 
   stop(): void {

@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
@@ -5,28 +6,48 @@ import { queryClient } from "./lib/query-client";
 import { AuthProvider, useAuth } from "./lib/auth-context";
 import { WorkspaceProvider, useWorkspace } from "./lib/workspace-context";
 
-// Pages
+// Auth entry points stay eager so first paint after launch is instant.
 import { LoginPage } from "./pages/LoginPage";
-import { SignUpPage } from "./pages/SignUpPage";
-import { DashboardPage } from "./pages/DashboardPage";
-import { FileBrowserPage } from "./pages/FileBrowserPage";
-import { UploadPage } from "./pages/UploadPage";
-import { SharedLinksPage } from "./pages/SharedLinksPage";
-import { TeamPage } from "./pages/TeamPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { ProfilePage } from "./pages/ProfilePage";
-import { ActivityPage } from "./pages/ActivityPage";
-import { SearchPage } from "./pages/SearchPage";
-import { SyncPage } from "./pages/SyncPage";
-import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
-import { LanTransferPage } from "./pages/LanTransferPage";
-import { VerifyPage } from "./pages/VerifyPage";
-import { TwoFactorPage } from "./pages/TwoFactorPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
-import { CreateWorkspacePage } from "./pages/CreateWorkspacePage";
 
-// Layout
+// Layout (needed by every protected page — keep eager)
 import { AppShell } from "./components/layout/AppShell";
+
+// Everything else is code-split into its own chunk and loaded on demand.
+// This keeps the initial bundle small — the heavy pages (FileBrowser, Sync,
+// Profile, Upload, Settings) only download when the user navigates to them.
+// Pages use named exports, so map them to a default for React.lazy().
+const lazyPage = <T extends Record<string, React.ComponentType<any>>>(
+  loader: () => Promise<T>,
+  name: keyof T,
+) => lazy(() => loader().then((m) => ({ default: m[name] })));
+
+const SignUpPage = lazyPage(() => import("./pages/SignUpPage"), "SignUpPage");
+const DashboardPage = lazyPage(() => import("./pages/DashboardPage"), "DashboardPage");
+const FileBrowserPage = lazyPage(() => import("./pages/FileBrowserPage"), "FileBrowserPage");
+const UploadPage = lazyPage(() => import("./pages/UploadPage"), "UploadPage");
+const SharedLinksPage = lazyPage(() => import("./pages/SharedLinksPage"), "SharedLinksPage");
+const TeamPage = lazyPage(() => import("./pages/TeamPage"), "TeamPage");
+const SettingsPage = lazyPage(() => import("./pages/SettingsPage"), "SettingsPage");
+const ProfilePage = lazyPage(() => import("./pages/ProfilePage"), "ProfilePage");
+const ActivityPage = lazyPage(() => import("./pages/ActivityPage"), "ActivityPage");
+const SearchPage = lazyPage(() => import("./pages/SearchPage"), "SearchPage");
+const SyncPage = lazyPage(() => import("./pages/SyncPage"), "SyncPage");
+const FileRequestsPage = lazyPage(() => import("./pages/FileRequestsPage"), "FileRequestsPage");
+const ForgotPasswordPage = lazyPage(() => import("./pages/ForgotPasswordPage"), "ForgotPasswordPage");
+const LanTransferPage = lazyPage(() => import("./pages/LanTransferPage"), "LanTransferPage");
+const VerifyPage = lazyPage(() => import("./pages/VerifyPage"), "VerifyPage");
+const TwoFactorPage = lazyPage(() => import("./pages/TwoFactorPage"), "TwoFactorPage");
+const CreateWorkspacePage = lazyPage(() => import("./pages/CreateWorkspacePage"), "CreateWorkspacePage");
+
+/** Full-screen spinner shown while a lazily-loaded page chunk downloads. */
+function PageFallback() {
+  return (
+    <div className="flex h-screen items-center justify-center">
+      <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-primary)] border-t-transparent" />
+    </div>
+  );
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading: authLoading } = useAuth();
@@ -101,6 +122,7 @@ function AppRoutes() {
       <Route path="/activity" element={<ProtectedPage><ActivityPage /></ProtectedPage>} />
       <Route path="/search" element={<ProtectedPage><SearchPage /></ProtectedPage>} />
       <Route path="/sync" element={<ProtectedPage><SyncPage /></ProtectedPage>} />
+      <Route path="/file-requests" element={<ProtectedPage><FileRequestsPage /></ProtectedPage>} />
       <Route path="/lan-transfer" element={<ProtectedPage><LanTransferPage /></ProtectedPage>} />
       <Route path="/verify" element={<VerifyPage />} />
 
@@ -116,7 +138,9 @@ export function App() {
       <HashRouter>
         <AuthProvider>
           <WorkspaceProvider>
-          <AppRoutes />
+          <Suspense fallback={<PageFallback />}>
+            <AppRoutes />
+          </Suspense>
           </WorkspaceProvider>
           <Toaster
             position="bottom-right"

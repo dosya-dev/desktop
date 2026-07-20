@@ -353,7 +353,19 @@ function PasswordSection() {
   const [tfaModal, setTfaModal] = useState<"setup-totp" | "verify-totp" | "recovery" | "disable" | "regen" | null>(null);
   const [totpSecret, setTotpSecret] = useState("");
   const [totpUri, setTotpUri] = useState("");
+  const [totpQr, setTotpQr] = useState("");
   const [totpCode, setTotpCode] = useState("");
+
+  // Generate the authenticator QR locally (main process) whenever a new
+  // otpauth URI is issued. The secret never leaves the device.
+  useEffect(() => {
+    if (!totpUri) { setTotpQr(""); return; }
+    let cancelled = false;
+    window.electronAPI.generateTotpQr(totpUri)
+      .then((url) => { if (!cancelled) setTotpQr(url); })
+      .catch(() => { if (!cancelled) setTotpQr(""); });
+    return () => { cancelled = true; };
+  }, [totpUri]);
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [disablePw, setDisablePw] = useState("");
   const [regenPw, setRegenPw] = useState("");
@@ -491,7 +503,13 @@ function PasswordSection() {
             Scan this QR code with your authenticator app (Google Authenticator, Authy, etc.), then enter the 6-digit code.
           </p>
           <div className="mb-4 flex justify-center rounded-lg bg-[var(--color-bg-tertiary)] p-4">
-            <img src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(totpUri)}`} alt="QR Code" className="h-44 w-44" />
+            {totpQr ? (
+              <img src={totpQr} alt="Authenticator QR code" className="h-44 w-44" />
+            ) : (
+              <div className="flex h-44 w-44 items-center justify-center text-xs text-[var(--color-text-muted)]">
+                Generating QR…
+              </div>
+            )}
           </div>
           <details className="mb-4">
             <summary className="cursor-pointer text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]">Can't scan? Enter key manually</summary>

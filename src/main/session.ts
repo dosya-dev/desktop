@@ -13,11 +13,14 @@ import { app, session } from "electron";
 export function setupSession(apiBase: string): void {
   const ses = session.defaultSession;
 
-  // Spoof Origin header so the API sees requests as same-origin,
-  // and add a client identifier so the server can distinguish desktop vs web.
+  // Tag desktop requests so the server can distinguish desktop vs web.
+  // We deliberately do NOT spoof the Origin header anymore: with webSecurity
+  // enabled the browser enforces CORS against the renderer's REAL origin
+  // (app://bundle in packaged builds, http://localhost:5174 in dev). The API
+  // allows those origins via CORS_ALLOWED_ORIGINS, so overwriting Origin here
+  // would break the Access-Control-Allow-Origin match.
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
     if (details.url.startsWith(apiBase)) {
-      details.requestHeaders["Origin"] = apiBase;
       details.requestHeaders["X-Dosya-Client"] = `desktop/${app.getVersion()}`;
     }
     callback({ requestHeaders: details.requestHeaders });
@@ -34,21 +37,40 @@ export function setupSession(apiBase: string): void {
   ses.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
 
-    // Apply CSP to all frames (mainFrame + subFrame) from file:// in production.
-    // Previously only mainFrame was covered, leaving iframes unprotected.
-    if (app.isPackaged && (details.resourceType === "mainFrame" || details.resourceType === "subFrame") && details.url.startsWith("file://")) {
-      responseHeaders["Content-Security-Policy"] = [
-        [
-          "default-src 'self'",
-          "script-src 'self'",
-          "style-src 'self' 'unsafe-inline'",
-          "img-src 'self' data: blob:",
-          `connect-src 'self' ${apiBase}`,
-          "font-src 'self' data:",
-          "object-src 'none'",
-          "base-uri 'self'",
-        ].join("; "),
-      ];
+    // Apply a Content-Security-Policy to the renderer document (mainFrame +
+    // subFrame). Packaged builds load from app:// and get a strict policy; dev
+    // loads from Vite on localhost and gets a policy loose enough for HMR
+    // (inline/eval + ws) while still locking down object-src/base-uri.
+    const isRendererDoc =
+      details.resourceType === "mainFrame" || details.resourceType === "subFrame";
+    if (isRendererDoc) {
+      if (app.isPackaged && details.url.startsWith("app://")) {
+        responseHeaders["Content-Security-Policy"] = [
+          [
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            `img-src 'self' data: blob: ${apiBase}`,
+            `connect-src 'self' ${apiBase}`,
+            "font-src 'self' data:",
+            "object-src 'none'",
+            "base-uri 'self'",
+          ].join("; "),
+        ];
+      } else if (!app.isPackaged && details.url.startsWith("http://localhost")) {
+        responseHeaders["Content-Security-Policy"] = [
+          [
+            "default-src 'self' http://localhost:* ws://localhost:*",
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+            "style-src 'self' 'unsafe-inline'",
+            `img-src 'self' data: blob: http://localhost:* ${apiBase}`,
+            `connect-src 'self' http://localhost:* ws://localhost:* ${apiBase}`,
+            "font-src 'self' data:",
+            "object-src 'none'",
+            "base-uri 'self'",
+          ].join("; "),
+        ];
+      }
     }
 
     // Capture dosya_session from Set-Cookie and store it manually.

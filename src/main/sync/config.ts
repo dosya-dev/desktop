@@ -8,6 +8,7 @@ import {
   EMPTY_PAIR_STATE,
 } from "./types";
 import { stringifyOffThread } from "./state-writer";
+import { absKey } from "./paths";
 
 function syncDir(): string {
   return join(app.getPath("userData"), "sync");
@@ -26,12 +27,16 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 /**
- * Atomic write: write to a temp file, fsync, then rename.
+ * Atomic write: write to a UNIQUE temp file, fsync, then rename.
  * fsync ensures data is flushed to disk before rename, preventing
  * 0-byte files on crash (ext4 data=ordered without fsync can lose data).
+ *
+ * The temp name is made unique (pid + counter) so two concurrent writers
+ * to the same destination never share a temp file and corrupt each other.
  */
+let tmpCounter = 0;
 async function atomicWriteFile(filePath: string, data: string): Promise<void> {
-  const tmpPath = `${filePath}.tmp`;
+  const tmpPath = `${filePath}.${process.pid}.${tmpCounter++}.tmp`;
   const fh = await open(tmpPath, "w");
   try {
     await fh.writeFile(data, "utf-8");
@@ -39,7 +44,13 @@ async function atomicWriteFile(filePath: string, data: string): Promise<void> {
   } finally {
     await fh.close();
   }
-  await rename(tmpPath, filePath);
+  try {
+    await rename(tmpPath, filePath);
+  } catch (err) {
+    // Clean up the orphaned temp file if the rename failed
+    await unlink(tmpPath).catch(() => {});
+    throw err;
+  }
 }
 
 // ── Config ──────────────────────────────────────────────────────────
@@ -50,12 +61,28 @@ export async function loadConfig(): Promise<SyncConfig> {
     const parsed = JSON.parse(raw);
     // Validate required fields exist
     // Backfill missing fields on pairs saved before new fields were added
-    const pairs = Array.isArray(parsed.pairs)
+    const rawPairs = Array.isArray(parsed.pairs)
       ? parsed.pairs.map((p: any) => ({
           ...p,
           excludedPatterns: Array.isArray(p.excludedPatterns) ? p.excludedPatterns : [],
         }))
       : [];
+
+    // Self-heal: drop exact-duplicate local paths. A check-then-act race in
+    // addPair used to let the same folder be added twice, which then synced
+    // that folder twice over (two watchers, double uploads). Keep the first.
+    const seen = new Set<string>();
+    const pairs = [];
+    for (const p of rawPairs) {
+      const key = absKey(String(p.localPath ?? ""));
+      if (!key) continue;
+      if (seen.has(key)) {
+        console.warn(`[sync] Dropping duplicate sync pair for "${p.localPath}" (same folder listed twice)`);
+        continue;
+      }
+      seen.add(key);
+      pairs.push(p);
+    }
     return {
       ...DEFAULT_SYNC_CONFIG,
       ...parsed,
@@ -66,9 +93,20 @@ export async function loadConfig(): Promise<SyncConfig> {
   }
 }
 
-export async function saveConfig(config: SyncConfig): Promise<void> {
-  await ensureDir(syncDir());
-  await atomicWriteFile(configPath(), JSON.stringify(config, null, 2));
+// Serialize config writes so overlapping callers (addPair, updatePair,
+// region refresh, account switch) can't interleave and lose an update.
+let configWriteChain: Promise<void> = Promise.resolve();
+export function saveConfig(config: SyncConfig): Promise<void> {
+  // Snapshot now so a later in-place mutation of `config` doesn't change
+  // what this particular write persists.
+  const json = JSON.stringify(config, null, 2);
+  const run = configWriteChain.then(async () => {
+    await ensureDir(syncDir());
+    await atomicWriteFile(configPath(), json);
+  });
+  // Keep the chain alive even if this write rejects.
+  configWriteChain = run.catch(() => {});
+  return run;
 }
 
 // ── Per-Pair State ──────────────────────────────────────────────────

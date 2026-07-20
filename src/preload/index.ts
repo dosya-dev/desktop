@@ -6,6 +6,13 @@ const electronAPI = {
   getPlatform: (): Promise<NodeJS.Platform> =>
     ipcRenderer.invoke("app:get-platform"),
 
+  // Desktop preferences
+  getLaunchAtLogin: (): Promise<boolean> => ipcRenderer.invoke("app:get-launch-at-login"),
+  setLaunchAtLogin: (enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke("app:set-launch-at-login", enabled),
+  getStandardPaths: (): Promise<{ desktop: string | null; documents: string | null; pictures: string | null; downloads: string | null; home: string | null }> =>
+    ipcRenderer.invoke("app:get-standard-paths"),
+
   // Window controls
   minimize: (): void => ipcRenderer.send("app:minimize"),
   maximize: (): void => ipcRenderer.send("app:maximize"),
@@ -17,6 +24,10 @@ const electronAPI = {
   waitForSession: (): Promise<void> => ipcRenderer.invoke("auth:wait-for-session"),
   oauth: (provider: string): Promise<{ ok: boolean; redirectedTo?: string; error?: string }> =>
     ipcRenderer.invoke("auth:oauth", provider),
+  // Begin system-browser OAuth: returns the provider URL carrying a single-use
+  // login nonce that the dosya:// callback must echo back to be accepted.
+  beginOAuth: (provider: string): Promise<string> =>
+    ipcRenderer.invoke("auth:begin-oauth", provider),
 
   // File system
   openFileDialog: (
@@ -31,6 +42,10 @@ const electronAPI = {
 
   openFile: (fileId: string, fileName: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke("file:open", { fileId, fileName }),
+
+  // 2FA — generate the authenticator QR locally so the secret never leaves the device
+  generateTotpQr: (uri: string): Promise<string> =>
+    ipcRenderer.invoke("totp:generate-qr", uri),
 
   // Notifications
   showNotification: (opts: { title: string; body: string }): void =>
@@ -75,6 +90,7 @@ const electronAPI = {
   pauseSyncPair: (pairId: string) => ipcRenderer.invoke("sync:pause-pair", { pairId }),
   resumeSyncPair: (pairId: string) => ipcRenderer.invoke("sync:resume-pair", { pairId }),
   pauseAllSync: () => ipcRenderer.invoke("sync:pause-all"),
+  pauseAllSyncFor: (ms: number) => ipcRenderer.invoke("sync:pause-all-for", { ms }),
   resumeAllSync: () => ipcRenderer.invoke("sync:resume-all"),
   syncNow: (pairId: string) => ipcRenderer.invoke("sync:sync-now", { pairId }),
   resolveConflict: (conflictId: string, resolution: string) => ipcRenderer.invoke("sync:resolve-conflict", { conflictId, resolution }),

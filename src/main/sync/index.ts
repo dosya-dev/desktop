@@ -1,6 +1,7 @@
 import { EventEmitter } from "events";
 import { access, readdir, stat, statfs, unlink, mkdir } from "fs/promises";
-import { join, relative, resolve, sep, basename, dirname } from "path";
+import { join, resolve, sep, basename, dirname } from "path";
+import { toRelPath, normalizeRel, pathKey, absKey, longPath } from "./paths";
 import { loadConfig, saveConfig, loadPairState, savePairState, deletePairState } from "./config";
 import { terminateStateWriter } from "./state-writer";
 import { RemoteClient, RateLimitError } from "./remote-client";
@@ -55,12 +56,32 @@ class Semaphore {
   }
 }
 
+// ── Path index ──────────────────────────────────────────────────────
+//
+// localPath (relative) → remoteId, with O(1) lookup. Keys are normalized
+// (NFC + case-folded on case-insensitive filesystems) via pathKey() so that
+// macOS NFD/NFC differences and "Foo.txt"/"foo.txt" collisions map to a
+// single entry — matching how the OS treats them on disk. The real,
+// case/NFC-preserving path stays in the file record; this index only maps.
+// Same API surface as Map so call sites are unchanged.
+class PathIndex {
+  private m = new Map<string, string>();
+  set(relPath: string, remoteId: string): void { this.m.set(pathKey(relPath), remoteId); }
+  get(relPath: string): string | undefined { return this.m.get(pathKey(relPath)); }
+  delete(relPath: string): boolean { return this.m.delete(pathKey(relPath)); }
+  clear(): void { this.m.clear(); }
+  get size(): number { return this.m.size; }
+}
+
 // ── Constants ───────��────────────────────────────────���──────────────
 
 const RECENT_DOWNLOAD_TTL_MS = 120_000; // suppress watcher events for 2 min after download (large files can take >10s)
 const STATE_SAVE_INTERVAL = 500; // save state every N file operations
 const SESSION_RECOVERY_MS = 30_000; // check for session recovery every 30s
 const MAX_FILE_RETRIES = 5; // max retry attempts per persistently failing file
+const TRANSFER_CONCURRENCY_CAP = 32; // never exceed the client's per-host socket pool
+/** Rescan interval when live watching was abandoned (tree too big — EMFILE). */
+const DEGRADED_RESCAN_MS = 10 * 60 * 1000;
 
 // ── Runtime types ───���───────────────────────────────────────────────
 
@@ -73,10 +94,18 @@ interface PairRuntime {
   errorMessage: string | null;
   syncing: boolean;
   queuedSync: boolean;
-  /** O(1) lookup: localPath → remoteId */
-  pathIndex: Map<string, string>;
+  /** Watcher events that arrived while a sync was in flight, deduped by path.
+   *  Drained after the sync so deletes/moves aren't lost (a plain rescan
+   *  only re-discovers additions). */
+  queuedEvents: Map<string, WatchEvent>;
+  /** Set when queuedEvents overflowed and we fell back to a full rescan. */
+  queuedOverflow: boolean;
+  /** O(1) lookup: localPath → remoteId (normalized keys — see PathIndex) */
+  pathIndex: PathIndex;
   /** Timer for auto-resuming after rate limit pause */
   rateLimitResumeTimer: ReturnType<typeof setTimeout> | null;
+  /** Periodic rescan timer used when the watcher degraded (tree too large). */
+  rescanTimer: ReturnType<typeof setInterval> | null;
   /** Total files in the current batch operation (scan/reconcile). 0 when idle. */
   totalFilesInBatch: number;
   /** Files completed so far in the current batch. */
@@ -144,6 +173,9 @@ export class SyncEngine extends EventEmitter {
   /** Periodic timer to recover pairs stuck in SESSION_EXPIRED or RATE_LIMITED error. */
   private recoveryTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** Auto-resume timer for a timed ("snooze") pause. */
+  private pauseResumeTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** Periodic timer to evict stale entries from recentDownloads. */
   private recentDownloadsCleanupTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -156,6 +188,31 @@ export class SyncEngine extends EventEmitter {
 
   /** Per-pair save lock to prevent concurrent writes to the same state file. */
   private saveLocks = new Set<string>();
+
+  /**
+   * Serializes config-mutating operations (add/remove/update pair).
+   * Each of those does load → check → save, and `this.config` is shared
+   * instance state. Without this lock two concurrent calls both load the same
+   * config, both pass the overlap check, and both push — which is how exact
+   * duplicate pairs ended up persisted and syncing the same folder twice.
+   */
+  private configOp: Promise<unknown> = Promise.resolve();
+  private withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.configOp.then(fn, fn);
+    this.configOp = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Concurrency for lightweight direct-to-R2 transfers (presigned URLs).
+   * Derived from the user's maxConcurrentTransfers setting, bounded by the
+   * client socket pool so surplus workers don't just spin, and capped so
+   * memory stays predictable (each in-flight transfer ≈ one 64KB stream).
+   */
+  private directTransferConcurrency(): number {
+    const base = this.config?.maxConcurrentTransfers || 3;
+    return Math.min(TRANSFER_CONCURRENCY_CAP, Math.max(6, base * 6));
+  }
 
   private async safeSaveState(state: SyncPairState): Promise<void> {
     const key = state.pairId;
@@ -194,6 +251,7 @@ export class SyncEngine extends EventEmitter {
     this.started = true;
     this.config = await loadConfig();
     this.transferSemaphore.updateMax(this.config.maxConcurrentTransfers || 3);
+    this.client.setBandwidthLimits(this.config.maxUploadBytesPerSec || 0, this.config.maxDownloadBytesPerSec || 0);
 
     // Detect account switch: fetch current user ID and compare to stored config.
     // If the user changed (logout → login with different account), all sync state
@@ -248,6 +306,10 @@ export class SyncEngine extends EventEmitter {
       clearInterval(this.recoveryTimer);
       this.recoveryTimer = null;
     }
+    if (this.pauseResumeTimer) {
+      clearTimeout(this.pauseResumeTimer);
+      this.pauseResumeTimer = null;
+    }
     if (this.recentDownloadsCleanupTimer) {
       clearInterval(this.recentDownloadsCleanupTimer);
       this.recentDownloadsCleanupTimer = null;
@@ -266,6 +328,7 @@ export class SyncEngine extends EventEmitter {
       rt.poller?.removeAllListeners();
       rt.poller?.stop();
       if (rt.rateLimitResumeTimer) clearTimeout(rt.rateLimitResumeTimer);
+      if (rt.rescanTimer) { clearInterval(rt.rescanTimer); rt.rescanTimer = null; }
       rt.status = "paused";
       rt.syncing = false;
     }
@@ -413,14 +476,15 @@ export class SyncEngine extends EventEmitter {
   // ── Recent download tracking (prevents re-upload loop) ────────────
 
   private markRecentDownload(absPath: string): void {
-    this.recentDownloads.set(absPath, Date.now());
+    this.recentDownloads.set(absKey(absPath), Date.now());
   }
 
   private isRecentDownload(absPath: string): boolean {
-    const ts = this.recentDownloads.get(absPath);
+    const key = absKey(absPath);
+    const ts = this.recentDownloads.get(key);
     if (!ts) return false;
     if (Date.now() - ts > RECENT_DOWNLOAD_TTL_MS) {
-      this.recentDownloads.delete(absPath);
+      this.recentDownloads.delete(key);
       return false;
     }
     return true;
@@ -449,8 +513,11 @@ export class SyncEngine extends EventEmitter {
         errorMessage: `Sync folder not found: ${pair.localPath}`,
         syncing: false,
         queuedSync: false,
-        pathIndex: new Map(),
+        queuedEvents: new Map(),
+        queuedOverflow: false,
+        pathIndex: new PathIndex(),
         rateLimitResumeTimer: null,
+      rescanTimer: null,
         totalFilesInBatch: 0,
         completedFilesInBatch: 0,
         totalBytesInBatch: 0,
@@ -538,7 +605,7 @@ export class SyncEngine extends EventEmitter {
     }
 
     // Build path index from stored state
-    const pathIndex = new Map<string, string>();
+    const pathIndex = new PathIndex();
     for (const [remoteId, record] of Object.entries(state.files)) {
       pathIndex.set(record.localPath, remoteId);
     }
@@ -549,8 +616,11 @@ export class SyncEngine extends EventEmitter {
       errorMessage: null,
       syncing: false,
       queuedSync: false,
+      queuedEvents: new Map(),
+      queuedOverflow: false,
       pathIndex,
       rateLimitResumeTimer: null,
+      rescanTimer: null,
       totalFilesInBatch: 0,
       completedFilesInBatch: 0,
       totalBytesInBatch: 0,
@@ -591,6 +661,12 @@ export class SyncEngine extends EventEmitter {
         watcher.on("error", (err: Error) => {
           console.error(`[sync] watcher error for ${pair.id}:`, err.message);
         });
+        // In two-way mode the poller already does a full local scan on its own
+        // schedule, so losing the watcher degrades latency, not correctness.
+        watcher.on("degraded", () => {
+          this.log(pair.id, "Folder too large to watch live — relying on periodic reconcile scans");
+          rt.localDirty = true;
+        });
       }
 
       // Run initial reconcile, then start watcher + poller for ongoing changes
@@ -609,6 +685,13 @@ export class SyncEngine extends EventEmitter {
         });
         watcher.on("error", (err: Error) => {
           console.error(`[sync] watcher error for ${pair.id}:`, err.message);
+        });
+        // Tree too large to watch live (EMFILE) — the watcher is the only
+        // change trigger in push modes, so fall back to periodic full rescans
+        // so nothing is missed.
+        watcher.on("degraded", () => {
+          this.log(pair.id, "Folder too large to watch live — switching to periodic rescans");
+          this.startPeriodicRescan(pair.id);
         });
         // Deferred: watcher starts after initial scan (see runInitialScan)
       }
@@ -636,9 +719,29 @@ export class SyncEngine extends EventEmitter {
     this.emitStatus();
   }
 
+  /**
+   * Fall back to periodic full rescans for a pair whose folder is too large to
+   * watch live (EMFILE). Cheap compared to polling every path: the scan uses
+   * the same mtime/size fast-path the initial scan does.
+   */
+  private startPeriodicRescan(pairId: string): void {
+    const rt = this.runtimes.get(pairId);
+    if (!rt || rt.rescanTimer) return;
+    rt.rescanTimer = setInterval(() => {
+      const cur = this.runtimes.get(pairId);
+      if (!cur || this.stopped) return;
+      if (cur.status === "paused" || cur.status === "rate-limited" || cur.syncing) return;
+      this.runInitialScan(pairId);
+    }, DEGRADED_RESCAN_MS);
+  }
+
   private async stopPair(pairId: string): Promise<void> {
     const rt = this.runtimes.get(pairId);
     if (!rt) return;
+    if (rt.rescanTimer) {
+      clearInterval(rt.rescanTimer);
+      rt.rescanTimer = null;
+    }
     // Signal workers to stop before tearing down
     rt.status = "paused";
     rt.syncing = false;
@@ -763,14 +866,21 @@ export class SyncEngine extends EventEmitter {
       await Promise.all(localFolderActions.map(async (action) => {
         if (action.type !== "create-local-folder") return;
         const folderPath = join(action.localDir, action.name);
-        const relPath = relative(rt.pair.localPath, folderPath).split(sep).join("/");
+        const relPath = toRelPath(rt.pair.localPath, folderPath);
         if (!this.isPathSafe(rt.pair.localPath, relPath)) return;
-        await mkdir(folderPath, { recursive: true });
+        await mkdir(longPath(folderPath), { recursive: true });
       }));
     }
 
     // Step 2: Concurrent downloads via presigned URLs (100 concurrent, direct to R2)
     if (downloadActions.length > 0) {
+      // Guard disk space before writing any bytes.
+      const dlBytes = downloadActions.reduce(
+        (n, a) => n + ((a.type === "download-new" || a.type === "download-update") ? a.remoteFile.size_bytes : 0),
+        0,
+      );
+      await this.ensureDiskSpace(rt.pair.localPath, dlBytes);
+
       rt.statusText = `Downloading ${downloadActions.length.toLocaleString()} files...`;
       this.emitStatus();
 
@@ -789,7 +899,7 @@ export class SyncEngine extends EventEmitter {
         this.log(rt.pair.id, "Presigned download not available, using fallback");
       }
 
-      const DOWNLOAD_CONCURRENCY = presignedMap.size > 0 ? 50 : 8;
+      const DOWNLOAD_CONCURRENCY = presignedMap.size > 0 ? this.directTransferConcurrency() : 8;
       let dlIdx = 0;
       let dlFatalErr: Error | null = null;
 
@@ -803,10 +913,10 @@ export class SyncEngine extends EventEmitter {
           let relPath: string;
           if (action.type === "download-new") {
             absPath = join(action.localDir, action.remoteFile.name);
-            relPath = relative(rt.pair.localPath, absPath).split(sep).join("/");
+            relPath = toRelPath(rt.pair.localPath, absPath);
           } else if (action.type === "download-update") {
             absPath = action.localPath;
-            relPath = relative(rt.pair.localPath, absPath).split(sep).join("/");
+            relPath = toRelPath(rt.pair.localPath, absPath);
           } else continue;
 
           if (!this.isPathSafe(rt.pair.localPath, relPath)) continue;
@@ -815,7 +925,7 @@ export class SyncEngine extends EventEmitter {
           if (dlErr && dlErr.retryCount >= MAX_FILE_RETRIES) { dlErr.permanent = true; continue; }
 
           try {
-            await mkdir(dirname(absPath), { recursive: true });
+            await mkdir(longPath(dirname(absPath)), { recursive: true });
             const presigned = presignedMap.get(action.remoteFile.id);
             if (presigned) {
               // Direct download from R2 via presigned URL — no Worker proxy
@@ -823,7 +933,7 @@ export class SyncEngine extends EventEmitter {
                 presigned.url, absPath, action.remoteFile.size_bytes,
               );
               // Update state
-              const s = await stat(absPath);
+              const s = await stat(longPath(absPath));
               this.markRecentDownload(absPath);
               rt.state.files[action.remoteFile.id] = {
                 remoteId: action.remoteFile.id,
@@ -871,7 +981,7 @@ export class SyncEngine extends EventEmitter {
       for (const action of remoteFolderActions) {
         if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
         if (action.type !== "create-remote-folder") continue;
-        const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
+        const relPath = toRelPath(rt.pair.localPath, action.localPath);
         await this.ensureRemoteFolder(rt, relPath);
       }
     }
@@ -883,7 +993,7 @@ export class SyncEngine extends EventEmitter {
       for (const action of uploadActions) {
         if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
         if (action.type !== "upload-new" && action.type !== "upload-update") continue;
-        const relPath = relative(rt.pair.localPath, action.localPath).split(sep).join("/");
+        const relPath = toRelPath(rt.pair.localPath, action.localPath);
         await this.uploadLocalFile(rt, action.localPath, relPath);
         rt.completedFilesInBatch++;
         rt.completedBytesInBatch += action.type === "upload-new" ? action.stat.sizeBytes : action.stat.sizeBytes;
@@ -898,11 +1008,11 @@ export class SyncEngine extends EventEmitter {
       try {
         switch (action.type) {
           case "move-local": {
-            const newRelPath = relative(rt.pair.localPath, action.newLocalPath).split(sep).join("/");
+            const newRelPath = toRelPath(rt.pair.localPath, action.newLocalPath);
             try {
-              await mkdir(dirname(action.newLocalPath), { recursive: true });
+              await mkdir(longPath(dirname(action.newLocalPath)), { recursive: true });
               const { rename: fsRename } = await import("fs/promises");
-              await fsRename(action.oldLocalPath, action.newLocalPath);
+              await fsRename(longPath(action.oldLocalPath), longPath(action.newLocalPath));
               rt.pathIndex.delete(action.record.localPath);
               action.record.localPath = newRelPath;
               action.record.remoteName = action.remoteFile.name;
@@ -910,13 +1020,13 @@ export class SyncEngine extends EventEmitter {
               rt.pathIndex.set(newRelPath, action.record.remoteId);
               this.markRecentDownload(action.newLocalPath);
             } catch {
-              await mkdir(dirname(action.newLocalPath), { recursive: true });
+              await mkdir(longPath(dirname(action.newLocalPath)), { recursive: true });
               await this.downloadRemoteFile(rt, action.remoteFile, action.newLocalPath, newRelPath);
             }
             break;
           }
           case "delete-local": {
-            await unlink(action.localPath).catch(() => {});
+            await unlink(longPath(action.localPath)).catch(() => {});
             delete rt.state.files[action.record.remoteId];
             rt.pathIndex.delete(action.record.localPath);
             break;
@@ -1059,21 +1169,9 @@ export class SyncEngine extends EventEmitter {
   private async scanAndUpload(rt: PairRuntime): Promise<void> {
     const { pair, state } = rt;
 
-    // Check available disk space before starting sync.
-    // If below 500MB, warn and skip downloads to prevent data loss.
-    try {
-      const fsStats = await statfs(pair.localPath);
-      const freeBytes = fsStats.bavail * fsStats.bsize;
-      const MIN_FREE_BYTES = 500 * 1024 * 1024; // 500 MB
-      if (freeBytes < MIN_FREE_BYTES) {
-        const freeMB = Math.round(freeBytes / (1024 * 1024));
-        this.setError(rt, `Low disk space (${freeMB} MB free). Free up space to continue syncing.`);
-        this.emitStatus();
-        return;
-      }
-    } catch {
-      // statfs not available or path inaccessible — continue anyway
-    }
+    // NOTE: no disk-space check here — this is the UPLOAD path and uploads
+    // don't consume local disk. Backing up from a nearly-full disk must work.
+    // Disk space is guarded on the download paths via ensureDiskSpace().
 
     // Pre-populate state from remote if empty (reinstall / fresh pair)
     try {
@@ -1103,7 +1201,7 @@ export class SyncEngine extends EventEmitter {
     const walk = async (dir: string): Promise<void> => {
       if (this.stopped || rt.status === "paused") return;
       let entries;
-      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+      try { entries = await readdir(longPath(dir), { withFileTypes: true }); } catch { return; }
 
       const fileEntries: { absPath: string; relPath: string }[] = [];
 
@@ -1111,7 +1209,7 @@ export class SyncEngine extends EventEmitter {
         if (shouldIgnoreEntry(entry.name, entry.isDirectory(), pair.excludedPatterns)) continue;
 
         const absPath = join(dir, entry.name);
-        const relPath = relative(pair.localPath, absPath).split(sep).join("/");
+        const relPath = toRelPath(pair.localPath, absPath);
 
         if (entry.isDirectory()) {
           if (!state.folders[relPath]) {
@@ -1133,7 +1231,7 @@ export class SyncEngine extends EventEmitter {
       for (let i = 0; i < fileEntries.length; i += STAT_BATCH_SIZE) {
         const batch = fileEntries.slice(i, i + STAT_BATCH_SIZE);
         const stats = await Promise.all(
-          batch.map(f => stat(f.absPath).catch(() => null)),
+          batch.map(f => stat(longPath(f.absPath)).catch(() => null)),
         );
         for (let j = 0; j < batch.length; j++) {
           const s = stats[j];
@@ -1184,13 +1282,13 @@ export class SyncEngine extends EventEmitter {
           const i = hashIdx++;
           const entry = needsHash[i];
           try {
-            const hash = await hashFile(entry.absPath);
+            const hash = await hashFile(longPath(entry.absPath));
             if (hash !== entry.record.contentHash) {
               // Content actually changed — queue for upload
               toUpload.push({ absPath: entry.absPath, relPath: entry.relPath, isNew: false, sizeBytes: entry.sizeBytes });
             } else {
               // Content identical — just update mtime in state so we don't re-hash next time
-              const s = await stat(entry.absPath).catch(() => null);
+              const s = await stat(longPath(entry.absPath)).catch(() => null);
               if (s) entry.record.localMtimeMs = s.mtimeMs;
             }
           } catch {
@@ -1276,26 +1374,30 @@ export class SyncEngine extends EventEmitter {
     newFolders.length = 0;
 
     // ── Transferring phase ──
-    // Small files use presigned URLs (direct to R2, bypassing Worker).
-    // Large files use individual streaming upload through the Worker.
+    // Small files use presigned URLs (direct to R2, bypassing the Worker).
+    // Large files use individual streaming uploads through the Worker.
     toUpload.sort((a, b) => a.sizeBytes - b.sizeBytes);
 
     const BATCH_THRESHOLD = RemoteClient.BATCH_FILE_MAX;
-    const BATCH_SIZE = RemoteClient.BATCH_MAX_FILES;
     const smallFiles = toUpload.filter(f => f.sizeBytes <= BATCH_THRESHOLD);
     const largeFiles = toUpload.filter(f => f.sizeBytes > BATCH_THRESHOLD);
 
+    // Compute totals, then release toUpload — keeping it alongside
+    // smallFiles/largeFiles is a needless third full-size copy at 1M files.
+    const totalFiles = toUpload.length;
+    let totalBytes = 0;
+    for (const f of toUpload) totalBytes += f.sizeBytes;
+    toUpload.length = 0;
+
     rt.phase = "transferring";
-    rt.statusText = `Uploading ${toUpload.length.toLocaleString()} files...`;
-    if (toUpload.length > 0) {
-      const totalMB = Math.round(toUpload.reduce((s, f) => s + f.sizeBytes, 0) / 1024 / 1024);
-      this.log(pair.id, `Starting upload: ${toUpload.length.toLocaleString()} files (${totalMB.toLocaleString()} MB) — ${smallFiles.length.toLocaleString()} small, ${largeFiles.length.toLocaleString()} large`);
+    rt.statusText = `Uploading ${totalFiles.toLocaleString()} files...`;
+    if (totalFiles > 0) {
+      const totalMB = Math.round(totalBytes / 1024 / 1024);
+      this.log(pair.id, `Starting upload: ${totalFiles.toLocaleString()} files (${totalMB.toLocaleString()} MB) — ${smallFiles.length.toLocaleString()} small, ${largeFiles.length.toLocaleString()} large`);
     } else {
       this.log(pair.id, "Everything up to date — nothing to upload");
     }
-    this.emitStatus();
-    const totalBytes = toUpload.reduce((sum, f) => sum + f.sizeBytes, 0);
-    rt.totalFilesInBatch = toUpload.length;
+    rt.totalFilesInBatch = totalFiles;
     rt.completedFilesInBatch = 0;
     rt.totalBytesInBatch = totalBytes;
     rt.completedBytesInBatch = 0;
@@ -1305,39 +1407,37 @@ export class SyncEngine extends EventEmitter {
     let opCount = 0;
 
     // ── Phase 3a: Presigned URL upload for small files ──
-    // Client → Worker (get presigned URLs) → Client → R2 directly (100 concurrent)
+    // Client → Worker (get presigned URLs) → Client → R2 directly (bounded)
     // → Client → Worker (commit DB records). Worker never touches file bytes.
     const MANIFEST_BATCH = 5000; // files per manifest request (Worker CPU limit)
-    const UPLOAD_CONCURRENCY = 100; // concurrent direct-to-R2 uploads
+    const UPLOAD_CONCURRENCY = this.directTransferConcurrency(); // concurrent direct-to-R2 uploads (bounded)
     const COMMIT_BATCH = 5000; // files per commit request
 
-    // Filter to eligible files
-    const eligibleSmall = smallFiles.filter(f => {
-      const err = state.fileErrors[f.relPath];
-      if (err?.permanent) return false;
-      if (err && err.retryCount >= MAX_FILE_RETRIES) {
-        state.fileErrors[f.relPath].permanent = true;
-        return false;
-      }
-      return true;
-    });
-
-    // Build manifest entries with folder IDs
-    const manifestEntries = eligibleSmall.map(f => {
-      const parentRelPath = f.relPath.split("/").slice(0, -1).join("/");
-      const folderId = parentRelPath
-        ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
-        : pair.remoteFolderId;
-      return { relPath: f.relPath, name: basename(f.absPath), size: f.sizeBytes, folder_id: folderId, absPath: f.absPath };
-    });
-
-    // Process manifest in batches of 5000 (Worker CPU limit for presigned URL generation)
-    for (let mStart = 0; mStart < manifestEntries.length; mStart += MANIFEST_BATCH) {
+    // Build + process manifest chunks LAZILY from smallFiles. The old code
+    // copied the whole small-file set twice (eligibleSmall + manifestEntries);
+    // here each request only materializes a ≤MANIFEST_BATCH window, so peak
+    // memory doesn't scale with total file count.
+    let smallIdx = 0;
+    let batchNo = 0;
+    while (smallIdx < smallFiles.length) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
-      const mChunk = manifestEntries.slice(mStart, mStart + MANIFEST_BATCH);
+      const mChunk: { relPath: string; name: string; size: number; folder_id: string | null; absPath: string }[] = [];
+      while (smallIdx < smallFiles.length && mChunk.length < MANIFEST_BATCH) {
+        const f = smallFiles[smallIdx++];
+        const err = state.fileErrors[f.relPath];
+        if (err?.permanent) continue;
+        if (err && err.retryCount >= MAX_FILE_RETRIES) { state.fileErrors[f.relPath].permanent = true; continue; }
+        const parentRelPath = f.relPath.split("/").slice(0, -1).join("/");
+        const folderId = parentRelPath
+          ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
+          : pair.remoteFolderId;
+        mChunk.push({ relPath: f.relPath, name: basename(f.absPath), size: f.sizeBytes, folder_id: folderId, absPath: f.absPath });
+      }
+      if (mChunk.length === 0) continue;
+      batchNo++;
 
-      rt.statusText = `Preparing upload batch ${Math.floor(mStart / MANIFEST_BATCH) + 1}...`;
+      rt.statusText = `Preparing upload batch ${batchNo}...`;
       this.emitStatus();
 
       let manifest: Awaited<ReturnType<typeof this.client.requestManifest>>;
@@ -1417,7 +1517,7 @@ export class SyncEngine extends EventEmitter {
 
           const cChunk = uploaded.slice(cStart, cStart + COMMIT_BATCH);
           try {
-            await this.client.commitUploads(
+            const commitRes = await this.client.commitUploads(
               pair.workspaceId,
               pair.region,
               cChunk.map(u => ({
@@ -1431,17 +1531,18 @@ export class SyncEngine extends EventEmitter {
               })),
             );
 
-            // Update local state
+            // Update local state (prefer server-authoritative version/updated_at)
             for (const u of cChunk) {
               const entry = mChunk.find(f => f.relPath === u.relPath);
               const s = entry ? await stat(entry.absPath).catch(() => null) : null;
+              const srv = commitRes.results.get(u.fileId);
               state.files[u.fileId] = {
                 remoteId: u.fileId,
                 remoteName: u.name,
                 remoteFolderId: u.folderId,
                 remoteSizeBytes: u.size,
-                remoteUpdatedAt: Math.floor(Date.now() / 1000),
-                remoteVersion: 1,
+                remoteUpdatedAt: srv?.updatedAt ?? Math.floor(Date.now() / 1000),
+                remoteVersion: srv?.version ?? 1,
                 localPath: u.relPath,
                 localSizeBytes: s?.size ?? u.size,
                 localMtimeMs: s?.mtimeMs ?? Date.now(),
@@ -1548,6 +1649,16 @@ export class SyncEngine extends EventEmitter {
     if (!rt || rt.status === "paused" || rt.status === "rate-limited") return;
 
     if (rt.syncing) {
+      // Buffer events (deduped by path) to process AFTER the current sync so
+      // deletes and moves aren't lost — a plain rescan only re-finds additions.
+      const QUEUE_CAP = 200_000;
+      for (const ev of events) rt.queuedEvents.set(ev.path, ev);
+      if (rt.queuedEvents.size > QUEUE_CAP) {
+        // Too many buffered changes — drop detail, fall back to full rescan
+        // (bounded memory). Two-way reconcile still catches deletes.
+        rt.queuedEvents.clear();
+        rt.queuedOverflow = true;
+      }
       rt.queuedSync = true;
       return;
     }
@@ -1559,34 +1670,81 @@ export class SyncEngine extends EventEmitter {
     let opCount = 0;
 
     try {
-      // ── Move/rename detection ──
-      // Within this batch, if we see "unlink path A" + "add path B" and A was
-      // tracked with the same size as B, it's a move/rename — no need to
-      // delete + re-upload. We can just call the server's move/rename API.
+      // ── Move/rename detection (safe) ──
+      // A local rename shows up as unlink(A) + add(B). Relocating the cloud
+      // object beats re-uploading B and deleting A. But pairing purely by byte
+      // size is dangerous: two unrelated files of equal size (extremely common
+      // for 0-byte or round-sized files) get mis-paired — moving the WRONG
+      // cloud object and never uploading B's real bytes (silent corruption),
+      // and in push-safe silently breaking the "never lose cloud data" promise.
+      // So we only treat unlink+add as a move when identity is PROVEN:
+      //   • content-hash match (when a hash was recorded for A), or
+      //   • an unambiguous 1:1 size pairing at a non-trivial file size.
+      // Anything ambiguous falls back to the safe delete + re-upload path.
+      const MIN_MOVE_SIZE = 4096;               // below this, just re-upload
+      const MOVE_HASH_LIMIT = 64 * 1024 * 1024; // cap per-file hashing cost
+
       const unlinkEvents = new Map<string, WatchEvent>(); // relPath → event
       const addEvents = new Map<string, WatchEvent>();
       for (const event of events) {
-        const relPath = relative(rt.pair.localPath, event.path).split(sep).join("/");
+        const relPath = toRelPath(rt.pair.localPath, event.path);
         if (event.type === "unlink") unlinkEvents.set(relPath, event);
         else if (event.type === "add") addEvents.set(relPath, event);
       }
 
-      // Match unlinks to adds by file size (same size = likely a move)
-      const moves = new Map<string, string>(); // oldRelPath → newRelPath
-      const handledPaths = new Set<string>();
-      for (const [oldRel, _unlinkEv] of unlinkEvents) {
+      // Index adds by size ONCE (O(n)). The old code hashed a size-match search
+      // inside a nested unlink×add loop, which turned a large-folder rename
+      // (10k unlink + 10k add events) into ~10^8 stat() calls and froze the app.
+      const addsBySize = new Map<number, { relPath: string; path: string }[]>();
+      const trackedUnlinkBySize = new Map<number, number>();
+      const trackedUnlinks: { oldRel: string; record: import("./types").SyncFileRecord; remoteId: string; size: number }[] = [];
+      for (const [newRel, addEv] of addEvents) {
+        const s = await stat(longPath(addEv.path)).catch(() => null);
+        if (!s || !s.isFile()) continue;
+        const list = addsBySize.get(s.size);
+        if (list) list.push({ relPath: newRel, path: addEv.path });
+        else addsBySize.set(s.size, [{ relPath: newRel, path: addEv.path }]);
+      }
+      for (const [oldRel] of unlinkEvents) {
         const existing = this.lookupByPath(rt, oldRel);
         if (!existing) continue;
-        // Find an add event with same file size
-        for (const [newRel, addEv] of addEvents) {
-          if (moves.has(oldRel) || handledPaths.has(newRel)) continue;
-          const s = await stat(addEv.path).catch(() => null);
-          if (s && s.size === existing.record.localSizeBytes) {
-            moves.set(oldRel, newRel);
-            handledPaths.add(newRel);
-            handledPaths.add(oldRel);
-            break;
+        const size = existing.record.localSizeBytes;
+        trackedUnlinks.push({ oldRel, record: existing.record, remoteId: existing.remoteId, size });
+        trackedUnlinkBySize.set(size, (trackedUnlinkBySize.get(size) ?? 0) + 1);
+      }
+
+      const moves = new Map<string, string>(); // oldRelPath → newRelPath
+      const handledPaths = new Set<string>();
+      const claimedAdds = new Set<string>();
+      for (const u of trackedUnlinks) {
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
+        const candidates = (addsBySize.get(u.size) ?? []).filter(c => !claimedAdds.has(c.relPath));
+        if (candidates.length === 0) continue;
+
+        let matched: { relPath: string; path: string } | null = null;
+        if (u.record.contentHash && u.size <= MOVE_HASH_LIMIT) {
+          // Prove identity by streaming content hash (low RAM) — safe at any
+          // size, so small hashed files still get clean moves.
+          for (const c of candidates) {
+            const h = await hashFile(longPath(c.path)).catch(() => null);
+            if (h && h === u.record.contentHash) { matched = c; break; }
           }
+        } else if (
+          u.size >= MIN_MOVE_SIZE &&
+          candidates.length === 1 &&
+          trackedUnlinkBySize.get(u.size) === 1
+        ) {
+          // No recorded hash (large or previously-downloaded file): accept only
+          // a strictly unambiguous 1:1 pairing at a non-trivial size, where a
+          // coincidental same-size collision is very unlikely.
+          matched = candidates[0];
+        }
+
+        if (matched) {
+          moves.set(u.oldRel, matched.relPath);
+          claimedAdds.add(matched.relPath);
+          handledPaths.add(matched.relPath);
+          handledPaths.add(u.oldRel);
         }
       }
 
@@ -1629,7 +1787,7 @@ export class SyncEngine extends EventEmitter {
 
       for (const event of events) {
         if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
-        const relPath = relative(rt.pair.localPath, event.path).split(sep).join("/");
+        const relPath = toRelPath(rt.pair.localPath, event.path);
         const fileName = relPath.split("/").pop()!;
 
         // Skip events already handled as moves
@@ -1653,11 +1811,15 @@ export class SyncEngine extends EventEmitter {
           // This catches cases where the TTL expired but the file is still our download.
           const existing = this.lookupByPath(rt, relPath);
           if (existing) {
-            const s = await stat(event.path).catch(() => null);
+            const s = await stat(longPath(event.path)).catch(() => null);
             if (s && s.mtimeMs === existing.record.localMtimeMs && s.size === existing.record.localSizeBytes) {
               continue; // File unchanged — event was triggered by our own write or metadata touch
             }
           }
+
+          // Skip files that are still being written (a later change event will
+          // re-trigger once they settle) — avoids backing up partial content.
+          if (!(await this.isFileStable(event.path))) continue;
 
           await this.uploadLocalFile(rt, event.path, relPath);
         } else if (event.type === "unlink" && (mode === "two-way" || mode === "push")) {
@@ -1741,7 +1903,17 @@ export class SyncEngine extends EventEmitter {
         && (rt.status as SyncPairStatus) !== "error";
       if (rt.queuedSync && canRescan) {
         rt.queuedSync = false;
-        this.runInitialScan(pairId);
+        if (rt.queuedOverflow || rt.queuedEvents.size === 0) {
+          // Overflowed (or nothing precise buffered) → full rescan.
+          rt.queuedOverflow = false;
+          rt.queuedEvents.clear();
+          this.runInitialScan(pairId);
+        } else {
+          // Replay the exact buffered events so deletes/moves are honored.
+          const drained = Array.from(rt.queuedEvents.values());
+          rt.queuedEvents.clear();
+          this.handleLocalChanges(pairId, drained);
+        }
       }
     }
   }
@@ -1781,6 +1953,16 @@ export class SyncEngine extends EventEmitter {
         buildPath(id);
       }
 
+      // Guard disk space up-front — pull can otherwise fill the volume.
+      let neededBytes = 0;
+      for (const [remoteId, file] of snapshot.files) {
+        const existing = rt.state.files[remoteId];
+        if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
+          neededBytes += file.size_bytes;
+        }
+      }
+      await this.ensureDiskSpace(rt.pair.localPath, neededBytes);
+
       // Download new/changed remote files
       for (const [remoteId, file] of snapshot.files) {
         if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
@@ -1789,7 +1971,7 @@ export class SyncEngine extends EventEmitter {
         if (folderId && folderId !== rt.pair.remoteFolderId) {
           relDir = folderPaths.get(folderId) ?? "";
         }
-        const relPath = relDir ? `${relDir}/${file.name}` : file.name;
+        const relPath = normalizeRel(relDir ? `${relDir}/${file.name}` : file.name);
 
         // FIX: Path traversal validation
         if (!this.isPathSafe(rt.pair.localPath, relPath)) {
@@ -1801,7 +1983,7 @@ export class SyncEngine extends EventEmitter {
         const existing = rt.state.files[remoteId];
 
         if (!existing) {
-          await mkdir(dirname(absPath), { recursive: true });
+          await mkdir(longPath(dirname(absPath)), { recursive: true });
           await this.downloadRemoteFile(rt, file, absPath, relPath);
         } else if (
           file.updated_at !== existing.remoteUpdatedAt ||
@@ -1839,7 +2021,7 @@ export class SyncEngine extends EventEmitter {
             if (!remoteIds.has(id)) {
               const absPath = join(rt.pair.localPath, record.localPath);
               try {
-                await unlink(absPath);
+                await unlink(longPath(absPath));
                 delete rt.state.files[id];
                 rt.pathIndex.delete(record.localPath);
                 console.log(`[sync] Deleted local: ${record.localPath}`);
@@ -1871,6 +2053,49 @@ export class SyncEngine extends EventEmitter {
     } finally {
       rt.syncing = false;
       this.emitStatus();
+    }
+  }
+
+  /**
+   * Best-effort check that a file isn't still being written. Only files
+   * touched in the last ~2s pay a small delay; everything else returns
+   * immediately. Cheap insurance against uploading a half-written file when
+   * a large copy outruns the watcher debounce (awaitWriteFinish is disabled
+   * for memory reasons, so this is our stability gate).
+   */
+  private async isFileStable(absPath: string): Promise<boolean> {
+    const p = longPath(absPath);
+    const s1 = await stat(p).catch(() => null);
+    if (!s1) return false;
+    if (Date.now() - s1.mtimeMs > 2000) return true; // at rest already
+    await new Promise((r) => setTimeout(r, 400));
+    const s2 = await stat(p).catch(() => null);
+    if (!s2) return false;
+    return s2.size === s1.size && s2.mtimeMs === s1.mtimeMs;
+  }
+
+  // ── Disk-space guard (downloads only) ─────────────────────────────
+
+  /**
+   * Throw if the destination volume can't hold `neededBytes` plus a safety
+   * margin. Downloads are the only operation that consumes local disk, so
+   * this guards the download/pull paths — uploads never call it (a backup
+   * FROM a nearly-full disk must still be able to upload).
+   */
+  private async ensureDiskSpace(localPath: string, neededBytes: number): Promise<void> {
+    let freeBytes: number | null = null;
+    try {
+      const s = await statfs(localPath);
+      freeBytes = s.bavail * s.bsize;
+    } catch {
+      freeBytes = null; // statfs unavailable (some network drives) — allow
+    }
+    if (freeBytes === null) return;
+    const MARGIN = 256 * 1024 * 1024; // keep 256 MB headroom
+    if (freeBytes < neededBytes + MARGIN) {
+      const freeMB = Math.round(freeBytes / (1024 * 1024));
+      const needMB = Math.round((neededBytes + MARGIN) / (1024 * 1024));
+      throw new Error(`Low disk space: ${freeMB.toLocaleString()} MB free, need ~${needMB.toLocaleString()} MB. Free up space to continue syncing.`);
     }
   }
 
@@ -1915,7 +2140,7 @@ export class SyncEngine extends EventEmitter {
         },
       );
 
-      const s = await stat(absPath);
+      const s = await stat(longPath(absPath));
 
       // Mark as recently downloaded to suppress watcher re-upload
       this.markRecentDownload(absPath);
@@ -1950,7 +2175,7 @@ export class SyncEngine extends EventEmitter {
     if (this.stopped) { this.transferSemaphore.release(); return; }
 
     const fileName = relPath.split("/").pop()!;
-    const s = await stat(absPath);
+    const s = await stat(longPath(absPath));
 
     // Find the remote folder ID for this file's parent directory
     const parentRelPath = relPath.split("/").slice(0, -1).join("/");
@@ -1992,9 +2217,13 @@ export class SyncEngine extends EventEmitter {
       );
 
       // Re-stat after upload to get the actual mtime (file may have been modified during upload)
-      const postStat = await stat(absPath).catch(() => s);
+      const postStat = await stat(longPath(absPath)).catch(() => s);
 
-      const version = existing ? existing.record.remoteVersion + 1 : 1;
+      // Prefer the server's authoritative version/updated_at when returned;
+      // fall back to a client estimate only if the endpoint omitted them.
+      // Guessing these is a source of spurious download-update churn.
+      const version = result.version ?? (existing ? existing.record.remoteVersion + 1 : 1);
+      const remoteUpdatedAt = result.updatedAt ?? Math.floor(Date.now() / 1000);
 
       // Clean up old entry if fileId changed
       if (existingFileId && existingFileId !== result.fileId) {
@@ -2008,7 +2237,7 @@ export class SyncEngine extends EventEmitter {
       // and the size check alone is sufficient for them.
       const HASH_SIZE_LIMIT = 50 * 1024 * 1024; // 50 MB
       const fileHash = postStat.size <= HASH_SIZE_LIMIT
-        ? await hashFile(absPath).catch(() => undefined)
+        ? await hashFile(longPath(absPath)).catch(() => undefined)
         : undefined;
 
       rt.state.files[result.fileId] = {
@@ -2016,7 +2245,7 @@ export class SyncEngine extends EventEmitter {
         remoteName: result.name,
         remoteFolderId: remoteFolderId,
         remoteSizeBytes: postStat.size,
-        remoteUpdatedAt: Math.floor(Date.now() / 1000),
+        remoteUpdatedAt,
         remoteVersion: version,
         localPath: relPath,
         localSizeBytes: postStat.size,
@@ -2118,6 +2347,10 @@ export class SyncEngine extends EventEmitter {
       this.transferSemaphore.updateMax(updates.maxConcurrentTransfers);
     }
     Object.assign(this.config, updates);
+    // Apply bandwidth caps live (0 = unlimited).
+    if (updates.maxUploadBytesPerSec !== undefined || updates.maxDownloadBytesPerSec !== undefined) {
+      this.client.setBandwidthLimits(this.config.maxUploadBytesPerSec || 0, this.config.maxDownloadBytesPerSec || 0);
+    }
     await saveConfig(this.config);
   }
 
@@ -2156,15 +2389,32 @@ export class SyncEngine extends EventEmitter {
   }
 
   async addPair(pair: SyncPair): Promise<void> {
+    return this.withConfigLock(() => this.addPairLocked(pair));
+  }
+
+  private async addPairLocked(pair: SyncPair): Promise<void> {
     this.config = await loadConfig();
 
     // Prevent overlapping sync pairs — two pairs watching the same or nested
-    // local paths would race on watcher events and corrupt state.
-    const newPath = resolve(pair.localPath);
+    // local paths would race on watcher events and double-upload.
+    // Compare on normalized keys: on macOS/Windows "/Users/x/Docs" and
+    // "/users/x/docs" are the SAME folder, and a case-sensitive compare would
+    // let the very overlap this guard exists to prevent slip through.
+    const newKey = absKey(resolve(pair.localPath));
     for (const existing of this.config.pairs) {
-      const existingPath = resolve(existing.localPath);
-      if (newPath === existingPath || newPath.startsWith(existingPath + sep) || existingPath.startsWith(newPath + sep)) {
-        throw new Error(`This folder overlaps with an existing sync pair ("${existing.remoteFolderName}"). Choose a different folder.`);
+      const existingKey = absKey(resolve(existing.localPath));
+      const isSame = newKey === existingKey;
+      const isInside = newKey.startsWith(existingKey + sep);
+      const contains = existingKey.startsWith(newKey + sep);
+      if (isSame || isInside || contains) {
+        // Name the conflicting LOCAL path — that's what the user has to act on.
+        const relation = isSame ? "is already being synced"
+          : isInside ? "is inside a folder that's already synced"
+          : "contains a folder that's already synced";
+        throw new Error(
+          `This folder ${relation}: "${existing.localPath}" → "${existing.remoteFolderName}". ` +
+          `Remove that sync folder first, or choose a different one.`,
+        );
       }
     }
 
@@ -2190,6 +2440,10 @@ export class SyncEngine extends EventEmitter {
   }
 
   async removePair(pairId: string): Promise<void> {
+    return this.withConfigLock(() => this.removePairLocked(pairId));
+  }
+
+  private async removePairLocked(pairId: string): Promise<void> {
     this.config = await loadConfig();
     const pair = this.config.pairs.find(p => p.id === pairId);
 
@@ -2211,6 +2465,10 @@ export class SyncEngine extends EventEmitter {
   }
 
   async updatePair(pairId: string, updates: Partial<SyncPair>): Promise<void> {
+    return this.withConfigLock(() => this.updatePairLocked(pairId, updates));
+  }
+
+  private async updatePairLocked(pairId: string, updates: Partial<SyncPair>): Promise<void> {
     this.config = await loadConfig();
     const idx = this.config.pairs.findIndex(p => p.id === pairId);
     if (idx === -1) throw new Error("Pair not found");
@@ -2270,13 +2528,27 @@ export class SyncEngine extends EventEmitter {
   }
 
   async pauseAll(): Promise<void> {
+    // Any manual pause cancels a pending timed auto-resume.
+    if (this.pauseResumeTimer) { clearTimeout(this.pauseResumeTimer); this.pauseResumeTimer = null; }
     this.config = await loadConfig();
     this.config.pausedGlobally = true;
     await saveConfig(this.config);
     for (const [id] of this.runtimes) await this.pausePair(id);
   }
 
+  /** Pause everything, then auto-resume after `ms` (a "snooze"). */
+  async pauseAllFor(ms: number): Promise<void> {
+    await this.pauseAll(); // clears any existing timer first
+    if (ms > 0) {
+      this.pauseResumeTimer = setTimeout(() => {
+        this.pauseResumeTimer = null;
+        this.resumeAll().catch(() => {});
+      }, ms);
+    }
+  }
+
   async resumeAll(): Promise<void> {
+    if (this.pauseResumeTimer) { clearTimeout(this.pauseResumeTimer); this.pauseResumeTimer = null; }
     this.config = await loadConfig();
     this.config.pausedGlobally = false;
     await saveConfig(this.config);
@@ -2314,14 +2586,14 @@ export class SyncEngine extends EventEmitter {
     // Resolve asynchronously — awaited so IPC handler propagates errors
     try {
       if (resolution === "keep-local") {
-        const relPath = relative(rt.pair.localPath, conflict.localPath).split(sep).join("/");
+        const relPath = toRelPath(rt.pair.localPath, conflict.localPath);
         await this.uploadLocalFile(rt, conflict.localPath, relPath);
       } else if (resolution === "keep-remote") {
         // Delete local state so the next reconcile treats the remote file as new and downloads it.
         const existing = rt.state.files[conflict.remoteId];
         if (existing) {
           // Delete the local file so the download doesn't think it's unchanged
-          await unlink(conflict.localPath).catch(() => {});
+          await unlink(longPath(conflict.localPath)).catch(() => {});
           delete rt.state.files[conflict.remoteId];
           rt.pathIndex.delete(existing.localPath);
         }
@@ -2334,9 +2606,9 @@ export class SyncEngine extends EventEmitter {
         const conflictPath = `${base} (conflict ${dateStr})${ext}`;
 
         const { rename: fsRename } = await import("fs/promises");
-        await fsRename(conflict.localPath, conflictPath);
+        await fsRename(longPath(conflict.localPath), longPath(conflictPath));
 
-        const conflictRelPath = relative(rt.pair.localPath, conflictPath).split(sep).join("/");
+        const conflictRelPath = toRelPath(rt.pair.localPath, conflictPath);
         await this.uploadLocalFile(rt, conflictPath, conflictRelPath);
       }
 
@@ -2399,12 +2671,13 @@ export class SyncEngine extends EventEmitter {
         if (folderPaths.has(fid)) return folderPaths.get(fid)!;
         const folder = snapshot.folders.get(fid);
         if (!folder) return "";
+        const name = normalizeRel(folder.name);
         if (!folder.parent_id || folder.parent_id === pair.remoteFolderId) {
-          folderPaths.set(fid, folder.name);
-          return folder.name;
+          folderPaths.set(fid, name);
+          return name;
         }
         const parentPath = buildPath(folder.parent_id);
-        const p = parentPath ? `${parentPath}/${folder.name}` : folder.name;
+        const p = parentPath ? `${parentPath}/${name}` : name;
         folderPaths.set(fid, p);
         return p;
       };
@@ -2426,7 +2699,7 @@ export class SyncEngine extends EventEmitter {
     for (const [id, f] of snapshot.files) {
       const dir = f.folder_id && f.folder_id !== pair.remoteFolderId
         ? folderPaths.get(f.folder_id) ?? "" : "";
-      const relPath = dir ? `${dir}/${f.name}` : f.name;
+      const relPath = normalizeRel(dir ? `${dir}/${f.name}` : f.name);
       state.files[id] = {
         remoteId: id, remoteName: f.name, remoteFolderId: f.folder_id,
         remoteSizeBytes: f.size_bytes, remoteUpdatedAt: f.updated_at,
@@ -2536,11 +2809,11 @@ export class SyncEngine extends EventEmitter {
   /** Clean up orphaned .dosya-sync-tmp files left by crashed downloads. */
   private async cleanupTempFiles(dir: string): Promise<void> {
     let entries;
-    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = await readdir(longPath(dir), { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
-      if (entry.isFile() && entry.name.endsWith(".dosya-sync-tmp")) {
-        await unlink(fullPath).catch(() => {});
+      if (entry.isFile() && (entry.name.endsWith(".dosya-sync-tmp") || entry.name.endsWith(".dosya-sync-tmp.meta"))) {
+        await unlink(longPath(fullPath)).catch(() => {});
       } else if (entry.isDirectory() && !shouldIgnoreEntry(entry.name, true)) {
         await this.cleanupTempFiles(fullPath);
       }

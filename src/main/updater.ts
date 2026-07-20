@@ -121,9 +121,15 @@ export async function initAutoUpdater(): Promise<void> {
 
     // Use dosya.dev's own update feed instead of GitHub Releases.
     // Builds are uploaded to R2 and served via /api/desktop/latest.
+    //
+    // Must be api.dosya.dev, NOT dosya.dev: the apex domain is the Astro
+    // marketing site and serves no /api routes. This was previously pointed at
+    // https://dosya.dev/api/desktop, which meant every update check fetched a
+    // 404 for latest-*.yml and silently reported "no update available" — so
+    // installed clients could never auto-update at all.
     autoUpdater.setFeedURL({
       provider: "generic",
-      url: "https://dosya.dev/api/desktop",
+      url: "https://api.dosya.dev/api/desktop",
     });
 
     autoUpdater.autoDownload = !isCrashLoop;

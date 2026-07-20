@@ -2,44 +2,21 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Minus, Square, X, Pause, Play, RefreshCw, ArrowUpDown } from "lucide-react";
 import { ipc } from "@/lib/ipc";
-import { useAuth } from "@/lib/auth-context";
+import { useSyncPaused, useSyncSyncing, useSyncHasPairs } from "@/lib/sync-store";
 import logoSvg from "@/assets/logo.svg";
 
 export function TitleBar() {
-  const { user } = useAuth();
   const [platform, setPlatform] = useState<string>("darwin");
-  const [syncPaused, setSyncPaused] = useState(false);
-  const [syncSyncing, setSyncSyncing] = useState(false);
-  const [hasPairs, setHasPairs] = useState(false);
+  // Read from the shared store via primitive selectors — this component now
+  // only re-renders when one of these booleans actually flips, not on every
+  // sync-status tick during a transfer.
+  const syncPaused = useSyncPaused();
+  const syncSyncing = useSyncSyncing();
+  const hasPairs = useSyncHasPairs();
 
   useEffect(() => {
     ipc.getPlatform().then(setPlatform);
   }, []);
-
-  // Reset sync state when user changes (login/logout/switch)
-  useEffect(() => {
-    if (!user) {
-      setSyncPaused(false);
-      setSyncSyncing(false);
-      setHasPairs(false);
-      return;
-    }
-
-    window.electronAPI.getSyncStatus?.()
-      .then((s: any) => {
-        setSyncPaused(s?.globalPaused ?? false);
-        setSyncSyncing(s?.pairs?.some((p: any) => p.status === "syncing") ?? false);
-        setHasPairs((s?.pairs?.length ?? 0) > 0);
-      })
-      .catch(() => {});
-
-    const unsub = window.electronAPI.onSyncStatusChanged?.((s: any) => {
-      setSyncPaused(s?.globalPaused ?? false);
-      setSyncSyncing(s?.pairs?.some((p: any) => p.status === "syncing") ?? false);
-      setHasPairs((s?.pairs?.length ?? 0) > 0);
-    });
-    return () => unsub?.();
-  }, [user?.id]);
 
   const toggleSync = () => {
     if (syncPaused) {

@@ -1,6 +1,7 @@
-import { join, relative, sep } from "path";
+import { join } from "path";
 import { readdir, stat } from "fs/promises";
 import { shouldIgnoreEntry } from "./local-watcher";
+import { toRelPath, normalizeRel, longPath } from "./paths";
 import type {
   SyncPairState,
   SyncFileRecord,
@@ -32,18 +33,24 @@ const YIELD_INTERVAL = 20; // yield every 20 batches (1000 files) to keep UI res
 async function scanLocal(
   rootPath: string,
   userPatterns?: string[],
-): Promise<{ files: Map<string, LocalFileStat>; dirs: Set<string> }> {
+): Promise<{ files: Map<string, LocalFileStat>; dirs: Set<string>; incomplete: boolean }> {
   const files = new Map<string, LocalFileStat>();
   const dirs = new Set<string>();
   let yieldCounter = 0;
+  // True if ANY directory failed to read. When set, the reconciler must NOT
+  // treat locally-absent files as deletions — they may just be unreadable
+  // (drive spun down, permission flip, AV lock), and deleting them from the
+  // cloud would be catastrophic data loss for a backup.
+  let incomplete = false;
 
   async function walk(dir: string, depth: number): Promise<void> {
-    if (depth > MAX_FOLDER_DEPTH) return;
+    if (depth > MAX_FOLDER_DEPTH) { incomplete = true; return; }
 
     let entries;
     try {
-      entries = await readdir(dir, { withFileTypes: true });
+      entries = await readdir(longPath(dir), { withFileTypes: true });
     } catch {
+      incomplete = true;
       return;
     }
 
@@ -54,7 +61,7 @@ async function scanLocal(
       if (shouldIgnoreEntry(entry.name, entry.isDirectory(), userPatterns)) continue;
 
       const fullPath = join(dir, entry.name);
-      const relPath = relative(rootPath, fullPath).split(sep).join("/");
+      const relPath = toRelPath(rootPath, fullPath);
 
       if (entry.isDirectory()) {
         dirs.add(relPath);
@@ -72,7 +79,7 @@ async function scanLocal(
     for (let i = 0; i < fileEntries.length; i += STAT_BATCH_SIZE) {
       const batch = fileEntries.slice(i, i + STAT_BATCH_SIZE);
       const stats = await Promise.all(
-        batch.map(f => stat(f.fullPath).catch(() => null)),
+        batch.map(f => stat(longPath(f.fullPath)).catch(() => null)),
       );
       for (let j = 0; j < batch.length; j++) {
         const s = stats[j];
@@ -90,7 +97,7 @@ async function scanLocal(
   }
 
   await walk(rootPath, 0);
-  return { files, dirs };
+  return { files, dirs, incomplete };
 }
 
 /**
@@ -115,13 +122,14 @@ function buildRemotePaths(
 
     const folder = remoteFolders.get(folderId);
     if (!folder) return "";
+    const name = normalizeRel(folder.name);
     const parentId = folder.parent_id;
     if (!parentId || parentId === rootFolderId) {
-      folderPathMap.set(folderId, folder.name);
-      return folder.name;
+      folderPathMap.set(folderId, name);
+      return name;
     }
     const parentPath = folderPath(parentId);
-    const p = parentPath ? `${parentPath}/${folder.name}` : folder.name;
+    const p = parentPath ? `${parentPath}/${name}` : name;
     folderPathMap.set(folderId, p);
     return p;
   }
@@ -133,11 +141,12 @@ function buildRemotePaths(
   const filePathMap = new Map<string, string>();
   for (const [id, file] of remoteFiles) {
     const folderId = file.folder_id;
+    const name = normalizeRel(file.name);
     if (!folderId || folderId === rootFolderId) {
-      filePathMap.set(id, file.name);
+      filePathMap.set(id, name);
     } else {
       const fp = folderPathMap.get(folderId);
-      filePathMap.set(id, fp ? `${fp}/${file.name}` : file.name);
+      filePathMap.set(id, fp ? `${fp}/${name}` : name);
     }
   }
 
@@ -153,7 +162,7 @@ export async function reconcile(
   remote: RemoteSnapshot,
 ): Promise<SyncAction[]> {
   const actions: SyncAction[] = [];
-  const { files: localFiles, dirs: localDirs } = await scanLocal(pair.localPath, pair.excludedPatterns);
+  const { files: localFiles, dirs: localDirs, incomplete: localScanIncomplete } = await scanLocal(pair.localPath, pair.excludedPatterns);
   const { filePathMap, folderPathMap } = buildRemotePaths(
     remote.files,
     remote.folders,
@@ -409,14 +418,40 @@ export async function reconcile(
   }
 
   // Clean up stale records: files that exist in stored state but are gone from both
-  // remote and local (Case 6)
-  for (const id of Object.keys(storedState.files)) {
-    if (!processedIds.has(id)) continue;
-    const stored = storedState.files[id];
-    const remoteFile = remote.files.get(id);
-    const localStat = stored.localPath ? localFiles.get(stored.localPath) : undefined;
-    if (!remoteFile && !localStat) {
-      delete storedState.files[id];
+  // remote and local (Case 6). Skip when the local scan was incomplete — a file
+  // that only *looks* absent this pass must not have its tracking dropped.
+  if (!localScanIncomplete) {
+    for (const id of Object.keys(storedState.files)) {
+      if (!processedIds.has(id)) continue;
+      const stored = storedState.files[id];
+      const remoteFile = remote.files.get(id);
+      const localStat = stored.localPath ? localFiles.get(stored.localPath) : undefined;
+      if (!remoteFile && !localStat) {
+        delete storedState.files[id];
+      }
+    }
+  }
+
+  // ── Deletion safety valve ──────────────────────────────────────────
+  // Deleting user data (local files or cloud files) is the one irreversible
+  // thing this engine does. Guard it: if the local scan failed to read some
+  // directories, or if the number of deletions is an implausibly large share
+  // of tracked files (symptom of a transient partial scan or an incomplete
+  // remote snapshot), suppress ALL deletions this cycle. They will be applied
+  // on a later, healthy pass. Mirrors the pull-path guard in the engine.
+  const deleteCount = actions.reduce(
+    (n, a) => n + (a.type === "delete-local" || a.type === "delete-remote" ? 1 : 0),
+    0,
+  );
+  if (deleteCount > 0) {
+    const storedCount = Object.keys(storedState.files).length;
+    const massDelete = storedCount > 10 && deleteCount > 5 && deleteCount > storedCount * 0.5;
+    if (localScanIncomplete || massDelete) {
+      const reason = localScanIncomplete
+        ? "local scan was incomplete (a directory could not be read)"
+        : `${deleteCount}/${storedCount} deletions exceeds the safety threshold`;
+      console.warn(`[sync] Suppressing ${deleteCount} deletion(s) this cycle — ${reason}. Will retry when healthy.`);
+      return actions.filter((a) => a.type !== "delete-local" && a.type !== "delete-remote");
     }
   }
 
@@ -485,10 +520,23 @@ export function reconcileRemoteOnly(
   }
 
   // Check for remote deletions
+  let deleteCount = 0;
   for (const [id, stored] of Object.entries(storedState.files)) {
     if (!remote.files.has(id)) {
       // File deleted remotely → delete locally
       actions.push({ type: "delete-local", localPath: join(pair.localPath, stored.localPath), record: stored });
+      deleteCount++;
+    }
+  }
+
+  // Deletion safety valve (same rationale as reconcile): if an implausibly
+  // large share of tracked files appear deleted, the remote snapshot is
+  // likely incomplete — suppress deletions until a healthy pass.
+  if (deleteCount > 0) {
+    const storedCount = Object.keys(storedState.files).length;
+    if (storedCount > 10 && deleteCount > 5 && deleteCount > storedCount * 0.5) {
+      console.warn(`[sync] Suppressing ${deleteCount} local deletion(s) — ${deleteCount}/${storedCount} exceeds safety threshold (snapshot likely incomplete).`);
+      return Promise.resolve(actions.filter((a) => a.type !== "delete-local"));
     }
   }
 

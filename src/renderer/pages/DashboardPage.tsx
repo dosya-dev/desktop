@@ -17,6 +17,7 @@ import { FileIcon } from "@/components/files/FileIcon";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useSyncPairs } from "@/lib/sync-store";
 import { formatBytes, formatRelative, fileIcon } from "@/lib/format";
 
 interface DashboardData {
@@ -332,22 +333,8 @@ export function DashboardPage() {
 
 function SyncCard() {
   const navigate = useNavigate();
-  const [pairs, setPairs] = useState<any[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [globalPaused, setGlobalPaused] = useState(false);
-
-  useEffect(() => {
-    window.electronAPI.getSyncStatus?.()
-      .then((s: any) => {
-        setPairs(s?.pairs ?? []);
-        setGlobalPaused(s?.globalPaused ?? false);
-        setLoaded(true);
-      })
-      .catch(() => setLoaded(true));
-  }, []);
-  const syncing = pairs.filter((p) => p.status === "syncing").length;
-  const errors = pairs.filter((p) => p.status === "error").length;
-  const paused = globalPaused;
+  // Live, typed pairs from the shared store — updates in place as sync runs.
+  const pairs = useSyncPairs();
 
   return (
     <Card

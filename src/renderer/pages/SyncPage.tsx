@@ -25,7 +25,7 @@ import {
   ShieldCheck,
   HardDriveDownload,
 } from "lucide-react";
-import { useSyncStore, type SyncPairRuntimeStatus, type SyncConflict, type SyncLogEntry } from "@/lib/sync-store";
+import { useSyncStore, type SyncPairRuntimeStatus, type SyncConflict, type SyncLogEntry, type ActiveTransfer } from "@/lib/sync-store";
 import { useWorkspace } from "@/lib/workspace-context";
 import { api } from "@/lib/api-client";
 import { formatBytes, formatRelative } from "@/lib/format";
@@ -33,6 +33,12 @@ import { FolderIcon, syncIconSrc } from "@/components/files/FileIcon";
 import { toast } from "sonner";
 
 type Tab = "overview" | "conflicts" | "activity" | "settings";
+
+// Stable empty arrays so the useMemo derivations below don't see a new `[]`
+// reference on every render when the store is momentarily empty.
+const EMPTY_PAIRS: SyncPairRuntimeStatus[] = [];
+const EMPTY_TRANSFERS: ActiveTransfer[] = [];
+const EMPTY_CONFLICTS: SyncConflict[] = [];
 
 const SYNC_MODES = [
   { id: "two-way", label: "Full Sync", desc: "Mirror every action in both directions. Changes on either side are reflected everywhere." },
@@ -54,20 +60,25 @@ export function SyncPage() {
     return cleanup;
   }, [init]);
 
-  const allPairs = status?.pairs ?? [];
-  const allTransfers = status?.activeTransfers ?? [];
+  const allPairs = status?.pairs ?? EMPTY_PAIRS;
+  const allTransfers = status?.activeTransfers ?? EMPTY_TRANSFERS;
   // Use unresolvedConflicts from status (always up-to-date) as primary source,
   // fall back to the separate conflicts array from the store
-  const allConflicts = (status?.unresolvedConflicts?.length ? status.unresolvedConflicts : conflicts) ?? [];
+  const allConflicts = (status?.unresolvedConflicts?.length ? status.unresolvedConflicts : conflicts) ?? EMPTY_CONFLICTS;
 
   // Show only data belonging to the active workspace.
   // Sync runs in the background for all workspaces — this is just a UI filter.
-  const pairIds = new Set(
-    active ? allPairs.filter((p) => p.workspaceId === active.id).map((p) => p.pairId) : allPairs.map((p) => p.pairId),
+  // Memoized on the underlying store data (stable refs when status is unchanged)
+  // so unrelated re-renders (typing in a form, switching tabs) don't rebuild
+  // these arrays or re-run the syncProgress aggregation below.
+  const activeId = active?.id;
+  const pairIds = useMemo(
+    () => new Set(activeId ? allPairs.filter((p) => p.workspaceId === activeId).map((p) => p.pairId) : allPairs.map((p) => p.pairId)),
+    [allPairs, activeId],
   );
-  const pairs = allPairs.filter((p) => pairIds.has(p.pairId));
-  const transfers = allTransfers.filter((t) => pairIds.has(t.pairId));
-  const wsConflicts = allConflicts.filter((c) => pairIds.has(c.pairId));
+  const pairs = useMemo(() => allPairs.filter((p) => pairIds.has(p.pairId)), [allPairs, pairIds]);
+  const transfers = useMemo(() => allTransfers.filter((t) => pairIds.has(t.pairId)), [allTransfers, pairIds]);
+  const wsConflicts = useMemo(() => allConflicts.filter((c) => pairIds.has(c.pairId)), [allConflicts, pairIds]);
 
   // Aggregate progress across all syncing pairs
   const syncProgress = useMemo(() => {
@@ -102,7 +113,7 @@ export function SyncPage() {
     let earliest = syncing.reduce((min, p) => (p.batchStartedAt && (min === 0 || p.batchStartedAt < min)) ? p.batchStartedAt : min, 0);
     if (!earliest && transfers.length > 0) {
       earliest = transfers.reduce((min, t) => {
-        const started = (t as any).startedAt || 0;
+        const started = t.startedAt || 0;
         return started && (min === 0 || started < min) ? started : min;
       }, 0);
     }
@@ -858,59 +869,119 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
 
 // ── SyncSettings ────────────────────────────────────────────────────
 
+function PrefToggle({ label, description, checked, onChange }: { label: string; description: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        <p className="text-sm font-medium">{label}</p>
+        <p className="text-xs text-[var(--color-text-muted)]">{description}</p>
+      </div>
+      <button
+        onClick={() => onChange(!checked)}
+        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"}`}
+      >
+        <div className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--color-bg)] shadow transition-transform ${checked ? "translate-x-5" : "translate-x-0.5"}`} />
+      </button>
+    </div>
+  );
+}
+
 function SyncSettings() {
   const [pollInterval, setPollInterval] = useState(30);
   const [maxTransfers, setMaxTransfers] = useState(3);
+  const [uploadKbps, setUploadKbps] = useState(0);   // KB/s, 0 = unlimited
+  const [downloadKbps, setDownloadKbps] = useState(0);
+  const [pauseOnBattery, setPauseOnBattery] = useState(false);
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
 
   useEffect(() => {
     window.electronAPI.getSyncConfig().then((c: any) => {
       setPollInterval(Math.round((c.globalPollIntervalMs ?? 30000) / 1000));
       setMaxTransfers(c.maxConcurrentTransfers ?? 3);
+      setUploadKbps(Math.round((c.maxUploadBytesPerSec ?? 0) / 1024));
+      setDownloadKbps(Math.round((c.maxDownloadBytesPerSec ?? 0) / 1024));
+      setPauseOnBattery(!!c.pauseOnBattery);
     });
+    window.electronAPI.getLaunchAtLogin?.().then(setLaunchAtLogin).catch(() => {});
   }, []);
 
   const save = async () => {
     await window.electronAPI.saveSyncConfig({
       globalPollIntervalMs: pollInterval * 1000,
       maxConcurrentTransfers: maxTransfers,
+      maxUploadBytesPerSec: Math.max(0, Math.round(uploadKbps)) * 1024,
+      maxDownloadBytesPerSec: Math.max(0, Math.round(downloadKbps)) * 1024,
+      pauseOnBattery,
     });
     toast.success("Sync settings saved");
   };
 
+  const toggleLaunch = async (v: boolean) => {
+    const applied = await window.electronAPI.setLaunchAtLogin?.(v).catch(() => v);
+    setLaunchAtLogin(applied ?? v);
+  };
+
+  const snooze = async (ms: number, label: string) => {
+    await window.electronAPI.pauseAllSyncFor?.(ms);
+    toast.success(`Sync paused for ${label} — will resume automatically`);
+  };
+
+  const numCls = "w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]";
+  const border = { borderColor: "var(--color-border)" };
+
   return (
-    <div className="max-w-sm space-y-4">
-      <div>
-        <label className="mb-1 block text-sm font-medium">Poll interval (seconds)</label>
-        <input
-          type="number"
-          value={pollInterval}
-          onChange={(e) => setPollInterval(Number(e.target.value))}
-          min={10}
-          max={300}
-          className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
-          style={{ borderColor: "var(--color-border)" }}
-        />
-        <p className="mt-1 text-xs text-[var(--color-text-muted)]">How often to check for remote changes</p>
+    <div className="max-w-md space-y-6">
+      {/* Transfer settings */}
+      <div className="space-y-4">
+        <div>
+          <label className="mb-1 block text-sm font-medium">Poll interval (seconds)</label>
+          <input type="number" value={pollInterval} onChange={(e) => setPollInterval(Number(e.target.value))} min={10} max={300} className={numCls} style={border} />
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">How often to check for remote changes</p>
+        </div>
+        <div>
+          <label className="mb-1 block text-sm font-medium">Max concurrent transfers</label>
+          <input type="number" value={maxTransfers} onChange={(e) => setMaxTransfers(Number(e.target.value))} min={1} max={10} className={numCls} style={border} />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="mb-1 block text-sm font-medium">Upload limit (KB/s)</label>
+            <input type="number" value={uploadKbps} onChange={(e) => setUploadKbps(Number(e.target.value))} min={0} className={numCls} style={border} />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium">Download limit (KB/s)</label>
+            <input type="number" value={downloadKbps} onChange={(e) => setDownloadKbps(Number(e.target.value))} min={0} className={numCls} style={border} />
+          </div>
+        </div>
+        <p className="text-xs text-[var(--color-text-muted)]">0 = unlimited. Limits apply across all transfers.</p>
+        <PrefToggle label="Pause on battery" description="Stop syncing while running on battery power" checked={pauseOnBattery} onChange={setPauseOnBattery} />
+        <button onClick={save} className="rounded-lg px-4 py-2 text-sm font-medium text-white" style={{ background: "var(--color-primary)" }}>
+          Save settings
+        </button>
       </div>
-      <div>
-        <label className="mb-1 block text-sm font-medium">Max concurrent transfers</label>
-        <input
-          type="number"
-          value={maxTransfers}
-          onChange={(e) => setMaxTransfers(Number(e.target.value))}
-          min={1}
-          max={10}
-          className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
-          style={{ borderColor: "var(--color-border)" }}
-        />
+
+      {/* Desktop app */}
+      <div className="space-y-3 border-t pt-5" style={border}>
+        <h3 className="text-sm font-semibold">Desktop app</h3>
+        <PrefToggle label="Launch at login" description="Start dosya automatically when you sign in" checked={launchAtLogin} onChange={toggleLaunch} />
       </div>
-      <button
-        onClick={save}
-        className="rounded-lg px-4 py-2 text-sm font-medium text-white"
-        style={{ background: "var(--color-primary)" }}
-      >
-        Save settings
-      </button>
+
+      {/* Snooze */}
+      <div className="space-y-2 border-t pt-5" style={border}>
+        <h3 className="text-sm font-semibold">Snooze sync</h3>
+        <p className="text-xs text-[var(--color-text-muted)]">Pause everything and auto-resume later.</p>
+        <div className="flex flex-wrap gap-2">
+          {[
+            { ms: 30 * 60 * 1000, label: "30 min" },
+            { ms: 60 * 60 * 1000, label: "1 hour" },
+            { ms: 4 * 60 * 60 * 1000, label: "4 hours" },
+            { ms: 8 * 60 * 60 * 1000, label: "8 hours" },
+          ].map((o) => (
+            <button key={o.label} onClick={() => snooze(o.ms, o.label)} className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={border}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -933,6 +1004,11 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
   const [remoteFolderId, setRemoteFolderId] = useState<string | null>(null);
   const [remoteFolderName, setRemoteFolderName] = useState("Root");
   const [localPath, setLocalPath] = useState("");
+  const [stdPaths, setStdPaths] = useState<{ desktop: string | null; documents: string | null; pictures: string | null; downloads: string | null; home: string | null } | null>(null);
+
+  useEffect(() => {
+    window.electronAPI.getStandardPaths?.().then(setStdPaths).catch(() => {});
+  }, []);
 
   // Step 2: sync mode
   const [syncMode, setSyncMode] = useState("push-safe");
@@ -1137,6 +1213,33 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     Browse
                   </button>
                 </div>
+
+                {/* Known-folder quick backup presets */}
+                {stdPaths && (
+                  <div className="mt-2">
+                    <p className="mb-1.5 text-xs text-[var(--color-text-muted)]">Quick backup:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ["Desktop", stdPaths.desktop],
+                        ["Documents", stdPaths.documents],
+                        ["Pictures", stdPaths.pictures],
+                        ["Downloads", stdPaths.downloads],
+                      ] as const)
+                        .filter(([, p]) => !!p)
+                        .map(([label, p]) => (
+                          <button
+                            key={label}
+                            type="button"
+                            onClick={() => setLocalPath(p!)}
+                            className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+                            style={{ borderColor: localPath === p ? "var(--color-primary)" : "var(--color-border)", color: localPath === p ? "var(--color-primary)" : undefined }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

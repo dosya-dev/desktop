@@ -36,6 +36,11 @@ export interface SyncConfig {
   globalPollIntervalMs: number;
   pausedGlobally: boolean;
   maxConcurrentTransfers: number;
+  /** Upload/download rate caps in bytes/sec. 0 or undefined = unlimited. */
+  maxUploadBytesPerSec?: number;
+  maxDownloadBytesPerSec?: number;
+  /** Pause all sync while the machine is running on battery. */
+  pauseOnBattery?: boolean;
   /** User ID that owns this sync config. Used to detect account switches. */
   userId?: string;
 }
@@ -45,6 +50,9 @@ export const DEFAULT_SYNC_CONFIG: SyncConfig = {
   globalPollIntervalMs: 30_000,
   pausedGlobally: false,
   maxConcurrentTransfers: 3,
+  maxUploadBytesPerSec: 0,
+  maxDownloadBytesPerSec: 0,
+  pauseOnBattery: false,
 };
 
 // ── Persisted Sync State (per pair) ─────────────────────────────────

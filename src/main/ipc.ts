@@ -12,6 +12,7 @@ import { createWriteStream } from "fs";
 import { mkdir, rm } from "fs/promises";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";
+import QRCode from "qrcode";
 import { clearSessionCookie } from "./session";
 
 /** Allowed OAuth providers (prevents open redirect via arbitrary provider strings). */
@@ -46,6 +47,27 @@ export function registerIpcHandlers(apiBase: string): void {
   });
 
   ipcMain.handle("app:get-platform", () => process.platform);
+
+  // ── Launch at login ──────────────────────────────────────────────
+  ipcMain.handle("app:get-launch-at-login", () => app.getLoginItemSettings().openAtLogin);
+  ipcMain.handle("app:set-launch-at-login", (_e, enabled: boolean) => {
+    app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true });
+    return app.getLoginItemSettings().openAtLogin;
+  });
+
+  // ── Standard OS folders (for known-folder backup presets) ────────
+  ipcMain.handle("app:get-standard-paths", () => {
+    const get = (name: Parameters<typeof app.getPath>[0]) => {
+      try { return app.getPath(name); } catch { return null; }
+    };
+    return {
+      desktop: get("desktop"),
+      documents: get("documents"),
+      pictures: get("pictures"),
+      downloads: get("downloads"),
+      home: get("home"),
+    };
+  });
 
   // ── Auth ─────────────────────────────────────────────────────────
 
@@ -268,6 +290,17 @@ export function registerIpcHandlers(apiBase: string): void {
       return { ok: true };
     },
   );
+
+  // ── 2FA QR generation ────────────────────────────────────────────
+  // Render the authenticator QR entirely on-device. The otpauth:// URI embeds
+  // the raw TOTP shared secret, so it must NEVER be sent to a third-party image
+  // service (it previously went to api.qrserver.com). Generated locally here.
+  ipcMain.handle("totp:generate-qr", async (_event, uri: string) => {
+    if (typeof uri !== "string" || !uri.startsWith("otpauth://") || uri.length > 1000) {
+      throw new Error("Invalid TOTP URI");
+    }
+    return QRCode.toDataURL(uri, { width: 220, margin: 1, errorCorrectionLevel: "M" });
+  });
 
   // ── Notifications ────────────────────────────────────────────────
 

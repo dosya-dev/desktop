@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, useRef, useEffect, type FormEvent } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
 import { ipc } from "@/lib/ipc";
@@ -12,6 +12,12 @@ export function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  // Pending OAuth teardown (IPC listener + 2-min timeout). Held in a ref so we
+  // can tear it down when the flow completes AND if the page unmounts first —
+  // otherwise the timer would fire on an unmounted component.
+  const oauthCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => oauthCleanup.current?.(), []);
 
   // Already logged in — skip login page and go straight to dashboard
   if (!authLoading && isAuthenticated) {
@@ -40,16 +46,21 @@ export function LoginPage() {
     setLoading(true);
 
     // Open the system browser for OAuth — user is already logged into Google/GitHub there.
-    // The server redirects back to dosya://auth/callback?token=xxx which the app catches.
-    const apiBase = await window.electronAPI.getApiBase();
-    const oauthUrl = `${apiBase}/api/auth/${provider}?desktop=1`;
+    // beginOAuth mints a single-use nonce in the main process and returns the
+    // provider URL carrying it; the dosya://auth/callback is only accepted if it
+    // echoes that nonce back. The server redirects to dosya://auth/callback?token=…&state=…
+    const oauthUrl = await window.electronAPI.beginOAuth(provider);
 
     // Open in system browser (Chrome, Firefox, etc.)
     window.open(oauthUrl, "_blank");
 
+    // Tear down any previous in-flight attempt before starting a new one.
+    oauthCleanup.current?.();
+
     // Listen for the callback from the main process
     const unsub = window.electronAPI.onOAuthComplete(async () => {
-      unsub();
+      oauthCleanup.current?.();
+      oauthCleanup.current = null;
       try {
         await window.electronAPI.waitForSession();
         await refreshUser();
@@ -61,14 +72,19 @@ export function LoginPage() {
       }
     });
 
-    // Timeout after 2 minutes if user doesn't complete OAuth
-    setTimeout(() => {
-      unsub();
-      if (loading) {
-        setLoading(false);
-        setError("Login timed out. Please try again.");
-      }
+    // Timeout after 2 minutes if the user doesn't complete OAuth
+    const timer = setTimeout(() => {
+      oauthCleanup.current?.();
+      oauthCleanup.current = null;
+      setLoading(false);
+      setError("Login timed out. Please try again.");
     }, 120_000);
+
+    // One combined teardown for both the listener and the timer.
+    oauthCleanup.current = () => {
+      unsub();
+      clearTimeout(timer);
+    };
   }
 
   return (

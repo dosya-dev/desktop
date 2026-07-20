@@ -122,6 +122,10 @@ export function registerSyncIpcHandlers(engine: SyncEngine): void {
     return engine.resumePair(pairId);
   });
   ipcMain.handle("sync:pause-all", () => engine.pauseAll());
+  ipcMain.handle("sync:pause-all-for", (_e, { ms }) => {
+    const n = typeof ms === "number" && ms > 0 && ms <= 24 * 60 * 60 * 1000 ? ms : 60 * 60 * 1000;
+    return engine.pauseAllFor(n);
+  });
   ipcMain.handle("sync:resume-all", () => engine.resumeAll());
   ipcMain.handle("sync:sync-now", (_e, { pairId }) => {
     assertString(pairId, "pairId");

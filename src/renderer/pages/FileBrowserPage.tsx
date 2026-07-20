@@ -1,6 +1,7 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ChevronRight,
   LayoutGrid,
@@ -141,6 +142,7 @@ export function FileBrowserPage() {
     share_count: number;
     comment_count: number;
   } | null>(null);
+  const [versionsFile, setVersionsFile] = useState<{ id: string; name: string } | null>(null);
   const [moveTarget, setMoveTarget] = useState<{
     id: string;
     name: string;
@@ -831,7 +833,7 @@ export function FileBrowserPage() {
                 icon={<History size={14} />}
                 label="Version history"
                 onClick={() => {
-                  window.open(`https://dosya.dev/files/versions?id=${contextMenu.item.id}`, "_blank");
+                  setVersionsFile({ id: contextMenu.item.id, name: contextMenu.item.name });
                   setContextMenu(null);
                 }}
               />
@@ -1006,6 +1008,15 @@ export function FileBrowserPage() {
         />
       )}
 
+      {versionsFile && (
+        <VersionHistoryModal
+          fileId={versionsFile.id}
+          fileName={versionsFile.name}
+          onClose={() => setVersionsFile(null)}
+          onRestored={() => queryClient.invalidateQueries({ queryKey: ["files"] })}
+        />
+      )}
+
       {/* Move / Copy Folder Picker Modal */}
       {/* Delete Confirmation Modal */}
       {deleteConfirm && (
@@ -1108,6 +1119,116 @@ function CtxItem({
   );
 }
 
+interface FileVersion {
+  id: string;
+  version_number: number;
+  size_bytes: number;
+  extension: string | null;
+  uploaded_by: string;
+  created_at: number;
+  uploader_name: string | null;
+}
+
+/** Native in-app version history + restore (replaces the old "open web" punt). */
+function VersionHistoryModal({
+  fileId,
+  fileName,
+  onClose,
+  onRestored,
+}: {
+  fileId: string;
+  fileName: string;
+  onClose: () => void;
+  onRestored: () => void;
+}) {
+  const [versions, setVersions] = useState<FileVersion[]>([]);
+  const [currentVersion, setCurrentVersion] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [restoring, setRestoring] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.get<{ ok: boolean; current_version: number; versions: FileVersion[] }>(
+        `/api/files/${fileId}/versions`,
+      );
+      setVersions(data.versions ?? []);
+      setCurrentVersion(data.current_version ?? 1);
+    } catch {
+      setVersions([]);
+    }
+    setLoading(false);
+  }, [fileId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const restore = async (versionNumber: number) => {
+    setRestoring(versionNumber);
+    try {
+      await api.post(`/api/files/${fileId}/versions/restore`, { version_number: versionNumber });
+      toast.success(`Restored to v${versionNumber}`);
+      await load();
+      onRestored();
+    } catch {
+      toast.error("Restore failed");
+    }
+    setRestoring(null);
+  };
+
+  return (
+    <Modal onClose={onClose}>
+      <div className="mb-1 flex items-center gap-2">
+        <History size={18} className="text-[var(--color-primary)]" />
+        <h3 className="text-lg font-semibold">Version history</h3>
+      </div>
+      <p className="mb-4 truncate text-xs text-[var(--color-text-muted)]">{fileName}</p>
+      {loading ? (
+        <div className="py-8 text-center text-sm text-[var(--color-text-muted)]">Loading…</div>
+      ) : versions.length === 0 ? (
+        <div className="py-8 text-center text-sm text-[var(--color-text-muted)]">No previous versions.</div>
+      ) : (
+        <div className="max-h-80 space-y-1 overflow-y-auto">
+          {versions.map((v) => {
+            const isCurrent = v.version_number === currentVersion;
+            return (
+              <div key={v.id} className="flex items-center gap-3 rounded-lg border px-3 py-2" style={{ borderColor: "var(--color-border)" }}>
+                <div className="min-w-0 flex-1">
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    v{v.version_number}
+                    {isCurrent && (
+                      <span className="rounded bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]">Current</span>
+                    )}
+                  </p>
+                  <p className="truncate text-xs text-[var(--color-text-muted)]">
+                    {formatBytes(v.size_bytes)} · {formatRelative(v.created_at)}{v.uploader_name ? ` · ${v.uploader_name}` : ""}
+                  </p>
+                </div>
+                {!isCurrent && (
+                  <button
+                    onClick={() => restore(v.version_number)}
+                    disabled={restoring !== null}
+                    className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)] disabled:opacity-50"
+                    style={{ borderColor: "var(--color-border)" }}
+                  >
+                    {restoring === v.version_number ? "Restoring…" : "Restore"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="mt-5 flex justify-end">
+        <button onClick={onClose} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>
+          Close
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 function Modal({
   children,
   onClose,
@@ -1149,11 +1270,39 @@ function FolderPickerModal({
   onConfirm: () => void;
   onClose: () => void;
 }) {
-  // Build tree from flat list
-  const getChildren = (parentId: string | null) =>
-    folders.filter((f) => f.parent_id === parentId && f.id !== excludeId);
+  type Folder = { id: string; name: string; parent_id: string | null; file_count: number };
 
-  const rootFolders = getChildren(null);
+  // Flatten the (always-expanded) tree into a single ordered list ONCE, in
+  // O(n) via a children map — the old code re-filtered the whole array at every
+  // node (O(n²)) and rendered every folder unconditionally. Row 0 is the
+  // synthetic "Root" option so the whole thing virtualizes uniformly.
+  const rows = useMemo(() => {
+    const childrenMap = new Map<string | null, Folder[]>();
+    for (const f of folders) {
+      if (f.id === excludeId) continue; // drop the excluded folder (and thus its subtree)
+      const arr = childrenMap.get(f.parent_id);
+      if (arr) arr.push(f);
+      else childrenMap.set(f.parent_id, [f]);
+    }
+    const out: { folder: Folder | null; depth: number }[] = [{ folder: null, depth: 0 }];
+    const walk = (parentId: string | null, depth: number) => {
+      for (const f of childrenMap.get(parentId) ?? []) {
+        out.push({ folder: f, depth });
+        walk(f.id, depth + 1);
+      }
+    };
+    walk(null, 0);
+    return out;
+  }, [folders, excludeId]);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const ROW_H = 36;
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_H,
+    overscan: 12,
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
@@ -1166,32 +1315,35 @@ function FolderPickerModal({
           <p className="text-xs text-[var(--color-text-muted)]">Select destination folder</p>
         </div>
 
-        <div className="max-h-72 overflow-y-auto p-2">
-          {/* Root option */}
-          <button
-            onClick={() => onSelect(null)}
-            className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-              selectedId === null
-                ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
-                : "hover:bg-[var(--color-bg-secondary)]"
-            }`}
-          >
-            <FolderIcon fileCount={1} size={16} />
-            Root (top level)
-          </button>
-
-          {/* Folder tree */}
-          {rootFolders.map((f) => (
-            <FolderTreeItem
-              key={f.id}
-              folder={f}
-              allFolders={folders}
-              excludeId={excludeId}
-              selectedId={selectedId}
-              onSelect={onSelect}
-              depth={0}
-            />
-          ))}
+        <div ref={scrollRef} className="max-h-72 overflow-y-auto p-2">
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+            {virtualizer.getVirtualItems().map((vi) => {
+              const row = rows[vi.index];
+              const isRoot = row.folder === null;
+              const id = isRoot ? null : row.folder!.id;
+              const selected = selectedId === id;
+              return (
+                <button
+                  key={vi.key}
+                  onClick={() => onSelect(id)}
+                  className={`absolute left-0 flex w-full items-center gap-2.5 rounded-lg pr-3 text-sm transition-colors ${
+                    selected
+                      ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
+                      : "hover:bg-[var(--color-bg-secondary)]"
+                  }`}
+                  style={{
+                    top: 0,
+                    height: ROW_H,
+                    transform: `translateY(${vi.start}px)`,
+                    paddingLeft: `${12 + (isRoot ? 0 : row.depth * 20)}px`,
+                  }}
+                >
+                  <FolderIcon fileCount={isRoot ? 1 : row.folder!.file_count} size={16} />
+                  <span className="truncate">{isRoot ? "Root (top level)" : row.folder!.name}</span>
+                </button>
+              );
+            })}
+          </div>
 
           {folders.length === 0 && (
             <p className="py-4 text-center text-sm text-[var(--color-text-muted)]">
@@ -1223,51 +1375,6 @@ function FolderPickerModal({
   );
 }
 
-function FolderTreeItem({
-  folder,
-  allFolders,
-  excludeId,
-  selectedId,
-  onSelect,
-  depth,
-}: {
-  folder: { id: string; name: string; parent_id: string | null; file_count: number };
-  allFolders: { id: string; name: string; parent_id: string | null; file_count: number }[];
-  excludeId?: string;
-  selectedId: string | null;
-  onSelect: (id: string | null) => void;
-  depth: number;
-}) {
-  const children = allFolders.filter((f) => f.parent_id === folder.id && f.id !== excludeId);
-
-  return (
-    <>
-      <button
-        onClick={() => onSelect(folder.id)}
-        className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-          selectedId === folder.id
-            ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
-            : "hover:bg-[var(--color-bg-secondary)]"
-        }`}
-        style={{ paddingLeft: `${12 + depth * 20}px` }}
-      >
-        <FolderIcon fileCount={folder.file_count} size={16} />
-        <span className="truncate">{folder.name}</span>
-      </button>
-      {children.map((child) => (
-        <FolderTreeItem
-          key={child.id}
-          folder={child}
-          allFolders={allFolders}
-          excludeId={excludeId}
-          selectedId={selectedId}
-          onSelect={onSelect}
-          depth={depth + 1}
-        />
-      ))}
-    </>
-  );
-}
 
 interface Comment {
   id: string;

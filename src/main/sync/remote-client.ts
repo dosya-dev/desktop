@@ -1,18 +1,91 @@
 import { app, session } from "electron";
 import { createReadStream, createWriteStream, readFileSync } from "fs";
-import { stat, readFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
-import { basename, extname, resolve as pathResolve } from "path";
+import { stat, readFile, writeFile as fsWriteFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
+import { basename, extname } from "path";
+import { Transform, type Readable } from "stream";
+import { longPath } from "./paths";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
 import http from "http";
 import https from "https";
 import { URL } from "url";
 
-// Persistent HTTP agents with keep-alive and higher socket pool.
+// ── Bandwidth throttling ────────────────────────────────────────────
+// A token bucket shared by all transfers in one direction, so the cap is a
+// real aggregate limit rather than per-connection. Rate 0 = unlimited.
+class TokenBucket {
+  private tokens: number;
+  private lastRefill = 0; // set on first use to avoid Date.now() at module load
+  constructor(private ratePerSec: number) {
+    this.tokens = ratePerSec;
+  }
+  setRate(ratePerSec: number): void {
+    this.ratePerSec = Math.max(0, ratePerSec);
+    const burst = this.burst();
+    if (this.tokens > burst) this.tokens = burst;
+  }
+  get unlimited(): boolean {
+    return this.ratePerSec <= 0;
+  }
+  private burst(): number {
+    // Allow a small burst so throughput isn't choppy (min 64KB).
+    return Math.max(this.ratePerSec, 64 * 1024);
+  }
+  private refill(): void {
+    const now = Date.now();
+    if (this.lastRefill === 0) { this.lastRefill = now; return; }
+    const elapsed = (now - this.lastRefill) / 1000;
+    this.tokens = Math.min(this.burst(), this.tokens + elapsed * this.ratePerSec);
+    this.lastRefill = now;
+  }
+  async take(n: number): Promise<void> {
+    if (this.unlimited) return;
+    // Loop until enough tokens have refilled for `n` bytes.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      this.refill();
+      if (this.tokens >= n) { this.tokens -= n; return; }
+      const deficit = n - this.tokens;
+      const waitMs = Math.min(200, Math.max(5, (deficit / this.ratePerSec) * 1000));
+      await sleep(waitMs);
+    }
+  }
+}
+
+/**
+ * Transform that paces a stream to a TokenBucket. On the download side its
+ * backpressure slows the socket read (real bandwidth limit); on the upload
+ * side it paces bytes to the request. Bypass entirely when the bucket is
+ * unlimited so there's zero overhead in the common case.
+ */
+class ThrottleStream extends Transform {
+  constructor(private bucket: TokenBucket) {
+    super();
+  }
+  async _transform(chunk: Buffer, _enc: string, cb: (err?: Error | null) => void): Promise<void> {
+    try {
+      const CH = 16 * 1024;
+      for (let offset = 0; offset < chunk.length; offset += CH) {
+        const slice = chunk.subarray(offset, offset + CH);
+        await this.bucket.take(slice.length);
+        this.push(slice);
+      }
+      cb();
+    } catch (err) {
+      cb(err as Error);
+    }
+  }
+}
+
+// Persistent HTTP agents with keep-alive and a bounded socket pool.
 // Without these, each request opens a new TCP+TLS handshake (~100ms).
 // With keep-alive, connections are reused — critical when uploading
 // 38K files (saves ~38K x 100ms = ~63 min of handshake overhead).
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 16 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 16 });
+// maxSockets is the real concurrency ceiling per host and the main RAM lever
+// (each socket ~= one in-flight stream). Kept modest on purpose; the engine's
+// worker counts are derived to stay at/under this so workers don't just spin.
+const MAX_SOCKETS_PER_HOST = 32;
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS_PER_HOST });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS_PER_HOST });
 
 function agentFor(url: string | URL): http.Agent | https.Agent {
   const protocol = typeof url === "string" ? new URL(url).protocol : url.protocol;
@@ -100,7 +173,25 @@ export class RemoteClient {
   private cookieCachedAt = 0;
   private static readonly COOKIE_CACHE_TTL = 60_000; // 60s
 
+  /** Aggregate up/down bandwidth caps (bytes/sec). 0 = unlimited. */
+  private uploadBucket = new TokenBucket(0);
+  private downloadBucket = new TokenBucket(0);
+
   constructor(private apiBase: string) {}
+
+  /** Set aggregate bandwidth caps in bytes/sec (0 = unlimited). */
+  setBandwidthLimits(uploadBytesPerSec: number, downloadBytesPerSec: number): void {
+    this.uploadBucket.setRate(uploadBytesPerSec || 0);
+    this.downloadBucket.setRate(downloadBytesPerSec || 0);
+  }
+
+  /** Wrap a readable through the given bucket, or return it unchanged when unlimited. */
+  private throttle(src: Readable, bucket: TokenBucket): Readable {
+    if (bucket.unlimited) return src;
+    const t = new ThrottleStream(bucket);
+    src.on("error", (err) => t.destroy(err));
+    return src.pipe(t);
+  }
 
   /** Invalidate the cached cookie (call on login/logout). */
   clearCookieCache(): void {
@@ -387,11 +478,10 @@ export class RemoteClient {
     expectedSize: number = -1,
     onProgress?: (bytesTransferred: number) => void,
   ): Promise<number> {
-    if (process.platform === "win32" && localPath.length > 259 && !localPath.startsWith("\\\\?\\")) {
-      localPath = `\\\\?\\${pathResolve(localPath)}`;
-    }
-
+    localPath = longPath(localPath);
     const tmpPath = `${localPath}.dosya-sync-tmp`;
+    const metaPath = `${tmpPath}.meta`;
+    const apiHostname = new URL(this.apiBase).hostname;
     let lastErr: Error | null = null;
 
     for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
@@ -399,45 +489,20 @@ export class RemoteClient {
         const sessionCookie = await this.getSessionCookie();
         if (!sessionCookie) throw new Error("SESSION_EXPIRED");
 
-        // Check if a partial download exists from a previous failed attempt.
-        // If so, resume from where it left off using HTTP Range header.
-        let existingBytes = 0;
-        try {
-          const tmpStat = await stat(tmpPath);
-          if (tmpStat.isFile() && tmpStat.size > 0 && expectedSize > 0 && tmpStat.size < expectedSize) {
-            existingBytes = tmpStat.size;
-          } else if (tmpStat.size >= expectedSize && expectedSize > 0) {
-            // Already complete — just verify and rename
-            await fsRename(tmpPath, localPath);
-            onProgress?.(expectedSize);
-            return expectedSize;
-          }
-        } catch {
-          // No tmp file — start from scratch
-        }
-
-        const bytesWritten = await this.streamDownload(
-          `/api/files/${fileId}/download`,
-          tmpPath,
-          sessionCookie,
-          existingBytes,
+        const total = await this.downloadToFile(
+          `${this.apiBase}/api/files/${fileId}/download`,
+          localPath, tmpPath, metaPath, expectedSize,
+          { cookie: sessionCookie, cookieHost: apiHostname },
           onProgress,
         );
-
-        const totalBytes = existingBytes + bytesWritten;
-        if (expectedSize >= 0 && totalBytes !== expectedSize) {
-          await fsUnlink(tmpPath).catch(() => {});
-          throw new Error(`Download size mismatch: expected ${expectedSize}, got ${totalBytes}`);
-        }
-
-        await fsRename(tmpPath, localPath);
-        return totalBytes;
+        return total;
       } catch (err: any) {
         lastErr = err;
         // DON'T delete tmp file on retryable errors — we'll resume from it
         if (err instanceof RateLimitError) throw err;
         if (NON_RETRYABLE.has(err.message)) {
           await fsUnlink(tmpPath).catch(() => {});
+          await fsUnlink(metaPath).catch(() => {});
           throw err;
         }
         if (attempt < RETRY_DELAYS.length) {
@@ -453,90 +518,149 @@ export class RemoteClient {
     throw lastErr ?? new Error("Download failed after retries");
   }
 
+  /** Read the resume validator (ETag / Last-Modified) saved next to a partial download. */
+  private async readDownloadValidator(metaPath: string): Promise<{ etag?: string; lastModified?: string } | null> {
+    try {
+      const raw = await readFile(metaPath, "utf-8");
+      const j = JSON.parse(raw);
+      if (j && (j.etag || j.lastModified)) return j;
+    } catch {}
+    return null;
+  }
+
   /**
-   * Stream download with HTTP Range resume support.
-   * If resumeFrom > 0, sends `Range: bytes={resumeFrom}-` and appends
-   * to the destination file instead of overwriting.
+   * Stream a URL to a temp file with SAFE HTTP Range resume, verify the size,
+   * then atomically rename into place.
+   *
+   * Safe-resume contract: we only resume a partial download when we have a
+   * stored validator (ETag or Last-Modified) from the first attempt, and we
+   * send it as `If-Range`. Per RFC 7233 the server returns 206 (append) only
+   * if the resource is byte-for-byte unchanged; if it changed it returns 200
+   * and we overwrite from scratch. This eliminates the old bug where a resumed
+   * download could splice a stale prefix onto new bytes and still pass the
+   * size check. If no validator is available, we start fresh rather than risk it.
+   *
+   * Memory: bytes flow response → disk via pipe (~64KB buffer); the file is
+   * never held in memory regardless of size.
    */
-  private streamDownload(
-    path: string,
-    destPath: string,
-    cookie: string,
-    resumeFrom: number,
+  private downloadToFile(
+    startUrl: string,
+    localPath: string,
+    tmpPath: string,
+    metaPath: string,
+    expectedSize: number,
+    ctx: { cookie?: string; cookieHost?: string },
     onProgress?: (bytes: number) => void,
   ): Promise<number> {
-    const apiHostname = new URL(this.apiBase).hostname;
+    return new Promise<number>((resolve, reject) => {
+      const begin = async () => {
+        // Decide whether we can safely resume.
+        let resumeFrom = 0;
+        let validator: { etag?: string; lastModified?: string } | null = null;
+        try {
+          const tmpStat = await stat(tmpPath);
+          if (tmpStat.isFile() && tmpStat.size > 0 && expectedSize > 0 && tmpStat.size < expectedSize) {
+            validator = await this.readDownloadValidator(metaPath);
+            if (validator) {
+              resumeFrom = tmpStat.size;
+            } else {
+              // No validator — cannot prove the partial matches the current
+              // remote content. Discard and start fresh.
+              await fsUnlink(tmpPath).catch(() => {});
+            }
+          } else if (tmpStat.size >= expectedSize && expectedSize > 0) {
+            // A "complete" tmp we can't verify by content — re-download to be safe.
+            await fsUnlink(tmpPath).catch(() => {});
+            await fsUnlink(metaPath).catch(() => {});
+          }
+        } catch { /* no tmp file — start from scratch */ }
 
-    return new Promise((resolve, reject) => {
-      const makeRequest = (url: string, redirectCount: number): void => {
-        if (redirectCount > 5) {
-          reject(new Error("Too many redirects"));
-          return;
-        }
+        const makeRequest = (url: string, redirectCount: number): void => {
+          if (redirectCount > 5) { reject(new Error("Too many redirects")); return; }
 
-        const urlParsed = new URL(url);
-        const reqLib = urlParsed.protocol === "https:" ? https : http;
-        const isSameHost = urlParsed.hostname === apiHostname;
-        const headers: Record<string, string> = {};
-        if (isSameHost) headers.Cookie = `dosya_session=${cookie}`;
-        // Resume from where we left off
-        if (resumeFrom > 0) headers.Range = `bytes=${resumeFrom}-`;
-
-        const req = reqLib.get(url, { headers, timeout: 300_000, agent: agentFor(url) }, (res) => {
-          if (res.statusCode === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
-          if (res.statusCode === 429) {
-            const retryAfterMs = this.parseRetryAfter(
-              res.headers as Record<string, string | string[] | undefined>,
-            );
-            this.rateBudget.remaining = 0;
-            res.resume();
-            reject(new RateLimitError(retryAfterMs));
-            return;
+          const urlParsed = new URL(url);
+          const reqLib = urlParsed.protocol === "https:" ? https : http;
+          const headers: Record<string, string> = {};
+          if (ctx.cookie && ctx.cookieHost && urlParsed.hostname === ctx.cookieHost) {
+            headers.Cookie = `dosya_session=${ctx.cookie}`;
+          }
+          if (resumeFrom > 0 && validator) {
+            headers.Range = `bytes=${resumeFrom}-`;
+            headers["If-Range"] = validator.etag || validator.lastModified || "";
           }
 
-          this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
+          const req = reqLib.get(url, { headers, timeout: 300_000, agent: agentFor(url) }, (res) => {
+            const status = res.statusCode ?? 500;
+            if (status === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
+            if (status === 429) {
+              const retryAfterMs = this.parseRetryAfter(res.headers as Record<string, string | string[] | undefined>);
+              this.rateBudget.remaining = 0;
+              res.resume();
+              reject(new RateLimitError(retryAfterMs));
+              return;
+            }
+            this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
 
-          if ([301, 302, 303, 307, 308].includes(res.statusCode ?? 0) && res.headers.location) {
-            res.resume();
-            makeRequest(res.headers.location, redirectCount + 1);
-            return;
-          }
+            if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
+              res.resume();
+              makeRequest(new URL(res.headers.location, url).toString(), redirectCount + 1);
+              return;
+            }
 
-          // 416 Range Not Satisfiable — file changed or resumed past end
-          if (res.statusCode === 416) {
-            res.resume();
-            reject(new Error("Range not satisfiable — file may have changed"));
-            return;
-          }
+            // 416 — the partial is unusable (past end / range rejected). Reset and restart.
+            if (status === 416) {
+              res.resume();
+              fsUnlink(tmpPath).catch(() => {}).then(() => fsUnlink(metaPath).catch(() => {})).then(() => {
+                reject(new Error("Range not satisfiable — restarting download"));
+              });
+              return;
+            }
+            if (status >= 400) { res.resume(); reject(new Error(`Download failed: HTTP ${status}`)); return; }
 
-          if ((res.statusCode ?? 500) >= 400) {
-            res.resume();
-            reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-            return;
-          }
+            // 206 = server honored our validated range → append. Anything else
+            // (200) = full body → overwrite from scratch (no stale prefix).
+            const isResume = status === 206;
+            const base = isResume ? resumeFrom : 0;
 
-          // Append to existing file when resuming (206 Partial Content),
-          // otherwise overwrite from scratch (200 OK).
-          const isResume = res.statusCode === 206;
-          const ws = createWriteStream(destPath, isResume ? { flags: "a" } : undefined);
-          let bytes = 0;
+            // Persist a validator for a possible future resume of THIS content.
+            const etag = typeof res.headers.etag === "string" ? res.headers.etag : undefined;
+            const lm = typeof res.headers["last-modified"] === "string" ? res.headers["last-modified"] : undefined;
+            if (etag || lm) {
+              fsWriteFile(metaPath, JSON.stringify({ etag, lastModified: lm })).catch(() => {});
+            }
 
-          res.on("data", (chunk: Buffer) => {
-            bytes += chunk.length;
-            onProgress?.(resumeFrom + bytes);
+            const ws = createWriteStream(tmpPath, isResume ? { flags: "a" } : undefined);
+            let bytes = 0;
+            res.on("data", (chunk: Buffer) => { bytes += chunk.length; onProgress?.(base + bytes); });
+            // Throttle applies backpressure that slows the socket read → real
+            // download rate limit (no-op when the bucket is unlimited).
+            this.throttle(res, this.downloadBucket).pipe(ws);
+            ws.on("finish", async () => {
+              try {
+                const total = base + bytes;
+                if (expectedSize >= 0 && total !== expectedSize) {
+                  await fsUnlink(tmpPath).catch(() => {});
+                  await fsUnlink(metaPath).catch(() => {});
+                  reject(new Error(`Download size mismatch: expected ${expectedSize}, got ${total}`));
+                  return;
+                }
+                await fsRename(tmpPath, localPath);
+                await fsUnlink(metaPath).catch(() => {});
+                resolve(total);
+              } catch (err) { reject(err as Error); }
+            });
+            ws.on("error", (err) => { res.destroy(); reject(err); });
+            res.on("error", (err) => { ws.destroy(); reject(err); });
           });
 
-          res.pipe(ws);
-          ws.on("finish", () => resolve(bytes));
-          ws.on("error", (err) => { res.destroy(); reject(err); });
-          res.on("error", (err) => { ws.destroy(); reject(err); });
-        });
+          req.on("timeout", () => { req.destroy(); reject(new Error("Download timed out")); });
+          req.on("error", reject);
+        };
 
-        req.on("timeout", () => { req.destroy(); reject(new Error("Download timed out")); });
-        req.on("error", reject);
+        makeRequest(startUrl, 0);
       };
 
-      makeRequest(`${this.apiBase}${path}`, 0);
+      begin().catch(reject);
     });
   }
 
@@ -554,8 +678,9 @@ export class RemoteClient {
     region: string,
     fileId?: string | null,
     onProgress?: (bytesTransferred: number) => void,
-  ): Promise<{ fileId: string; name: string }> {
+  ): Promise<{ fileId: string; name: string; version?: number; updatedAt?: number }> {
     const fileName = basename(localPath);
+    localPath = longPath(localPath);
     const fileStat = await stat(localPath);
     const ext = extname(fileName).slice(1).toLowerCase();
     const mimeType = MIME_MAP[ext] || "application/octet-stream";
@@ -668,7 +793,12 @@ export class RemoteClient {
           if (completeRes.status === 401) throw new Error("SESSION_EXPIRED");
           const completeData = await completeRes.json();
           if (!completeData.ok) throw new Error(completeData.error || "Upload complete failed");
-          return { fileId: completeData.file?.id ?? sessionId, name: fileName };
+          return {
+            fileId: completeData.file?.id ?? sessionId,
+            name: fileName,
+            version: completeData.file?.current_version,
+            updatedAt: completeData.file?.updated_at,
+          };
         } catch (err: any) {
           completeErr = err;
           if (err instanceof RateLimitError) throw err;
@@ -694,7 +824,12 @@ export class RemoteClient {
     );
 
     if (!putData.ok) throw new Error(putData.error || "Upload failed");
-    return { fileId: putData.file?.id ?? sessionId, name: fileName };
+    return {
+      fileId: putData.file?.id ?? sessionId,
+      name: fileName,
+      version: putData.file?.current_version,
+      updatedAt: putData.file?.updated_at,
+    };
   }
 
   /**
@@ -750,7 +885,7 @@ export class RemoteClient {
       // Stream the byte range directly from disk — no intermediate Buffer
       const stream = createReadStream(filePath, { start, end: start + length - 1 });
       stream.on("error", (err) => { req.destroy(); reject(err); });
-      stream.pipe(req);
+      this.throttle(stream, this.uploadBucket).pipe(req);
     });
   }
 
@@ -926,7 +1061,7 @@ export class RemoteClient {
         reject(err);
       });
 
-      stream.pipe(req);
+      this.throttle(stream, this.uploadBucket).pipe(req);
     });
   }
 
@@ -944,10 +1079,11 @@ export class RemoteClient {
     workspaceId: string,
     rootFolderId: string | null,
     since?: number,
-  ): Promise<{ files: RemoteFileInfo[]; folders: RemoteFolderInfo[] } | null> {
+  ): Promise<{ files: RemoteFileInfo[]; folders: RemoteFolderInfo[]; deleted: string[] } | null> {
     try {
       const files: RemoteFileInfo[] = [];
       let folders: RemoteFolderInfo[] = [];
+      const deleted: string[] = [];
       let cursor: string | null = null;
       let page = 0;
 
@@ -972,13 +1108,17 @@ export class RemoteClient {
         for (const f of data.files ?? []) {
           files.push(f);
         }
+        // Delta responses may carry tombstones for files deleted since `since`.
+        for (const id of data.deleted ?? data.deleted_ids ?? []) {
+          if (typeof id === "string") deleted.push(id);
+        }
 
         if (!data.hasMore) break;
         cursor = data.nextCursor;
         page++;
       }
 
-      return { files, folders };
+      return { files, folders, deleted };
     } catch (err: any) {
       if (err.message === "SESSION_EXPIRED") throw err;
       return null;
@@ -1025,101 +1165,11 @@ export class RemoteClient {
     expectedSize: number,
     onProgress?: (bytes: number) => void,
   ): Promise<number> {
-    if (process.platform === "win32" && localPath.length > 259 && !localPath.startsWith("\\\\?\\")) {
-      localPath = `\\\\?\\${pathResolve(localPath)}`;
-    }
-
+    localPath = longPath(localPath);
     const tmpPath = `${localPath}.dosya-sync-tmp`;
-
-    // Check for existing partial download
-    let resumeFrom = 0;
-    try {
-      const tmpStat = await stat(tmpPath);
-      if (tmpStat.isFile() && tmpStat.size > 0 && expectedSize > 0 && tmpStat.size < expectedSize) {
-        resumeFrom = tmpStat.size;
-      } else if (tmpStat.size >= expectedSize && expectedSize > 0) {
-        await fsRename(tmpPath, localPath);
-        onProgress?.(expectedSize);
-        return expectedSize;
-      }
-    } catch {}
-
-    return new Promise<number>((resolve, reject) => {
-      const parsed = new URL(presignedUrl);
-      const lib = parsed.protocol === "https:" ? https : http;
-
-      const headers: Record<string, string> = {};
-      if (resumeFrom > 0) headers.Range = `bytes=${resumeFrom}-`;
-
-      const req = lib.get(presignedUrl, { headers, timeout: 300_000, agent: agentFor(presignedUrl) }, (res) => {
-        if (res.statusCode === 416) {
-          // Range not satisfiable — start over
-          res.resume();
-          fsUnlink(tmpPath).catch(() => {}).then(() => {
-            reject(new Error("Range not satisfiable"));
-          });
-          return;
-        }
-
-        if ((res.statusCode ?? 500) >= 400) {
-          res.resume();
-          reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-          return;
-        }
-
-        if ([301, 302, 303, 307, 308].includes(res.statusCode ?? 0) && res.headers.location) {
-          res.resume();
-          const rLib = new URL(res.headers.location).protocol === "https:" ? https : http;
-          const rHeaders: Record<string, string> = {};
-          if (resumeFrom > 0) rHeaders.Range = `bytes=${resumeFrom}-`;
-          const rReq = rLib.get(res.headers.location, { headers: rHeaders, timeout: 300_000, agent: agentFor(res.headers.location) }, (rRes) => {
-            if ((rRes.statusCode ?? 500) >= 400) { rRes.resume(); reject(new Error(`Download failed: HTTP ${rRes.statusCode}`)); return; }
-            const isResume = rRes.statusCode === 206;
-            const ws = createWriteStream(tmpPath, isResume ? { flags: "a" } : undefined);
-            let bytes = 0;
-            rRes.on("data", (chunk: Buffer) => { bytes += chunk.length; onProgress?.(resumeFrom + bytes); });
-            rRes.pipe(ws);
-            ws.on("finish", async () => {
-              try {
-                const total = resumeFrom + bytes;
-                if (expectedSize >= 0 && total !== expectedSize) {
-                  await fsUnlink(tmpPath).catch(() => {});
-                  reject(new Error(`Size mismatch: expected ${expectedSize}, got ${total}`)); return;
-                }
-                await fsRename(tmpPath, localPath);
-                resolve(total);
-              } catch (err) { reject(err); }
-            });
-            ws.on("error", reject);
-            rRes.on("error", reject);
-          });
-          rReq.on("error", reject);
-          return;
-        }
-
-        const isResume = res.statusCode === 206;
-        const ws = createWriteStream(tmpPath, isResume ? { flags: "a" } : undefined);
-        let bytes = 0;
-        res.on("data", (chunk: Buffer) => { bytes += chunk.length; onProgress?.(resumeFrom + bytes); });
-        res.pipe(ws);
-        ws.on("finish", async () => {
-          try {
-            const total = resumeFrom + bytes;
-            if (expectedSize >= 0 && total !== expectedSize) {
-              await fsUnlink(tmpPath).catch(() => {});
-              reject(new Error(`Size mismatch: expected ${expectedSize}, got ${total}`)); return;
-            }
-            await fsRename(tmpPath, localPath);
-            resolve(total);
-          } catch (err) { reject(err); }
-        });
-        ws.on("error", (err) => { res.destroy(); reject(err); });
-        res.on("error", (err) => { ws.destroy(); reject(err); });
-      });
-
-      req.on("timeout", () => { req.destroy(); reject(new Error("Download timed out")); });
-      req.on("error", reject);
-    });
+    const metaPath = `${tmpPath}.meta`;
+    // No cookie for presigned R2 URLs — they carry their own signed auth.
+    return this.downloadToFile(presignedUrl, localPath, tmpPath, metaPath, expectedSize, {}, onProgress);
   }
 
   /** Fetch the current user's ID from /api/me. Returns null if not authenticated. */
@@ -1183,12 +1233,24 @@ export class RemoteClient {
         timeout: 300_000,
         agent: agentFor(presignedUrl),
       }, (res) => {
-        res.resume();
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          res.resume();
           resolve();
-        } else {
-          reject(new Error(`Presigned upload failed: HTTP ${res.statusCode}`));
+          return;
         }
+        // Capture R2's error body (S3 XML: <Code>/<Message>) so failures are
+        // diagnosable instead of a bare status. R2 uses e.g. "AccessDenied /
+        // Request has expired", "SignatureDoesNotMatch", "Unauthorized".
+        const chunks: Buffer[] = [];
+        let len = 0;
+        res.on("data", (c: Buffer) => { if (len < 4096) { chunks.push(c); len += c.length; } });
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8").replace(/\s+/g, " ").slice(0, 400).trim();
+          let host = "?";
+          try { host = new URL(presignedUrl).host; } catch {}
+          reject(new Error(`Presigned upload failed: HTTP ${res.statusCode} host=${host} body=${body}`));
+        });
+        res.on("error", () => reject(new Error(`Presigned upload failed: HTTP ${res.statusCode}`)));
       });
 
       req.on("timeout", () => { req.destroy(); reject(new Error("Upload timed out")); });
@@ -1196,7 +1258,7 @@ export class RemoteClient {
 
       const stream = createReadStream(filePath);
       stream.on("error", (err) => { req.destroy(); reject(err); });
-      stream.pipe(req);
+      this.throttle(stream, this.uploadBucket).pipe(req);
     });
   }
 
@@ -1207,7 +1269,7 @@ export class RemoteClient {
     workspaceId: string,
     region: string,
     files: { file_id: string; r2_key: string; name: string; size: number; folder_id: string | null; content_type: string; ext: string | null }[],
-  ): Promise<{ committed: number }> {
+  ): Promise<{ committed: number; results: Map<string, { version: number; updatedAt: number }> }> {
     const res = await this.fetch("/api/sync/commit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1216,7 +1278,52 @@ export class RemoteClient {
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "Commit failed");
-    return { committed: data.committed ?? 0 };
+
+    // Capture server-authoritative version/updated_at when the endpoint
+    // returns them, so the reconciler doesn't churn on client-guessed values.
+    const results = new Map<string, { version: number; updatedAt: number }>();
+    const rows = Array.isArray(data.files) ? data.files : Array.isArray(data.results) ? data.results : [];
+    for (const r of rows) {
+      const id = r?.id ?? r?.file_id;
+      if (id) results.set(id, { version: r.current_version ?? r.version ?? 1, updatedAt: r.updated_at ?? r.updatedAt ?? Math.floor(Date.now() / 1000) });
+    }
+    return { committed: data.committed ?? 0, results };
+  }
+
+  // ── Block-level delta sync (feature #3) ───────────────────────────
+  // Client half only: ask which chunks are missing, then presign + PUT them.
+  // The commit/reassembly endpoint is built+tested separately against dev R2.
+
+  /** Ask the server which of these chunk hashes it doesn't already have. */
+  async chunksMissing(workspaceId: string, hashes: string[]): Promise<Set<string>> {
+    const res = await this.fetch("/api/sync/chunks/missing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspaceId, hashes }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "chunks/missing failed");
+    return new Set<string>(data.missing ?? []);
+  }
+
+  /** Get presigned PUT URLs for the given chunks (keyed by hash). */
+  async presignChunks(
+    workspaceId: string,
+    region: string,
+    chunks: { hash: string; size: number }[],
+  ): Promise<Map<string, { url: string; r2Key: string }>> {
+    const res = await this.fetch("/api/sync/chunks/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: workspaceId, region, chunks }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "chunks/presign failed");
+    const map = new Map<string, { url: string; r2Key: string }>();
+    for (const u of data.uploads ?? []) map.set(u.hash, { url: u.url, r2Key: u.r2Key });
+    return map;
   }
 
   // ── Public API ────────────────────────────────────────────────────

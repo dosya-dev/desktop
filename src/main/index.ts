@@ -3,8 +3,10 @@ import { gracefulify } from "graceful-fs";
 import fs from "fs";
 gracefulify(fs);
 
-import { app, BrowserWindow, shell, powerMonitor, session, crashReporter } from "electron";
-import { join } from "path";
+import { app, BrowserWindow, shell, powerMonitor, session, crashReporter, ipcMain, protocol, net } from "electron";
+import { randomUUID } from "crypto";
+import { join, resolve, sep } from "path";
+import { pathToFileURL } from "url";
 
 // Enable crash reporter for native crashes (GPU, renderer, main).
 // Captures minidumps locally. Set submitURL to a collection endpoint when ready.
@@ -34,7 +36,51 @@ process.on("unhandledRejection", (reason) => {
   console.error("[crash] Unhandled rejection:", reason);
 });
 
-const API_BASE = process.env.API_BASE || (app.isPackaged ? "https://dosya.dev" : "http://localhost:4321");
+// The API split off the marketing site when the monorepo was created:
+// dosya.dev is the Astro marketing site (no /api routes), the API lives on
+// api.dosya.dev (prod) / localhost:4322 (apps/api dev server, 4321 is the site).
+const API_BASE = process.env.API_BASE || (app.isPackaged ? "https://api.dosya.dev" : "http://localhost:4322");
+
+// ── Custom renderer scheme (packaged builds) ───────────────────────
+// Packaged builds serve the renderer from app://bundle/ instead of file://.
+// A registered "standard" scheme gives the renderer a real, stable origin
+// (app://bundle) — which is what lets us run with webSecurity ENABLED and do
+// credentialed CORS to the API. file:// serializes to the "null" origin, which
+// can't do credentialed CORS, which is the whole reason webSecurity was off.
+const APP_SCHEME = "app";
+const APP_ORIGIN = "app://bundle"; // must match the CORS allowlist on the API
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: APP_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
+  },
+]);
+
+/** Register the app:// handler that serves the built renderer from disk. */
+function registerAppProtocol(): void {
+  const rendererDir = join(__dirname, "../renderer");
+  const rendererRoot = resolve(rendererDir);
+  protocol.handle(APP_SCHEME, async (request) => {
+    let rel: string;
+    try {
+      rel = decodeURIComponent(new URL(request.url).pathname);
+    } catch {
+      return new Response("Bad request", { status: 400 });
+    }
+    if (rel === "/" || rel === "") rel = "/index.html";
+    const filePath = resolve(join(rendererDir, rel));
+    // Path-traversal guard: never serve outside the renderer bundle.
+    if (filePath !== rendererRoot && !filePath.startsWith(rendererRoot + sep)) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    try {
+      return await net.fetch(pathToFileURL(filePath).toString());
+    } catch {
+      // Unknown asset → serve index.html so client-side routing still resolves.
+      return net.fetch(pathToFileURL(join(rendererDir, "index.html")).toString());
+    }
+  });
+}
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -43,14 +89,31 @@ let mainWindow: BrowserWindow | null = null;
 // Triggered by the macOS Quick Action or protocol links.
 let pendingSyncPath: string | null = null;
 
+// Single-use nonce for the OAuth login flow. We generate it when the user
+// starts login (auth:begin-oauth), send it as OAuth `state`, and only accept a
+// dosya://auth/callback whose `state` echoes it back. This blocks injected /
+// replayed callback URLs from silently switching the app to an attacker session.
+let pendingOAuthNonce: string | null = null;
+
 function handleDosyaUrl(url: string): void {
   try {
     const parsed = new URL(url);
 
-    // dosya://auth/callback?token=xxx — OAuth login from system browser
+    // dosya://auth/callback?token=xxx&state=<nonce> — OAuth login from system browser
     if (parsed.hostname === "auth" || parsed.pathname === "//auth/callback") {
       const token = parsed.searchParams.get("token");
       if (!token) return;
+
+      // Anti session-fixation: only accept a callback that answers a login WE
+      // started, by matching the single-use nonce we sent as OAuth state. A
+      // callback with a missing/wrong nonce is an injected or replayed URL.
+      const state = parsed.searchParams.get("state");
+      if (!pendingOAuthNonce || state !== pendingOAuthNonce) {
+        console.warn("[auth] Rejected OAuth callback: missing or mismatched state nonce");
+        pendingOAuthNonce = null;
+        return;
+      }
+      pendingOAuthNonce = null; // single use
 
       // Store the session cookie manually (same as login flow)
       session.defaultSession.cookies.set({
@@ -127,14 +190,11 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      // webSecurity is off so the renderer (file:// or localhost:5174) can
-      // make credentialed cross-origin requests to the API without CORS
-      // preflight failures. The actual attack surface this opens (navigation
-      // to a malicious page that abuses the bridge) is locked down by:
-      //   - will-navigate handler (blocks navigation to external URLs)
-      //   - setWindowOpenHandler (only allows http/https opens)
-      //   - CSP in production (restricts script/connect sources)
-      webSecurity: false,
+      // webSecurity ENABLED. Credentialed cross-origin requests to the API work
+      // because the renderer now has a real origin (app://bundle in packaged
+      // builds, http://localhost:5174 in dev) that the API allows via CORS —
+      // rather than the "null" file:// origin that forced webSecurity off before.
+      webSecurity: true,
     },
   });
 
@@ -153,7 +213,7 @@ function createWindow(): void {
   // Restrict navigation to the app's own URLs (prevents XSS escalation)
   mainWindow.webContents.on("will-navigate", (event, url) => {
     const allowed = app.isPackaged
-      ? url.startsWith("file://")
+      ? url.startsWith(`${APP_ORIGIN}/`)
       : url.startsWith(process.env.ELECTRON_RENDERER_URL || "http://localhost");
     if (!allowed) {
       event.preventDefault();
@@ -171,11 +231,11 @@ function createWindow(): void {
     return { action: "deny" };
   });
 
-  // Load renderer
+  // Load renderer. Dev: Vite server. Packaged: our app:// scheme (real origin).
   if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
-    mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
+    mainWindow.loadURL(`${APP_ORIGIN}/index.html`);
   }
 }
 
@@ -198,6 +258,10 @@ if (!gotTheLock) {
   let syncEngine: SyncEngine | undefined;
 
   app.whenReady().then(async () => {
+    // Serve the packaged renderer from app://bundle (must be registered before
+    // the window loads that URL).
+    registerAppProtocol();
+
     // Set dock icon on macOS (dev mode doesn't use the app bundle icon)
     if (process.platform === "darwin") {
       const iconPath = join(__dirname, "../../build/icon.png");
@@ -210,6 +274,18 @@ if (!gotTheLock) {
 
     setupSession(API_BASE);
     registerIpcHandlers(API_BASE);
+
+    // Start an OAuth login: mint a fresh single-use nonce and hand the renderer
+    // the provider URL carrying it. The dosya:// callback is only honored if it
+    // echoes this exact nonce back (see handleDosyaUrl).
+    ipcMain.handle("auth:begin-oauth", (_e, provider: string) => {
+      if (provider !== "google" && provider !== "github") {
+        throw new Error("Unknown OAuth provider");
+      }
+      pendingOAuthNonce = randomUUID();
+      return `${API_BASE}/api/auth/${provider}?desktop=1&state=${encodeURIComponent(pendingOAuthNonce)}`;
+    });
+
     createMenu();
     createWindow();
     initAutoUpdater();
@@ -285,6 +361,29 @@ if (!gotTheLock) {
         syncEngine.resumeAll().catch(() => {});
       }
     });
+
+    // Battery-aware pausing: when "pause on battery" is enabled, pause on
+    // unplug and resume on plug-in — but only auto-resume what WE auto-paused,
+    // so a manual pause is never clobbered.
+    let batteryPaused = false;
+    const applyBatteryState = async (onBattery: boolean) => {
+      if (!syncEngine) return;
+      const cfg = await syncEngine.getConfig();
+      if (!cfg.pauseOnBattery) return;
+      if (onBattery && !cfg.pausedGlobally) {
+        batteryPaused = true;
+        syncEngine.pauseAll().catch(() => {});
+      } else if (!onBattery && batteryPaused) {
+        batteryPaused = false;
+        syncEngine.resumeAll().catch(() => {});
+      }
+    };
+    powerMonitor.on("on-battery", () => applyBatteryState(true));
+    powerMonitor.on("on-ac", () => applyBatteryState(false));
+    // Handle the initial state too (events only fire on transitions).
+    setTimeout(() => {
+      try { applyBatteryState(powerMonitor.isOnBatteryPower()); } catch {}
+    }, 4000);
 
     app.on("activate", () => {
       if (mainWindow) {
