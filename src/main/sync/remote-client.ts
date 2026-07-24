@@ -120,6 +120,10 @@ function debugLog(...args: unknown[]): void {
 }
 
 const RETRY_DELAYS = [1000, 3000, 8000]; // exponential-ish backoff
+// Backstop for snapshot pagination. At a typical ~1000 files/page this covers
+// tens of millions of files — far beyond any real workspace — while still
+// stopping a misbehaving cursor from looping forever.
+const MAX_SNAPSHOT_PAGES = 50_000;
 const NON_RETRYABLE = new Set(["SESSION_EXPIRED", "RATE_LIMITED"]);
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 
@@ -325,6 +329,7 @@ export class RemoteClient {
     const headers: Record<string, string> = {
       Cookie: `dosya_session=${sessionCookie}`,
       "X-Dosya-Sync": "1",
+      "X-Dosya-Client": "desktop",
       ...opts.headers,
     };
     if (bodyBuf) {
@@ -856,6 +861,7 @@ export class RemoteClient {
           "Content-Length": String(length),
           Cookie: `dosya_session=${cookie}`,
           "X-Dosya-Sync": "1",
+          "X-Dosya-Client": "desktop",
         },
         timeout: 300_000,
         agent: agentFor(fullUrl),
@@ -1009,6 +1015,7 @@ export class RemoteClient {
           "Content-Length": String(fileSize),
           Cookie: `dosya_session=${cookie}`,
           "X-Dosya-Sync": "1",
+          "X-Dosya-Client": "desktop",
         },
         timeout: 300_000,
         agent: agentFor(fullUrl),
@@ -1079,6 +1086,7 @@ export class RemoteClient {
     workspaceId: string,
     rootFolderId: string | null,
     since?: number,
+    onProgress?: (filesSoFar: number, page: number) => void,
   ): Promise<{ files: RemoteFileInfo[]; folders: RemoteFolderInfo[]; deleted: string[] } | null> {
     try {
       const files: RemoteFileInfo[] = [];
@@ -1113,9 +1121,26 @@ export class RemoteClient {
           if (typeof id === "string") deleted.push(id);
         }
 
+        onProgress?.(files.length, page);
+
         if (!data.hasMore) break;
-        cursor = data.nextCursor;
+        // Guard against a runaway loop: if the server claims more pages but
+        // gives no usable cursor — or repeats the one we just used — advancing
+        // is impossible and the loop would refetch page 0 forever (real HTTP
+        // calls that never error, so the socket timeout never rescues it). This
+        // is the "stuck at Starting initial sync..." hang: sync never returns.
+        const next: string | null = data.nextCursor ?? null;
+        if (!next || next === cursor) {
+          debugLog("[sync] snapshot pagination halted: missing or repeated cursor at page", page);
+          break;
+        }
+        cursor = next;
         page++;
+        // Backstop cap: even with a well-behaved cursor, never spin indefinitely.
+        if (page > MAX_SNAPSHOT_PAGES) {
+          debugLog("[sync] snapshot pagination hit page cap", MAX_SNAPSHOT_PAGES);
+          break;
+        }
       }
 
       return { files, folders, deleted };

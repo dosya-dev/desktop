@@ -21,25 +21,28 @@ export async function startMockServer(
     const path = url.pathname;
     const method = req.method || "GET";
 
+    // Credentialed CORS forbids the "*" wildcard — the renderer fetches with
+    // credentials: "include" from a real origin (app://bundle) now that
+    // webSecurity is enabled, so echo the request origin back instead.
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": req.headers.origin || "*",
+      "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Cookie",
+      "Vary": "Origin",
+    };
+
     const json = (body: unknown, status = 200) => {
       res.writeHead(status, {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Cookie",
+        ...corsHeaders,
       });
       res.end(JSON.stringify(body));
     };
 
     // Handle CORS preflight
     if (method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Cookie",
-      });
+      res.writeHead(204, corsHeaders);
       return res.end();
     }
 
@@ -53,7 +56,7 @@ export async function startMockServer(
     if (path === "/api/me/api-keys" && method === "GET") return json({ ok: true, keys: [] });
     if (path === "/api/me/change-password" && method === "POST") return json({ ok: true });
     if (path === "/api/me/avatar") {
-      res.writeHead(200, { "Content-Type": "image/png" });
+      res.writeHead(200, { "Content-Type": "image/png", ...corsHeaders });
       return res.end(Buffer.from([]));
     }
     if (path === "/api/auth/login" && method === "POST") return json({ ok: true, user: data.mockUser });

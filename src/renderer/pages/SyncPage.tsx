@@ -40,6 +40,16 @@ const EMPTY_PAIRS: SyncPairRuntimeStatus[] = [];
 const EMPTY_TRANSFERS: ActiveTransfer[] = [];
 const EMPTY_CONFLICTS: SyncConflict[] = [];
 
+/** Format an elapsed duration as m:ss or h:mm:ss. */
+function formatElapsed(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 const SYNC_MODES = [
   { id: "two-way", label: "Full Sync", desc: "Mirror every action in both directions. Changes on either side are reflected everywhere." },
   { id: "push", label: "Push to Cloud", desc: "Local changes are sent to the cloud. Cloud changes are ignored locally." },
@@ -59,6 +69,17 @@ export function SyncPage() {
     const cleanup = init();
     return cleanup;
   }, [init]);
+
+  // Tick every second while anything is syncing so the elapsed-time readouts
+  // advance even when the engine emits no status updates (a slow or stuck
+  // phase) — that ticking clock is what tells the user it's alive, not frozen.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const anySyncing = (status?.pairs ?? EMPTY_PAIRS).some((p) => p.status === "syncing");
+  useEffect(() => {
+    if (!anySyncing) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [anySyncing]);
 
   const allPairs = status?.pairs ?? EMPTY_PAIRS;
   const allTransfers = status?.activeTransfers ?? EMPTY_TRANSFERS;
@@ -147,6 +168,10 @@ export function SyncPage() {
     const scannedFiles = syncing.reduce((s, p) => s + (p.scannedFiles || 0), 0);
     const scannedFolders = syncing.reduce((s, p) => s + (p.scannedFolders || 0), 0);
 
+    // Earliest sync-cycle start across syncing pairs → drives the elapsed clock.
+    const startTimes = syncing.map(p => p.syncStartedAt).filter((t): t is number => !!t);
+    const syncStartedAt = startTimes.length ? Math.min(...startTimes) : 0;
+
     const displayTotalFiles = totalFiles || transfers.length;
     const displayCompletedFiles = completedFiles;
 
@@ -158,8 +183,10 @@ export function SyncPage() {
       pct, eta, speed,
       pairCount: syncing.length || 1,
       scanning,
+      isTransferring,
       scannedFiles,
       scannedFolders,
+      syncStartedAt,
       statusText: syncing.map(p => p.statusText).find(t => t) || "",
     };
   }, [pairs, transfers]);
@@ -181,6 +208,12 @@ export function SyncPage() {
                   <span className="text-xs text-[var(--color-text-secondary)]">
                     {syncProgress.scannedFiles.toLocaleString()} file{syncProgress.scannedFiles !== 1 ? "s" : ""}
                     {syncProgress.scannedFolders > 0 ? `, ${syncProgress.scannedFolders.toLocaleString()} folder${syncProgress.scannedFolders !== 1 ? "s" : ""} found` : " found"}
+                  </span>
+                )}
+                {syncProgress.syncStartedAt > 0 && (
+                  <span className="ml-auto flex items-center gap-1 text-xs text-[var(--color-text-muted)] tabular-nums">
+                    <Clock size={11} />
+                    {formatElapsed(nowTick - syncProgress.syncStartedAt)} elapsed
                   </span>
                 )}
               </div>
@@ -210,7 +243,7 @@ export function SyncPage() {
                 </div>
                 <div className="flex items-center gap-3 text-xs text-[var(--color-text-secondary)]">
                   {syncProgress.speed && <span>{syncProgress.speed}</span>}
-                  {syncProgress.eta && <span>{syncProgress.eta}</span>}
+                  <span>{syncProgress.eta || "estimating time…"}</span>
                   <span className="font-semibold text-[var(--color-primary)]">{syncProgress.pct}%</span>
                 </div>
               </div>
@@ -584,7 +617,9 @@ function SyncPairRow({
     "rate-limited": { icon: <Clock size={12} />, color: "#f59e0b", label: "Waiting", dot: "bg-yellow-500" },
   };
 
-  const s = statusConfig[pair.status] ?? statusConfig.error;
+  // Unknown/transient status falls back to a neutral state, NOT "Error" — a
+  // status we don't recognize is not a failure and shouldn't be alarmed as one.
+  const s = statusConfig[pair.status] ?? { icon: <Clock size={12} />, color: "var(--color-text-muted)", label: "Idle", dot: "bg-gray-400" };
 
   // Progress info for syncing state
   const isSyncing = transfers.length > 0 || pair.totalFilesInBatch > 0;
@@ -828,24 +863,66 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
     }
   }, [logs.length]);
 
+  // Live "what's happening right now" header. Ticks every second while a pair
+  // is syncing so the elapsed clock advances even during a silent phase — the
+  // difference between "working on something big" and "wedged" is now visible.
+  const syncingPairs = pairs.filter((p) => p.status === "syncing");
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (syncingPairs.length === 0) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [syncingPairs.length]);
+
   const pairNameMap = new Map(pairs.map(p => [p.pairId, p.remoteFolderName]));
+
+  const liveHeader = syncingPairs.length > 0 && (
+    <div className="mb-3 space-y-2">
+      {syncingPairs.map((p) => (
+        <div
+          key={p.pairId}
+          className="flex items-center gap-2 rounded-xl border px-4 py-3"
+          style={{ borderColor: "var(--color-primary)", background: "var(--color-primary-bg, var(--color-bg-secondary))" }}
+        >
+          <Loader2 size={15} className="shrink-0 animate-spin text-[var(--color-primary)]" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium">{p.remoteFolderName}</p>
+            <p className="truncate text-xs text-[var(--color-text-secondary)]">
+              {p.statusText || "Syncing…"}
+            </p>
+          </div>
+          {p.syncStartedAt > 0 && (
+            <span className="shrink-0 flex items-center gap-1 text-xs text-[var(--color-text-muted)] tabular-nums">
+              <Clock size={11} />
+              {formatElapsed(now - p.syncStartedAt)}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 
   if (logs.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
-        <Clock size={32} className="mb-2 text-[var(--color-text-muted)]" />
-        <p className="text-sm text-[var(--color-text-muted)]">No sync activity yet</p>
-        <p className="mt-1 text-xs text-[var(--color-text-muted)]">Activity will appear here when syncing starts</p>
+      <div>
+        {liveHeader}
+        <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
+          <Clock size={32} className="mb-2 text-[var(--color-text-muted)]" />
+          <p className="text-sm text-[var(--color-text-muted)]">No sync activity yet</p>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">Activity will appear here when syncing starts</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div
-      ref={scrollRef}
-      className="max-h-[500px] overflow-y-auto rounded-xl border font-mono text-xs"
-      style={{ borderColor: "var(--color-border)" }}
-    >
+    <div>
+      {liveHeader}
+      <div
+        ref={scrollRef}
+        className="max-h-[500px] overflow-y-auto rounded-xl border font-mono text-xs"
+        style={{ borderColor: "var(--color-border)" }}
+      >
       {logs.map((log, i) => {
         const time = new Date(log.timestamp);
         const timeStr = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -863,6 +940,7 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
           </div>
         );
       })}
+      </div>
     </div>
   );
 }

@@ -43,6 +43,16 @@ const electronAPI = {
   openFile: (fileId: string, fileName: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke("file:open", { fileId, fileName }),
 
+  downloadFile: (
+    fileId: string,
+    fileName: string,
+    version?: number,
+  ): Promise<{ ok: boolean; canceled?: boolean; path?: string }> =>
+    ipcRenderer.invoke("file:download", { fileId, fileName, version }),
+
+  showInFolder: (path: string): Promise<void> =>
+    ipcRenderer.invoke("file:show-in-folder", path),
+
   // 2FA — generate the authenticator QR locally so the secret never leaves the device
   generateTotpQr: (uri: string): Promise<string> =>
     ipcRenderer.invoke("totp:generate-qr", uri),

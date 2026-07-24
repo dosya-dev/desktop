@@ -217,7 +217,7 @@ export function SettingsPage() {
                       className={`h-8 w-8 rounded-full transition-all ${
                         wsColor === color ? "ring-2 ring-offset-2" : ""
                       }`}
-                      style={{ background: color, ringColor: color }}
+                      style={{ background: color, "--tw-ring-color": color } as React.CSSProperties}
                     />
                   ))}
                 </div>

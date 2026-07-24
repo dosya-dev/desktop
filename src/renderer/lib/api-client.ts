@@ -13,6 +13,21 @@ async function getApiBase(): Promise<string> {
   return _apiBase;
 }
 
+/** Must be awaited once at app bootstrap (main.tsx) before the first render. */
+export async function primeApiBase(): Promise<void> {
+  _apiBase = await window.electronAPI.getApiBase();
+}
+
+/**
+ * Synchronous API base for URL building (img/video/iframe src attributes,
+ * which can't await). Safe anywhere below the app root: main.tsx primes it
+ * before rendering.
+ */
+export function apiBase(): string {
+  if (!_apiBase) throw new Error("API base not primed");
+  return _apiBase;
+}
+
 export class ApiError extends Error {
   status: number;
   data: Record<string, unknown>;

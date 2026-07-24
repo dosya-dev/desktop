@@ -195,6 +195,9 @@ function createWindow(): void {
       // builds, http://localhost:5174 in dev) that the API allows via CORS —
       // rather than the "null" file:// origin that forced webSecurity off before.
       webSecurity: true,
+      // Chromium's built-in PDF viewer is plugin-gated in Electron; the in-app
+      // file viewer renders PDFs in an <iframe> and needs it enabled.
+      plugins: true,
     },
   });
 

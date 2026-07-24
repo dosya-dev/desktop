@@ -1,4 +1,4 @@
-import chokidar from "chokidar";
+import chokidar, { type FSWatcher } from "chokidar";
 import { EventEmitter } from "events";
 import { extname, basename } from "path";
 
@@ -158,7 +158,7 @@ export type WatchEvent =
 const MAX_PENDING_EVENTS = 50_000;
 
 export class LocalWatcher extends EventEmitter {
-  private watcher: chokidar.FSWatcher | null = null;
+  private watcher: FSWatcher | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private maxWaitTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingEvents = new Map<string, WatchEvent>();
@@ -233,7 +233,8 @@ export class LocalWatcher extends EventEmitter {
     this.watcher.on("unlink", (p: string) => handle("unlink", p));
     this.watcher.on("addDir", (p: string) => handle("addDir", p));
     this.watcher.on("unlinkDir", (p: string) => handle("unlinkDir", p));
-    this.watcher.on("error", (err: Error) => {
+    this.watcher.on("error", (errUnknown: unknown) => {
+      const err = errUnknown instanceof Error ? errUnknown : new Error(String(errUnknown));
       const isEmfile =
         (err as NodeJS.ErrnoException).code === "EMFILE" ||
         (err as NodeJS.ErrnoException).code === "ENOSPC" ||

@@ -16,6 +16,8 @@ export interface SyncPairRuntimeStatus {
   totalBytesInBatch: number;
   completedBytesInBatch: number;
   batchStartedAt: number;
+  /** When the current sync cycle began (prep phases included). 0 when idle. */
+  syncStartedAt: number;
   phase: "scanning" | "transferring" | null;
   scannedFiles: number;
   scannedFolders: number;

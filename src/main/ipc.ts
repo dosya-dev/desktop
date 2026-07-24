@@ -291,6 +291,62 @@ export function registerIpcHandlers(apiBase: string): void {
     },
   );
 
+  // ── File Download (to a user-chosen location) ─────────────────────
+
+  ipcMain.handle(
+    "file:download",
+    async (_event, { fileId, fileName, version }: { fileId: string; fileName: string; version?: number }) => {
+      if (typeof fileId !== "string" || fileId.length === 0 || fileId.length > 200) {
+        throw new Error("Invalid fileId");
+      }
+      if (typeof fileName !== "string" || fileName.length === 0 || fileName.length > 500) {
+        throw new Error("Invalid fileName");
+      }
+      if (version !== undefined && (!Number.isInteger(version) || version < 1 || version > 100000)) {
+        throw new Error("Invalid version");
+      }
+
+      const safeName = basename(fileName).replace(/[/\\]/g, "_");
+      if (!safeName || safeName === "." || safeName === "..") {
+        throw new Error("Invalid file name");
+      }
+
+      const { canceled, filePath } = await dialog.showSaveDialog({
+        title: "Save file",
+        defaultPath: join(app.getPath("downloads"), safeName),
+      });
+      if (canceled || !filePath) return { ok: false, canceled: true };
+
+      const cookies = await session.defaultSession.cookies.get({ url: apiBase });
+      const sessionCookie = cookies.find((c) => c.name === "dosya_session");
+      if (!sessionCookie) {
+        throw new Error("Not authenticated");
+      }
+
+      const qs = version ? `?version=${version}` : "";
+      const res = await fetch(`${apiBase}/api/files/${encodeURIComponent(fileId)}/download${qs}`, {
+        headers: {
+          Cookie: `dosya_session=${sessionCookie.value}`,
+        },
+      });
+
+      if (!res.ok) {
+        throw new Error(`Download failed: ${res.status}`);
+      }
+
+      const fileStream = createWriteStream(filePath);
+      await pipeline(Readable.fromWeb(res.body as any), fileStream);
+      return { ok: true, path: filePath };
+    },
+  );
+
+  ipcMain.handle("file:show-in-folder", async (_event, path: string) => {
+    if (typeof path !== "string" || path.length === 0 || path.length > 2000) {
+      throw new Error("Invalid path");
+    }
+    shell.showItemInFolder(path);
+  });
+
   // ── 2FA QR generation ────────────────────────────────────────────
   // Render the authenticator QR entirely on-device. The otpauth:// URI embeds
   // the raw TOTP shared secret, so it must NEVER be sent to a third-party image

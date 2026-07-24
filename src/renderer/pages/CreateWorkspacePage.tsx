@@ -127,8 +127,8 @@ export function CreateWorkspacePage() {
                     }`}
                     style={{
                       background: c,
-                      ringColor: c,
-                    }}
+                      "--tw-ring-color": c,
+                    } as React.CSSProperties}
                   />
                 ))}
               </div>

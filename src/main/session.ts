@@ -52,6 +52,11 @@ export function setupSession(apiBase: string): void {
             "style-src 'self' 'unsafe-inline'",
             `img-src 'self' data: blob: ${apiBase}`,
             `connect-src 'self' ${apiBase}`,
+            // In-app file viewer: <video>/<audio> stream from the API, and the
+            // PDF preview loads /raw in an <iframe>. Without these, media falls
+            // back to default-src 'self' and gets blocked.
+            `media-src 'self' ${apiBase}`,
+            `frame-src 'self' ${apiBase}`,
             "font-src 'self' data:",
             "object-src 'none'",
             "base-uri 'self'",
@@ -65,6 +70,8 @@ export function setupSession(apiBase: string): void {
             "style-src 'self' 'unsafe-inline'",
             `img-src 'self' data: blob: http://localhost:* ${apiBase}`,
             `connect-src 'self' http://localhost:* ws://localhost:* ${apiBase}`,
+            `media-src 'self' http://localhost:* ${apiBase}`,
+            `frame-src 'self' http://localhost:* ${apiBase}`,
             "font-src 'self' data:",
             "object-src 'none'",
             "base-uri 'self'",

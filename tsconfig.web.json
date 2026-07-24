@@ -9,6 +9,7 @@
     "composite": true,
     "jsx": "react-jsx",
     "outDir": "./out",
+    "rootDir": "../..",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "baseUrl": ".",
     "paths": {
@@ -16,5 +17,9 @@
       "@dosya-dev/shared": ["../../packages/shared/src"]
     }
   },
-  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx"]
+  "include": [
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.tsx",
+    "../../packages/shared/src/**/*.ts"
+  ]
 }

@@ -27,28 +27,44 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
 
     if (syncStatus && syncStatus.pairs.length > 0) {
       // Summary line
-      const syncing = syncStatus.pairs.filter((p) => p.status === "syncing").length;
-      const errors = syncStatus.pairs.filter((p) => p.status === "error").length;
+      const pairs = syncStatus.pairs;
+      const syncing = pairs.filter((p) => p.status === "syncing").length;
+      const errors = pairs.filter((p) => p.status === "error").length;
+      const paused = pairs.filter((p) => p.status === "paused").length;
       const transferCount = syncStatus.activeTransfers.length;
 
-      let summary = "All synced";
-      if (syncStatus.globalPaused) summary = "Paused";
+      // Icon + human label for a single pair. A paused folder is a deliberate
+      // stop, not a failure — it reads "Paused", never as an error.
+      const stateLabel = (status: string): { icon: string; text: string } => {
+        switch (status) {
+          case "idle": return { icon: "✓", text: "Synced" };
+          case "syncing": return { icon: "⟳", text: "Syncing…" };
+          case "paused": return { icon: "⏸", text: "Paused" };
+          case "error": return { icon: "⚠", text: "Error" };
+          case "rate-limited": return { icon: "⏳", text: "Waiting" };
+          case "offline": return { icon: "⚠", text: "Offline" };
+          default: return { icon: "•", text: "" };
+        }
+      };
+
+      // Priority: global pause / all paused → paused; then real errors; then
+      // active sync; then a partial pause; else everything is synced. Paused
+      // pairs must never be summarized as an error.
+      let summary: string;
+      if (syncStatus.globalPaused || (paused > 0 && paused === pairs.length)) summary = "Paused";
       else if (errors > 0) summary = `${errors} error${errors > 1 ? "s" : ""}`;
       else if (syncing > 0 || transferCount > 0)
-        summary = `Syncing ${transferCount} file${transferCount !== 1 ? "s" : ""}...`;
+        summary = `Syncing ${transferCount} file${transferCount !== 1 ? "s" : ""}…`;
+      else if (paused > 0) summary = `${paused} paused`;
+      else summary = "All synced";
 
       syncItems.push({ label: `Sync: ${summary}`, enabled: false });
 
       // Per-pair status
-      for (const pair of syncStatus.pairs) {
-        const statusIcon =
-          pair.status === "idle" ? "✓" :
-          pair.status === "syncing" ? "⟳" :
-          pair.status === "error" ? "⚠" :
-          pair.status === "paused" ? "⏸" : "?";
-
+      for (const pair of pairs) {
+        const { icon, text } = stateLabel(pair.status);
         syncItems.push({
-          label: `  ${statusIcon} ${pair.workspaceName}/${pair.remoteFolderName}`,
+          label: `  ${icon} ${pair.workspaceName}/${pair.remoteFolderName}${text ? ` — ${text}` : ""}`,
           enabled: false,
         });
       }

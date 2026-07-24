@@ -178,6 +178,10 @@ export interface SyncPairRuntimeStatus {
   completedBytesInBatch: number;
   /** Timestamp when the current batch started (for ETA calculation). */
   batchStartedAt: number;
+  /** Timestamp when the current sync cycle began, including the prep phases
+   *  (snapshot fetch + local scan) before any transfer. 0 when idle. Lets the
+   *  UI show elapsed time during the indeterminate "scanning" phase. */
+  syncStartedAt: number;
   /** "scanning" while walking the tree, "transferring" during uploads, null when idle. */
   phase: "scanning" | "transferring" | null;
   /** Number of files discovered so far during the scan walk. */

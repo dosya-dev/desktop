@@ -30,11 +30,13 @@
   },
   "dependencies": {
     "@dosya-dev/shared": "file:../../packages/shared",
+    "@shikijs/engine-javascript": "^3.23.0",
     "@tanstack/react-query": "^5.72.2",
     "@tanstack/react-virtual": "^3.13.6",
     "chokidar": "^4.0.3",
     "electron-updater": "^6.3.9",
     "graceful-fs": "^4.2.11",
+    "libheif-js": "^1.19.8",
     "lucide-react": "^0.475.0",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
@@ -42,12 +44,14 @@
     "react-dropzone": "^14.3.8",
     "react-router": "^7.4.0",
     "react-router-dom": "^7.4.0",
+    "shiki": "^3.23.0",
     "sonner": "^2.0.3",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@tailwindcss/vite": "^4.1.14",
+    "@types/graceful-fs": "^4.1.9",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -128,6 +128,12 @@ interface PairRuntime {
   localDirty: boolean;
   /** Timestamp of the last full local scan (for periodic consistency checks). */
   lastFullLocalScanAt: number;
+  /** When the current sync cycle began (prep phases included). 0 when idle. */
+  syncStartedAt: number;
+  /** Last time this pair reported forward progress — drives the stall watchdog. */
+  lastProgressAt: number;
+  /** Throttle for periodic "still scanning/fetching…" progress logs. */
+  lastProgressLogAt: number;
 }
 
 /**
@@ -204,6 +210,20 @@ export class SyncEngine extends EventEmitter {
   }
 
   /**
+   * Serializes engine lifecycle (start/stop). Login/logout cookie events can
+   * fire in quick succession; without this a stop() racing an in-flight
+   * start() would leak timers the start sets after stop cleared them, and
+   * stop's runtimes.clear() could wipe pairs a newer start just created —
+   * leaving sync half-running while logged out.
+   */
+  private lifecycleOp: Promise<unknown> = Promise.resolve();
+  private withLifecycleLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.lifecycleOp.then(fn, fn);
+    this.lifecycleOp = run.catch(() => {});
+    return run;
+  }
+
+  /**
    * Concurrency for lightweight direct-to-R2 transfers (presigned URLs).
    * Derived from the user's maxConcurrentTransfers setting, bounded by the
    * client socket pool so surplus workers don't just spin, and capped so
@@ -238,10 +258,15 @@ export class SyncEngine extends EventEmitter {
   // ── Lifecycle ─────────────────────────────────────────────────────
 
   async start(): Promise<void> {
+    return this.withLifecycleLock(() => this.startLocked());
+  }
+
+  private async startLocked(): Promise<void> {
     if (this.started) return;
 
     // Don't start sync if user is not logged in.
     // The app should call start() again after login.
+    // Cookie cache was cleared on the last stop(), so this read is fresh.
     const hasSession = await this.client.hasSession();
     if (!hasSession) {
       console.log("[sync] No session cookie found — sync engine will not start until login.");
@@ -265,12 +290,12 @@ export class SyncEngine extends EventEmitter {
           for (const pair of this.config.pairs) {
             await deletePairState(pair.id);
           }
-          // Reset config but keep structure
+          // Reset config but keep structure, then fall through with the
+          // emptied pair list: the engine must stay started so pairs the new
+          // account adds can start immediately (startPair requires started).
           this.config.pairs = [];
           this.config.userId = currentUserId;
           await saveConfig(this.config);
-          this.started = false;
-          return;
         }
         // Store user ID if not set yet
         if (!this.config.userId) {
@@ -301,7 +326,14 @@ export class SyncEngine extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    return this.withLifecycleLock(() => this.stopLocked());
+  }
+
+  private async stopLocked(): Promise<void> {
     this.started = false;
+    // Drop the cached session cookie so hasSession() doesn't report a stale
+    // positive right after logout (the cache only stores present cookies).
+    this.client.clearCookieCache();
     if (this.recoveryTimer) {
       clearInterval(this.recoveryTimer);
       this.recoveryTimer = null;
@@ -369,6 +401,18 @@ export class SyncEngine extends EventEmitter {
 
   private async checkRecovery(): Promise<void> {
     for (const [pairId, rt] of this.runtimes) {
+      // Stall watchdog: a pair that's been syncing without any forward progress
+      // for a while is either on a genuinely slow operation or wedged. Either
+      // way, say so in the Activity log instead of showing a silent spinner —
+      // this is what turns "it just sat at Starting initial sync" from a
+      // mystery into a visible, timestamped signal.
+      const STALL_MS = 90_000;
+      if (rt.syncing && rt.lastProgressAt && Date.now() - rt.lastProgressAt > STALL_MS) {
+        const secs = Math.round((Date.now() - (rt.syncStartedAt || rt.lastProgressAt)) / 1000);
+        this.log(pairId, `Still working: ${rt.statusText || "syncing"} — ${secs}s elapsed, no new progress yet`);
+        rt.lastProgressAt = Date.now(); // reset so we log at most once per interval
+      }
+
       // Recover from session expiry
       if (rt.status === "error" && rt.errorMessage?.includes("Session expired")) {
         try {
@@ -445,6 +489,29 @@ export class SyncEngine extends EventEmitter {
     rt.errorMessage = message;
   }
 
+  // ── Progress reporting (visibility for long/silent phases) ─────────
+
+  /** Mark the start of a sync cycle so elapsed time and the stall watchdog
+   *  have a baseline. Called from every entry point that sets syncing = true. */
+  private beginSyncCycle(rt: PairRuntime): void {
+    const now = Date.now();
+    rt.syncStartedAt = now;
+    rt.lastProgressAt = now;
+    rt.lastProgressLogAt = now;
+  }
+
+  /** Record forward progress. Updates the watchdog timestamp and, throttled,
+   *  emits a human-readable line to the Activity log so long prep phases
+   *  (remote snapshot fetch, local scan) aren't a silent black box. */
+  private markProgress(rt: PairRuntime, logMessage?: string, throttleMs = 3000): void {
+    const now = Date.now();
+    rt.lastProgressAt = now;
+    if (logMessage && now - rt.lastProgressLogAt >= throttleMs) {
+      rt.lastProgressLogAt = now;
+      this.log(rt.pair.id, logMessage);
+    }
+  }
+
   // ── Path safety ───────────────────────────────────────────────────
 
   /**
@@ -493,6 +560,14 @@ export class SyncEngine extends EventEmitter {
   // ── Start / stop pairs ────────────────────────────────────────────
 
   private async startPair(pair: SyncPair): Promise<void> {
+    // Sync must only run while logged in. The engine is only started with a
+    // session present, and every path that spins up watchers/pollers/scans
+    // funnels through here — so a stopped engine (logged out) never grows
+    // sync machinery, no matter which IPC call or timer fires.
+    if (!this.started) {
+      console.log("[sync] startPair skipped — engine not started:", pair.id);
+      return;
+    }
     if (this.runtimes.has(pair.id)) return;
     console.log("[sync] startPair:", pair.id, "mode:", pair.syncMode, "path:", pair.localPath);
 
@@ -529,6 +604,9 @@ export class SyncEngine extends EventEmitter {
         statusText: "",
         localDirty: true,
         lastFullLocalScanAt: 0,
+        syncStartedAt: 0,
+        lastProgressAt: 0,
+        lastProgressLogAt: 0,
       };
       this.runtimes.set(pair.id, rt);
       this.emitStatus();
@@ -632,6 +710,9 @@ export class SyncEngine extends EventEmitter {
       statusText: "",
       localDirty: true,
       lastFullLocalScanAt: 0,
+      syncStartedAt: 0,
+      lastProgressAt: 0,
+      lastProgressLogAt: 0,
     };
 
     this.runtimes.set(pair.id, rt);
@@ -767,6 +848,7 @@ export class SyncEngine extends EventEmitter {
 
     rt.syncing = true;
     rt.status = "syncing";
+    this.beginSyncCycle(rt);
     this.emitStatus();
 
     try {
@@ -781,7 +863,12 @@ export class SyncEngine extends EventEmitter {
       if (needsFullScan) {
         rt.statusText = "Scanning for changes...";
         this.emitStatus();
-        actions = await reconcile(rt.pair, rt.state, snapshot);
+        actions = await reconcile(rt.pair, rt.state, snapshot, (files, folders) => {
+          rt.scannedFiles = files;
+          rt.scannedFolders = folders;
+          this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
+          this.emitStatus();
+        });
         rt.localDirty = false;
         rt.lastFullLocalScanAt = Date.now();
       } else {
@@ -965,6 +1052,7 @@ export class SyncEngine extends EventEmitter {
           }
           rt.completedFilesInBatch++;
           rt.completedBytesInBatch += action.remoteFile.size_bytes;
+          this.markProgress(rt);
           if (++opCount % STATE_SAVE_INTERVAL === 0) await this.safeSaveState(rt.state);
           this.emitStatus();
         }
@@ -1064,7 +1152,9 @@ export class SyncEngine extends EventEmitter {
 
   private async runInitialScan(pairId: string): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.syncing || rt.status === "rate-limited") return;
+    // Also bail while stopped or paused: a trigger racing a logout/pause
+    // must not flip the pair back to "syncing" mid-teardown.
+    if (!rt || this.stopped || rt.syncing || rt.status === "paused" || rt.status === "rate-limited") return;
     console.log("[sync] runInitialScan:", pairId);
 
     // Check if the server still has sync enabled for this folder
@@ -1096,6 +1186,7 @@ export class SyncEngine extends EventEmitter {
 
     rt.syncing = true;
     rt.status = "syncing";
+    this.beginSyncCycle(rt);
     this.emitStatus();
 
     try {
@@ -1217,6 +1308,7 @@ export class SyncEngine extends EventEmitter {
           }
           rt.scannedFolders++;
           if (++walkCount % YIELD_INTERVAL === 0) {
+            this.markProgress(rt, `Scanned ${rt.scannedFiles.toLocaleString()} local files, ${rt.scannedFolders.toLocaleString()} folders...`);
             this.emitStatus();
             await new Promise<void>(r => setImmediate(r));
           }
@@ -1493,6 +1585,7 @@ export class SyncEngine extends EventEmitter {
             // Update progress
             rt.completedFilesInBatch++;
             rt.completedBytesInBatch += upload.size;
+            this.markProgress(rt);
             this.emitStatus();
           } catch (err: any) {
             console.error(`[sync] Presigned upload failed for ${upload.relPath}:`, err.message);
@@ -1665,6 +1758,7 @@ export class SyncEngine extends EventEmitter {
 
     rt.syncing = true;
     rt.status = "syncing";
+    this.beginSyncCycle(rt);
     this.emitStatus();
 
     let opCount = 0;
@@ -1929,6 +2023,7 @@ export class SyncEngine extends EventEmitter {
 
     rt.syncing = true;
     rt.status = "syncing";
+    this.beginSyncCycle(rt);
     this.emitStatus();
 
     let opCount = 0;
@@ -2135,6 +2230,7 @@ export class SyncEngine extends EventEmitter {
           const now = Date.now();
           if (now - lastProgressEmit > 500) {
             lastProgressEmit = now;
+            this.markProgress(rt); // bytes flowing = progress (keeps watchdog quiet)
             this.emitStatus();
           }
         },
@@ -2172,30 +2268,39 @@ export class SyncEngine extends EventEmitter {
   private async uploadLocalFile(rt: PairRuntime, absPath: string, relPath: string): Promise<void> {
     if (this.stopped) return;
     await this.transferSemaphore.acquire();
-    if (this.stopped) { this.transferSemaphore.release(); return; }
 
-    const fileName = relPath.split("/").pop()!;
-    const s = await stat(longPath(absPath));
-
-    // Find the remote folder ID for this file's parent directory
-    const parentRelPath = relPath.split("/").slice(0, -1).join("/");
-    const remoteFolderId = parentRelPath
-      ? (rt.state.folders[parentRelPath]?.remoteId ?? rt.pair.remoteFolderId)
-      : rt.pair.remoteFolderId;
-
-    const transfer: ActiveTransfer = {
-      pairId: rt.pair.id,
-      filePath: relPath,
-      fileName,
-      direction: "upload",
-      bytesTotal: s.size,
-      bytesTransferred: 0,
-      startedAt: Date.now(),
-    };
-    this.activeTransfers.add(transfer);
-    this.emitStatus();
-
+    // Everything after acquire() runs inside try/finally so the permit is
+    // ALWAYS released. Previously `stat()` (below) ran before the try — when it
+    // threw (file deleted/renamed/permission-denied between scan and upload, a
+    // routine event mid-sync) the permit leaked. After enough leaks the
+    // semaphore's capacity hit zero and every upload worker blocked on
+    // acquire() forever, freezing the pair at "syncing" with no more uploads.
+    let transfer: ActiveTransfer | null = null;
     try {
+      if (this.stopped) return;
+
+      const fileName = relPath.split("/").pop()!;
+      const s = await stat(longPath(absPath));
+
+      // Find the remote folder ID for this file's parent directory
+      const parentRelPath = relPath.split("/").slice(0, -1).join("/");
+      const remoteFolderId = parentRelPath
+        ? (rt.state.folders[parentRelPath]?.remoteId ?? rt.pair.remoteFolderId)
+        : rt.pair.remoteFolderId;
+
+      const t: ActiveTransfer = {
+        pairId: rt.pair.id,
+        filePath: relPath,
+        fileName,
+        direction: "upload",
+        bytesTotal: s.size,
+        bytesTransferred: 0,
+        startedAt: Date.now(),
+      };
+      transfer = t;
+      this.activeTransfers.add(t);
+      this.emitStatus();
+
       const existing = this.lookupByPath(rt, relPath);
       const existingFileId = existing?.remoteId ?? null;
 
@@ -2207,10 +2312,11 @@ export class SyncEngine extends EventEmitter {
         rt.pair.region,
         existingFileId,
         (bytes) => {
-          transfer.bytesTransferred = bytes;
+          t.bytesTransferred = bytes;
           const now = Date.now();
           if (now - lastUploadEmit > 500) {
             lastUploadEmit = now;
+            this.markProgress(rt); // bytes flowing = progress (keeps watchdog quiet)
             this.emitStatus();
           }
         },
@@ -2265,7 +2371,7 @@ export class SyncEngine extends EventEmitter {
 
       delete rt.state.fileErrors[relPath];
     } finally {
-      this.activeTransfers.delete(transfer);
+      if (transfer) this.activeTransfers.delete(transfer);
       this.transferSemaphore.release();
       this.emitStatus();
     }
@@ -2373,6 +2479,7 @@ export class SyncEngine extends EventEmitter {
         totalBytesInBatch: rt.totalBytesInBatch,
         completedBytesInBatch: rt.completedBytesInBatch,
         batchStartedAt: rt.batchStartedAt,
+        syncStartedAt: rt.syncStartedAt,
         phase: rt.phase,
         scannedFiles: rt.scannedFiles,
         scannedFolders: rt.scannedFolders,
@@ -2393,6 +2500,12 @@ export class SyncEngine extends EventEmitter {
   }
 
   private async addPairLocked(pair: SyncPair): Promise<void> {
+    // Sync only works while logged in — refuse before persisting anything.
+    // (If a session exists but the engine hasn't started yet — the delayed
+    // boot start — the pair is saved and picked up when start() runs.)
+    if (!(await this.client.hasSession())) {
+      throw new Error("You must be logged in to add a sync folder.");
+    }
     this.config = await loadConfig();
 
     // Prevent overlapping sync pairs — two pairs watching the same or nested
@@ -2656,7 +2769,16 @@ export class SyncEngine extends EventEmitter {
     this.log(pair.id, "Fetching remote file list...");
     this.emitStatus();
 
-    const fast = await this.client.fetchSnapshotFast(pair.workspaceId, pair.remoteFolderId);
+    const fast = await this.client.fetchSnapshotFast(
+      pair.workspaceId,
+      pair.remoteFolderId,
+      undefined,
+      (filesSoFar) => {
+        rt.statusText = `Comparing with server... ${filesSoFar.toLocaleString()} remote files`;
+        this.markProgress(rt, `Fetched ${filesSoFar.toLocaleString()} remote files so far...`);
+        this.emitStatus();
+      },
+    );
     if (!fast) return null;
 
     const snapshot: RemoteSnapshot = {
@@ -2721,12 +2843,15 @@ export class SyncEngine extends EventEmitter {
    */
   private async runInitialReconcile(pairId: string): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.syncing || rt.status === "rate-limited") return;
+    // Also bail while stopped or paused: a trigger racing a logout/pause
+    // must not flip the pair back to "syncing" mid-teardown.
+    if (!rt || this.stopped || rt.syncing || rt.status === "paused" || rt.status === "rate-limited") return;
 
     rt.syncing = true;
     rt.status = "syncing";
     rt.phase = "scanning";
     rt.statusText = "Connecting to server...";
+    this.beginSyncCycle(rt);
     this.log(pairId, "Starting initial sync...");
     this.emitStatus();
 
@@ -2738,7 +2863,16 @@ export class SyncEngine extends EventEmitter {
       if (!snapshot) {
         rt.statusText = "Checking for changes...";
         this.emitStatus();
-        const fast = await this.client.fetchSnapshotFast(rt.pair.workspaceId, rt.pair.remoteFolderId);
+        const fast = await this.client.fetchSnapshotFast(
+          rt.pair.workspaceId,
+          rt.pair.remoteFolderId,
+          undefined,
+          (filesSoFar) => {
+            rt.statusText = `Checking for changes... ${filesSoFar.toLocaleString()} remote files`;
+            this.markProgress(rt, `Fetched ${filesSoFar.toLocaleString()} remote files so far...`);
+            this.emitStatus();
+          },
+        );
         if (fast) {
           snapshot = {
             files: new Map(fast.files.map(f => [f.id, f] as const)),
@@ -2756,7 +2890,13 @@ export class SyncEngine extends EventEmitter {
       // Run reconciler
       rt.statusText = "Scanning local files...";
       this.emitStatus();
-      const actions = await reconcile(rt.pair, rt.state, snapshot);
+      const actions = await reconcile(rt.pair, rt.state, snapshot, (files, folders) => {
+        rt.scannedFiles = files;
+        rt.scannedFolders = folders;
+        rt.statusText = `Scanning local files... ${files.toLocaleString()} files, ${folders.toLocaleString()} folders`;
+        this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
+        this.emitStatus();
+      });
 
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 

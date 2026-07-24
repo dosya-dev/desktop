@@ -30,9 +30,13 @@ const MAX_FOLDER_DEPTH = 50;
 const STAT_BATCH_SIZE = 50;
 const YIELD_INTERVAL = 20; // yield every 20 batches (1000 files) to keep UI responsive
 
+/** Reports scan progress so the two-way path isn't a silent black box. */
+export type ScanProgress = (scannedFiles: number, scannedFolders: number) => void;
+
 async function scanLocal(
   rootPath: string,
   userPatterns?: string[],
+  onProgress?: ScanProgress,
 ): Promise<{ files: Map<string, LocalFileStat>; dirs: Set<string>; incomplete: boolean }> {
   const files = new Map<string, LocalFileStat>();
   const dirs = new Set<string>();
@@ -67,6 +71,7 @@ async function scanLocal(
         dirs.add(relPath);
         // Yield periodically to keep event loop responsive
         if (++yieldCounter % YIELD_INTERVAL === 0) {
+          onProgress?.(files.size, dirs.size);
           await new Promise<void>(r => setImmediate(r));
         }
         await walk(fullPath, depth + 1);
@@ -91,12 +96,14 @@ async function scanLocal(
         });
       }
       if (++yieldCounter % YIELD_INTERVAL === 0) {
+        onProgress?.(files.size, dirs.size);
         await new Promise<void>(r => setImmediate(r));
       }
     }
   }
 
   await walk(rootPath, 0);
+  onProgress?.(files.size, dirs.size);
   return { files, dirs, incomplete };
 }
 
@@ -160,9 +167,10 @@ export async function reconcile(
   pair: SyncPair,
   storedState: SyncPairState,
   remote: RemoteSnapshot,
+  onScanProgress?: ScanProgress,
 ): Promise<SyncAction[]> {
   const actions: SyncAction[] = [];
-  const { files: localFiles, dirs: localDirs, incomplete: localScanIncomplete } = await scanLocal(pair.localPath, pair.excludedPatterns);
+  const { files: localFiles, dirs: localDirs, incomplete: localScanIncomplete } = await scanLocal(pair.localPath, pair.excludedPatterns, onScanProgress);
   const { filePathMap, folderPathMap } = buildRemotePaths(
     remote.files,
     remote.folders,

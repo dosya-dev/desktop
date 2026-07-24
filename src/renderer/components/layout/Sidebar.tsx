@@ -426,7 +426,7 @@ export function Sidebar() {
                     type="button"
                     onClick={() => setNewWsColor(c)}
                     className={`h-7 w-7 rounded-full transition-all ${newWsColor === c ? "ring-2 ring-offset-2" : "hover:scale-110"}`}
-                    style={{ background: c, ringColor: c }}
+                    style={{ background: c, "--tw-ring-color": c } as React.CSSProperties}
                     aria-label={c}
                   />
                 ))}
