@@ -2,34 +2,134 @@
 
 /* ── Custom properties matching dosya.dev web design ─────────────── */
 
+/* ── Theme tokens (parity with apps/web) ─────────────────────────────
+   The web app offers 8 themes × light/dark/system. We mirror the same set
+   here: each theme is a `[data-theme]` block defining shadcn-style tokens,
+   and dark mode is a `.dark` class (toggled by lib/theme.ts), NOT a media
+   query — so the JS-selected mode wins. The desktop's components consume a
+   simpler `--color-*` vocabulary, so we ALIAS those onto the tokens once (in
+   :root); the aliases resolve against whichever token values the active
+   theme/mode cascades onto <html>. Keep this in sync with
+   apps/web/src/index.css and apps/web/src/lib/themes.ts. */
+
 :root {
-  --color-primary: #22c55e;
-  --color-primary-hover: #16a34a;
-  --color-danger: #ef4444;
-  --color-danger-hover: #dc2626;
-  --color-text: #1a1917;
-  --color-text-secondary: #706e69;
-  --color-text-muted: #a09d97;
-  --color-bg: #ffffff;
-  --color-bg-secondary: #f9f8f6;
-  --color-bg-tertiary: #f3f2ee;
-  --color-border: #e0ded8;
+  --background: oklch(0.9813 0.0100 238.5069);
+  --foreground: oklch(0.1807 0.0207 239.8394);
+  --primary: oklch(0.6236 0.1833 147.4139);
+  --secondary: oklch(0.9396 0.0204 243.4220);
+  --muted-foreground: oklch(0.4501 0.0191 239.4931);
+  --border: oklch(0.8999 0.0196 240.7516);
+  --destructive: oklch(0.6207 0.2306 24.9164);
+
+  /* ── Desktop --color-* aliases (map onto the tokens above) ──────── */
+  --color-bg: var(--background);
+  --color-bg-secondary: var(--secondary);
+  --color-bg-tertiary: color-mix(in oklab, var(--secondary), var(--foreground) 8%);
+  --color-border: var(--border);
+  --color-text: var(--foreground);
+  --color-text-secondary: var(--muted-foreground);
+  --color-text-muted: color-mix(in oklab, var(--muted-foreground) 62%, var(--background));
+  --color-primary: var(--primary);
+  --color-primary-hover: color-mix(in oklab, var(--primary) 85%, var(--foreground));
+  --color-danger: var(--destructive);
+  --color-danger-hover: color-mix(in oklab, var(--destructive) 85%, var(--foreground));
+
   --sidebar-width: 260px;
   --titlebar-height: 52px;
 }
 
-/* ── Dark mode ──────────────────────────────────────────────────── */
+.dark {
+  --background: oklch(0.1289 0.0199 238.9108);
+  --foreground: oklch(0.9513 0.0101 238.5127);
+  --primary: oklch(0.7007 0.1804 148.9872);
+  --secondary: oklch(0.2414 0.0196 239.1401);
+  --muted-foreground: oklch(0.6499 0.0194 240.1577);
+  --border: oklch(0.2791 0.0203 242.6079);
+  --destructive: oklch(0.6207 0.2306 24.9164);
+}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-text: #e8e6e3;
-    --color-text-secondary: #a09d97;
-    --color-text-muted: #706e69;
-    --color-bg: #1a1a1a;
-    --color-bg-secondary: #242420;
-    --color-bg-tertiary: #2e2e2a;
-    --color-border: #3a3a36;
-  }
+/* ── Mono ────────────────────────────────────────────────────────── */
+[data-theme="mono"] {
+  --background: oklch(1 0 0); --foreground: oklch(0.21 0 0);
+  --primary: oklch(0.24 0 0); --secondary: oklch(0.96 0 0);
+  --muted-foreground: oklch(0.52 0 0); --border: oklch(0.90 0 0);
+}
+[data-theme="mono"].dark {
+  --background: oklch(0.14 0 0); --foreground: oklch(0.96 0 0);
+  --primary: oklch(0.92 0 0); --secondary: oklch(0.26 0 0);
+  --muted-foreground: oklch(0.71 0 0); --border: oklch(0.28 0 0);
+}
+
+/* ── Claude ──────────────────────────────────────────────────────── */
+[data-theme="claude"] {
+  --background: oklch(0.98 0.01 84); --foreground: oklch(0.34 0.02 62);
+  --primary: oklch(0.56 0.13 43); --secondary: oklch(0.92 0.02 83);
+  --muted-foreground: oklch(0.55 0.02 62); --border: oklch(0.88 0.02 78);
+}
+[data-theme="claude"].dark {
+  --background: oklch(0.22 0.01 61); --foreground: oklch(0.94 0.01 84);
+  --primary: oklch(0.64 0.13 44); --secondary: oklch(0.31 0.01 61);
+  --muted-foreground: oklch(0.74 0.01 78); --border: oklch(0.34 0.01 61);
+}
+
+/* ── Amber ───────────────────────────────────────────────────────── */
+[data-theme="amber"] {
+  --background: oklch(0.99 0.01 90); --foreground: oklch(0.28 0.02 82);
+  --primary: oklch(0.77 0.16 78); --secondary: oklch(0.95 0.02 90);
+  --muted-foreground: oklch(0.55 0.02 82); --border: oklch(0.90 0.02 88);
+}
+[data-theme="amber"].dark {
+  --background: oklch(0.16 0.01 84); --foreground: oklch(0.95 0.01 90);
+  --primary: oklch(0.79 0.16 78); --secondary: oklch(0.27 0.01 84);
+  --muted-foreground: oklch(0.71 0.02 88); --border: oklch(0.29 0.01 84);
+}
+
+/* ── Ocean ───────────────────────────────────────────────────────── */
+[data-theme="ocean"] {
+  --background: oklch(0.98 0.01 240); --foreground: oklch(0.28 0.03 255);
+  --primary: oklch(0.55 0.17 255); --secondary: oklch(0.94 0.02 240);
+  --muted-foreground: oklch(0.52 0.03 255); --border: oklch(0.89 0.02 244);
+}
+[data-theme="ocean"].dark {
+  --background: oklch(0.15 0.02 252); --foreground: oklch(0.94 0.01 240);
+  --primary: oklch(0.65 0.16 253); --secondary: oklch(0.26 0.02 252);
+  --muted-foreground: oklch(0.70 0.02 244); --border: oklch(0.29 0.02 252);
+}
+
+/* ── Bubblegum ───────────────────────────────────────────────────── */
+[data-theme="bubblegum"] {
+  --background: oklch(0.98 0.01 340); --foreground: oklch(0.34 0.03 350);
+  --primary: oklch(0.62 0.18 350); --secondary: oklch(0.94 0.03 340);
+  --muted-foreground: oklch(0.55 0.03 350); --border: oklch(0.90 0.03 344);
+}
+[data-theme="bubblegum"].dark {
+  --background: oklch(0.19 0.02 348); --foreground: oklch(0.95 0.01 340);
+  --primary: oklch(0.72 0.16 350); --secondary: oklch(0.29 0.02 348);
+  --muted-foreground: oklch(0.72 0.02 344); --border: oklch(0.32 0.02 348);
+}
+
+/* ── Vercel ──────────────────────────────────────────────────────── */
+[data-theme="vercel"] {
+  --background: oklch(1 0 0); --foreground: oklch(0.15 0 0);
+  --primary: oklch(0.15 0 0); --secondary: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.56 0 0); --border: oklch(0.92 0 0);
+}
+[data-theme="vercel"].dark {
+  --background: oklch(0.145 0 0); --foreground: oklch(0.99 0 0);
+  --primary: oklch(0.99 0 0); --secondary: oklch(0.24 0 0);
+  --muted-foreground: oklch(0.68 0 0); --border: oklch(0.26 0 0);
+}
+
+/* ── Neo-Brutalism (hard black/white borders) ────────────────────── */
+[data-theme="neo-brutal"] {
+  --background: oklch(0.96 0 0); --foreground: oklch(0 0 0);
+  --primary: oklch(0.65 0.24 25); --secondary: oklch(0.85 0.16 95);
+  --muted-foreground: oklch(0.35 0 0); --border: oklch(0 0 0);
+}
+[data-theme="neo-brutal"].dark {
+  --background: oklch(0.16 0 0); --foreground: oklch(1 0 0);
+  --primary: oklch(0.70 0.23 25); --secondary: oklch(0.80 0.16 95);
+  --muted-foreground: oklch(0.72 0 0); --border: oklch(1 0 0);
 }
 
 /* ── Font families ───────────────────────────────────────────────── */

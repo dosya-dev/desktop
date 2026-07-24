@@ -2,7 +2,13 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { primeApiBase } from "./lib/api-client";
+import { applyTheme, readCache } from "./lib/theme";
 import "./styles/index.css";
+
+// Apply the cached theme + mode to <html> synchronously, before any async
+// bootstrap or the first paint, so the app never flashes the default palette.
+// The account's saved appearance is reconciled later on login (auth-context).
+applyTheme(readCache());
 
 // The API base comes from the main process over IPC. Prime it before the
 // first render so URL builders (img/video/iframe src) can read it synchronously.

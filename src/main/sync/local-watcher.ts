@@ -44,6 +44,11 @@ export function shouldIgnoreEntry(
 ): boolean {
   // Built-in ignores
   if (IGNORED_NAMES.has(name)) return true;
+  // Our own temp/partial-download files. downloadToFile writes them as a
+  // SUFFIX ("photo.jpg.dosya-sync-tmp"), so a prefix-only check misses them
+  // and the watcher would hash/upload the growing temp as a user file. Match
+  // the marker as an infix (covers both prefix and suffix placements).
+  if (name.includes(".dosya-sync-")) return true;
   if (name.startsWith(".dosya-sync-")) return true;
   if (isDirectory && IGNORED_DIRS.has(name)) return true;
 
@@ -125,8 +130,11 @@ const CHOKIDAR_IGNORED = [
   "**/*.tmp",
   "**/*.crdownload",
   "**/*.part",
-  // Internal temp files
+  // Internal temp files. Match the marker anywhere in the basename: downloads
+  // are written as a SUFFIX ("photo.jpg.dosya-sync-tmp"), which the leading-dot
+  // glob alone would not catch.
   "**/.dosya-sync-*",
+  "**/*.dosya-sync-*",
   // Large dependency / VCS trees
   "**/node_modules/**",
   "**/.git/**",
@@ -241,7 +249,10 @@ export class LocalWatcher extends EventEmitter {
         err.message?.includes("EMFILE");
 
       if (isEmfile) {
-        if (!this.emfileWarned) {
+        // Guard on `degraded` (which is never reset), not `emfileWarned`
+        // (which stop() clears). stop() is called immediately below, so a
+        // subsequent EMFILE must not re-arm the warning/degraded spam.
+        if (!this.degraded) {
           this.emfileWarned = true;
           this.degraded = true;
           // Abandon live watching for this tree. Polling would stat() every

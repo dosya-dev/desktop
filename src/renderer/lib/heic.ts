@@ -7,11 +7,14 @@ import { persistGet, persistPut } from '@/lib/heic-persist';
 // worker would serialize every decode onto one core no matter how many the
 // cache admits at once. A pool of workers spreads decodes across cores instead.
 //
-// Sized off `hardwareConcurrency`, floored at 2 (still worth parallelizing on
-// a dual-core machine) and capped at 4: each worker can hold a full-size
-// decoded RGBA bitmap (tens of MB for a 12MP photo) while it works, so more
-// workers also means more peak memory, not just more CPU.
-const poolSize = Math.max(2, Math.min(4, (navigator.hardwareConcurrency ?? 4) - 1));
+// Capped at 2 (was 4): each worker holds a *full-size* decoded RGBA bitmap of
+// the source — ~48MB for a 12MP photo, ~190MB for a 48MP one — and
+// createImageBitmap transiently doubles that, so N concurrent decodes cost
+// N times that peak. Crucially, the renderer only decodes photos the server
+// *couldn't* thumbnail (the 415 path), i.e. the large ones, so every decode
+// reaching this pool is a big one; small images are served by the server
+// thumbnail and never hit here, so this cap doesn't cost their throughput.
+const poolSize = Math.max(1, Math.min(2, (navigator.hardwareConcurrency ?? 4) - 1));
 
 // Workers are spawned lazily by the pool itself, so a session that never
 // opens a HEIC never spawns one.
@@ -45,3 +48,16 @@ const cache = createHeicCache({
 export function getHeicPreviewUrl(req: HeicRequest): Promise<string> {
   return cache.get(req);
 }
+
+/**
+ * Releases a preview URL taken via `getHeicPreviewUrl`. Call exactly once per
+ * `getHeicPreviewUrl` (e.g. on unmount) so the cache can revoke the object URL
+ * once no component is displaying it.
+ */
+export function releaseHeicPreviewUrl(req: HeicRequest): void {
+  cache.release(req);
+}
+
+// `clearHeicCaches()` (logout teardown) lives in heic-cache.ts, which tracks
+// every cache it creates — so it clears this singleton's LRU without an import
+// cycle back to this module.

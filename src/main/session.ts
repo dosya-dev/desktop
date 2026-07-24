@@ -6,9 +6,11 @@ import { app, session } from "electron";
  * 2. Fix the session cookie's SameSite + expiry for cross-origin fetch.
  * 3. Set a Content Security Policy in production.
  *
- * CORS is handled by webSecurity:false on the BrowserWindow. The main
- * attack surface that opens (malicious page navigation) is locked down
- * by will-navigate, setWindowOpenHandler, and the CSP below.
+ * The window runs with webSecurity ENABLED: the renderer has a real origin
+ * (app://bundle packaged, http://localhost:5174 dev) that the API allows via
+ * CORS, so credentialed cross-origin fetch works without disabling security.
+ * Navigation is further locked down by will-navigate, setWindowOpenHandler,
+ * and the CSP below.
  */
 export function setupSession(apiBase: string): void {
   const ses = session.defaultSession;

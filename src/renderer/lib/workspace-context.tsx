@@ -4,6 +4,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   type ReactNode,
 } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -23,6 +24,10 @@ interface WorkspaceState {
 const WorkspaceContext = createContext<WorkspaceState | null>(null);
 
 const STORAGE_KEY = "dosya_active_workspace";
+
+// Stable reference while workspaces are loading, so the memoized context value
+// below doesn't churn (and re-render every consumer) on each render.
+const EMPTY_WORKSPACES: Workspace[] = [];
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const { isAuthenticated } = useAuth();
@@ -47,7 +52,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     retryDelay: 500,
   });
 
-  const workspaces = data?.workspaces ?? [];
+  const workspaces = data?.workspaces ?? EMPTY_WORKSPACES;
   const active =
     workspaces.find((w) => w.id === activeId) ?? workspaces[0] ?? null;
 
@@ -61,10 +66,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setActiveId(ws.id);
   }, []);
 
+  // Memoize so consumers only re-render when a real input changes — not on every
+  // provider render (e.g. the window-focus refetch would otherwise churn a fresh
+  // value object and re-render the whole tree). `setActive` is stable and
+  // react-query's `refetch` is referentially stable across renders.
+  const value = useMemo<WorkspaceState>(
+    () => ({ workspaces, active, setActive, isLoading, isError, refetch }),
+    [workspaces, active, setActive, isLoading, isError, refetch],
+  );
+
   return (
-    <WorkspaceContext.Provider
-      value={{ workspaces, active, setActive, isLoading, isError, refetch }}
-    >
+    <WorkspaceContext.Provider value={value}>
       {children}
     </WorkspaceContext.Provider>
   );

@@ -8,11 +8,15 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
+import { execFile } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
 
 const WORKFLOW_NAME = "Sync with Dosya.workflow";
-const WORKFLOW_VERSION = "1";
+// v2: added the required Contents/Info.plist (NSServices). v1 installs shipped
+// only document.wflow, so macOS never registered the Quick Action — bumping the
+// version forces those broken installs to be reinstalled with the plist.
+const WORKFLOW_VERSION = "2";
 
 export function installQuickAction(): void {
   if (process.platform !== "darwin") return;
@@ -37,11 +41,53 @@ export function installQuickAction(): void {
   try {
     mkdirSync(contentsDir, { recursive: true });
     writeFileSync(join(contentsDir, "document.wflow"), buildWorkflowPlist());
+    // Contents/Info.plist with an NSServices dict is REQUIRED for macOS (pbs) to
+    // register the workflow in the Services / Quick Actions menu. Without it the
+    // bundle is inert and never appears in Finder.
+    writeFileSync(join(contentsDir, "Info.plist"), buildInfoPlist());
     writeFileSync(versionFile, WORKFLOW_VERSION);
+    // Refresh the Services registry so the action appears without a re-login
+    // (best-effort — pbs may not exist / may fail silently on some setups).
+    execFile("/System/Library/CoreServices/pbs", ["-update"], () => {});
     console.log("[services] Installed Quick Action: Sync with Dosya");
   } catch (err) {
     console.error("[services] Failed to install Quick Action:", err);
   }
+}
+
+/** Info.plist declaring the workflow as a Finder Services / Quick Action item. */
+function buildInfoPlist(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Sync with Dosya</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.dosya.quickaction.syncwithdosya</string>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Sync with Dosya</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>runWorkflowAsService</string>
+			<key>NSRequiredContext</key>
+			<dict>
+				<key>NSApplicationIdentifier</key>
+				<string>com.apple.finder</string>
+			</dict>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>`;
 }
 
 export function uninstallQuickAction(): void {

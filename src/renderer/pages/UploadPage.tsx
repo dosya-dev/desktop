@@ -203,6 +203,10 @@ export function UploadPage() {
 
         xhr.onerror = () => reject(new Error("Network error"));
         xhr.ontimeout = () => reject(new Error("Upload timed out"));
+        // Aborting an XHR fires `abort` (not `error`), so settle the promise
+        // here — otherwise it hangs forever and the scheduler's in-flight
+        // counter never decrements for a cancelled/removed upload.
+        xhr.onabort = () => reject(new Error("Cancelled"));
         xhr.timeout = 600_000; // 10 minutes
 
         // Cancel support
@@ -228,35 +232,50 @@ export function UploadPage() {
 
   // ── Concurrent upload processor ──────────────────────────────────
 
-  const processingRef = useRef(false);
+  // Live count of uploads actually in flight, plus the ids already claimed by
+  // this scheduler. Both are refs so the scheduler reads them synchronously:
+  // `queueRef.current` only reflects the last render, so relying on its
+  // "uploading" count (or re-`find`ing the same "pending" item) before setQueue
+  // flushes could start one file twice or exceed MAX_CONCURRENT.
+  const inFlightCount = useRef(0);
+  const claimedIds = useRef(new Set<string>());
 
-  const processQueue = useCallback(async () => {
-    if (processingRef.current || pausedRef.current) return;
-    processingRef.current = true;
+  const processQueue = useCallback(() => {
+    if (pausedRef.current) return;
 
-    while (true) {
+    while (inFlightCount.current < MAX_CONCURRENT) {
       if (pausedRef.current) break;
 
-      const currentQueue = queueRef.current;
-      const uploading = currentQueue.filter((q) => q.status === "uploading").length;
-      if (uploading >= MAX_CONCURRENT) break;
-
-      const next = currentQueue.find((q) => q.status === "pending");
+      const next = queueRef.current.find(
+        (q) => q.status === "pending" && !claimedIds.current.has(q.id),
+      );
       if (!next) break;
 
-      // Don't await — let it run concurrently, then loop to start more
-      uploadFile(next).then(() => {
-        // After each file completes, try to start the next one
-        processingRef.current = false;
+      // Claim + count synchronously so a concurrent pass (e.g. the one kicked
+      // off from another upload's completion) can't grab the same item or blow
+      // past the concurrency cap before React re-renders.
+      claimedIds.current.add(next.id);
+      inFlightCount.current++;
+
+      uploadFile(next).finally(() => {
+        inFlightCount.current--;
+        claimedIds.current.delete(next.id);
+        // A slot freed up — try to start the next pending file. No shared
+        // "processing" guard is cleared here, so this can't race the loop above.
         processQueue();
       });
-
-      // Small yield to let state update
-      await new Promise((r) => setTimeout(r, 10));
     }
-
-    processingRef.current = false;
   }, [active, selectedFolder, selectedRegion]);
+
+  // Abort any in-flight uploads when leaving the page so their XHRs don't
+  // outlive the component (orphaned requests / setState-after-unmount).
+  useEffect(() => {
+    const controllers = abortControllers.current;
+    return () => {
+      for (const [, ctrl] of controllers) ctrl.abort();
+      controllers.clear();
+    };
+  }, []);
 
   // ── Drop handler ──────────────────────────────────────────────────
 

@@ -360,6 +360,17 @@ export async function reconcile(
         remoteFile.updated_at !== stored.remoteUpdatedAt ||
         remoteFile.size_bytes !== stored.remoteSizeBytes ||
         remoteFile.current_version !== stored.remoteVersion;
+
+      // Pre-populated from a remote snapshot (reinstall): localMtimeMs === 0 is
+      // a "match by size on next scan" sentinel. When the size matches, the
+      // local file is byte-identical to what we recorded, so adopt its real
+      // mtime into state and treat it as unchanged — otherwise every already-
+      // identical file gets a spurious upload-update. Mirrors the same handling
+      // in the engine's scanAndUpload.
+      if (stored.localMtimeMs === 0 && localStat.sizeBytes === stored.localSizeBytes) {
+        stored.localMtimeMs = localStat.mtimeMs;
+      }
+
       const localChanged =
         localStat.mtimeMs !== stored.localMtimeMs ||
         localStat.sizeBytes !== stored.localSizeBytes;
@@ -423,6 +434,32 @@ export async function reconcile(
 
     // Case 6: NOT remote, In stored, NOT local → both deleted, clean up state
     // (no action needed — will be cleaned below)
+  }
+
+  // ── Brand-new local files (no remote id, no stored record) ─────────
+  // The id-based loop above is keyed on remote ids ∪ stored records, so a
+  // genuinely new local file — one with neither a remote id nor a stored
+  // record — is never visited and the upload-new branch (Case 2) never fires
+  // for it. Walk localFiles directly to catch these and queue them for upload.
+  // Paths already covered by the loop (present in pathToRemoteFile or
+  // storedPathToId) are skipped, so nothing is double-processed.
+  let newLocalCount = 0;
+  for (const [relPath, localStat] of localFiles) {
+    // Yield to the event loop periodically, same as the main loop.
+    if (++newLocalCount % 500 === 0) {
+      await new Promise<void>(r => setImmediate(r));
+    }
+    if (pathToRemoteFile.has(relPath) || storedPathToId.has(relPath)) continue;
+    const parts = relPath.split("/");
+    const dirPath = parts.slice(0, -1).join("/");
+    const remoteFolderId = dirPath ? (pathToRemoteFolder.get(dirPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
+    actions.push({
+      type: "upload-new",
+      localPath: join(pair.localPath, relPath),
+      remoteFolderId,
+      stat: localStat,
+      fileName: parts[parts.length - 1],
+    });
   }
 
   // Clean up stale records: files that exist in stored state but are gone from both

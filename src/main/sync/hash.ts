@@ -11,6 +11,7 @@
 
 import { createHash } from "crypto";
 import { createReadStream } from "fs";
+import { longPath } from "./paths";
 
 /**
  * Compute MD5 hash of a file by streaming (no full file in memory).
@@ -19,7 +20,9 @@ import { createReadStream } from "fs";
 export function hashFile(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash("md5");
-    const stream = createReadStream(filePath);
+    // Windows: >260-char paths need the "\\?\" prefix (see paths.longPath),
+    // or createReadStream throws ENOENT and the file looks perpetually "changed".
+    const stream = createReadStream(longPath(filePath));
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("end", () => resolve(hash.digest("hex")));
     stream.on("error", reject);

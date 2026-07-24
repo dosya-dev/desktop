@@ -27,17 +27,22 @@ import {
   Loader2,
   ArrowDownCircle,
   XCircle,
+  Palette,
+  Check,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { formatDate } from "@/lib/format";
 import { validatePassword } from "@dosya-dev/shared";
 import { toast } from "sonner";
+import { THEMES, type Mode } from "@/lib/themes";
+import { readCache, writeCache, applyTheme, subscribeThemeChange, type ThemePref } from "@/lib/theme";
 
-type Tab = "identity" | "password" | "api-keys" | "sessions" | "notifications" | "billing" | "about" | "help" | "delete";
+type Tab = "identity" | "appearance" | "password" | "api-keys" | "sessions" | "notifications" | "billing" | "about" | "help" | "delete";
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode; danger?: boolean }[] = [
   { id: "identity", label: "Identity", icon: <User size={16} /> },
+  { id: "appearance", label: "Appearance", icon: <Palette size={16} /> },
   { id: "password", label: "Password & 2FA", icon: <Lock size={16} /> },
   { id: "api-keys", label: "API keys", icon: <Key size={16} /> },
   { id: "sessions", label: "Sessions", icon: <Monitor size={16} /> },
@@ -85,6 +90,7 @@ export function ProfilePage() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {tab === "identity" && <IdentitySection apiBase={apiBase} />}
+        {tab === "appearance" && <AppearanceSection />}
         {tab === "password" && <PasswordSection />}
         {tab === "api-keys" && <ApiKeysSection />}
         {tab === "sessions" && <SessionsSection />}
@@ -98,12 +104,115 @@ export function ProfilePage() {
   );
 }
 
+// ── Appearance Section ──────────────────────────────────────────────
+// Same 8 themes × light/dark/system offered on the web. Applies instantly and
+// saves to the account (PUT /api/me/appearance) so it follows the user across
+// devices, with an optimistic rollback if the save fails.
+
+function AppearanceSection() {
+  const [pref, setPref] = useState<ThemePref>(() => readCache());
+
+  // Stay in sync if another surface (e.g. account reconcile on refresh) applies a theme.
+  useEffect(() => subscribeThemeChange((next) => setPref(next)), []);
+
+  const save = async (next: ThemePref) => {
+    const prev = pref;
+    setPref(next);
+    applyTheme(next);
+    writeCache(next);
+    try {
+      await api.put("/api/me/appearance", next);
+    } catch (e) {
+      // Roll back the optimistic change on failure.
+      setPref(prev);
+      applyTheme(prev);
+      writeCache(prev);
+      toast.error(e instanceof ApiError ? e.message : "Your theme could not be saved");
+    }
+  };
+
+  const MODES: { value: Mode; label: string }[] = [
+    { value: "light", label: "Light" },
+    { value: "dark", label: "Dark" },
+    { value: "system", label: "System" },
+  ];
+
+  return (
+    <div className="max-w-lg space-y-6">
+      <h2 className="text-lg font-semibold">Appearance</h2>
+
+      {/* Mode */}
+      <div>
+        <p className="text-sm font-medium mb-1">Mode</p>
+        <p className="mb-3 text-xs text-[var(--color-text-secondary)]">Light, dark, or follow your system.</p>
+        <div
+          className="inline-flex gap-1 rounded-lg p-1"
+          style={{ background: "var(--color-bg-tertiary)" }}
+        >
+          {MODES.map((m) => (
+            <button
+              key={m.value}
+              onClick={() => save({ ...pref, mode: m.value })}
+              className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
+                pref.mode === m.value
+                  ? ""
+                  : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              }`}
+              style={
+                pref.mode === m.value
+                  ? { background: "var(--color-bg)", boxShadow: "0 1px 2px rgba(0,0,0,0.08)" }
+                  : undefined
+              }
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Theme */}
+      <div>
+        <p className="text-sm font-medium mb-1">Theme</p>
+        <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
+          Applies instantly and saves to your account, so it follows you across devices.
+        </p>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => save({ ...pref, theme: t.id })}
+              className="overflow-hidden rounded-lg border text-left transition-all"
+              style={{
+                borderColor: pref.theme === t.id ? "var(--color-primary)" : "var(--color-border)",
+                boxShadow: pref.theme === t.id ? "0 0 0 1px var(--color-primary)" : undefined,
+              }}
+            >
+              <div className="flex h-11 items-center gap-1.5 px-2.5" style={{ background: t.swatch.bg }}>
+                <span className="h-4 w-4 rounded" style={{ background: t.swatch.primary }} />
+                <span className="h-1.5 max-w-[42px] flex-1 rounded" style={{ background: t.swatch.accent }} />
+              </div>
+              <div className="flex items-center justify-between px-2.5 py-1.5 text-[11px] font-medium">
+                {t.label}
+                {pref.theme === t.id && <Check size={12} style={{ color: "var(--color-primary)" }} />}
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Identity Section ────────────────────────────────────────────────
 
 function IdentitySection({ apiBase }: { apiBase: string }) {
   const { user, refreshUser } = useAuth();
   const [name, setName] = useState(user?.name ?? "");
   const fileRef = useRef<HTMLInputElement>(null);
+  // Cache-buster for the avatar <img>: the avatar URL is a fixed endpoint, so
+  // without this a newly uploaded avatar keeps showing the browser-cached old
+  // image. Bumped whenever the avatar changes.
+  const [avatarVersion, setAvatarVersion] = useState(0);
 
   // Email change state
   const [showEmailModal, setShowEmailModal] = useState(false);
@@ -124,13 +233,13 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
       fd.append("avatar", file);
       return apiRequest("/api/me/avatar", { method: "POST", body: fd });
     },
-    onSuccess: () => { refreshUser(); toast.success("Avatar updated"); },
+    onSuccess: () => { setAvatarVersion((v) => v + 1); refreshUser(); toast.success("Avatar updated"); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
   });
 
   const deleteAvatarMut = useMutation({
     mutationFn: () => api.delete("/api/me/avatar"),
-    onSuccess: () => { refreshUser(); toast.success("Avatar removed"); },
+    onSuccess: () => { setAvatarVersion((v) => v + 1); refreshUser(); toast.success("Avatar removed"); },
   });
 
   // Phase 1: request email change → sends code to new email
@@ -171,7 +280,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
         <div className="relative group">
           {user?.avatar_url ? (
             <img
-              src={`${apiBase}/api/me/avatar`}
+              src={`${apiBase}/api/me/avatar${avatarVersion ? `?v=${avatarVersion}` : ""}`}
               alt={user.name}
               className="h-20 w-20 rounded-full object-cover"
             />
@@ -750,9 +859,17 @@ function NotificationsSection() {
   });
 
   const toggle = (key: string) => {
+    const prev = prefs;
     const updated = { ...prefs, [key]: !prefs[key] };
     setPrefs(updated);
-    saveMut.mutate(updated);
+    // Revert the optimistic switch if the save fails, so the UI never lies
+    // about a preference the server didn't actually record.
+    saveMut.mutate(updated, {
+      onError: (e) => {
+        setPrefs(prev);
+        toast.error(e instanceof ApiError ? e.message : "Couldn't save your preferences");
+      },
+    });
   };
 
   return (

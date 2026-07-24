@@ -1,7 +1,7 @@
 // Ported from apps/web/src/components/file-preview-image.tsx — keep in sync with the web copy.
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { fileThumbUrl, fileRawUrl, type ThumbSize } from "@/lib/file-url";
-import { getHeicPreviewUrl } from "@/lib/heic";
+import { getHeicPreviewUrl, releaseHeicPreviewUrl } from "@/lib/heic";
 import { isImage, isHeic } from "@/lib/file-type";
 
 interface FilePreviewImageProps {
@@ -51,6 +51,9 @@ function FilePreviewImageForFile({
   // `serverFailed` = the server couldn't make a thumbnail (e.g. 415 for a photo
   // too large to decode in a Worker) → decode it in the renderer instead.
   const [serverFailed, setServerFailed] = useState(false);
+  // `thumbFailed` = the server thumbnail didn't load for a non-HEIC image →
+  // fall back to the raw original for this file.
+  const [thumbFailed, setThumbFailed] = useState(false);
 
   if (!isImage(fileName) || failed) return <>{fallback}</>;
 
@@ -79,7 +82,21 @@ function FilePreviewImageForFile({
     );
   }
 
-  // Every other image format renders natively — point straight at the original.
+  // Every other image format: request a server-generated thumbnail sized to the
+  // caller's `size` — a 28px table row or a grid tile shouldn't download and
+  // decode the full-resolution original. Fall back to the raw original only if
+  // the thumbnail itself fails to load.
+  if (!thumbFailed) {
+    return (
+      <img
+        src={fileThumbUrl({ fileId, version, query, size })}
+        alt={alt}
+        className={className}
+        loading="lazy"
+        onError={() => setThumbFailed(true)}
+      />
+    );
+  }
   return (
     <img
       src={fileRawUrl({ fileId, version, query })}
@@ -145,8 +162,13 @@ function HeicPreview({
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
+    const req = { fileId, version, query, maxDim };
 
-    getHeicPreviewUrl({ fileId, version, query, maxDim })
+    // `getHeicPreviewUrl` takes a live refcount on the cache entry; the cleanup
+    // below releases it. This pairs exactly one acquire with one release per
+    // effect run (the early `return` above skips both), so the cache knows when
+    // no component is displaying this URL and can safely revoke it.
+    getHeicPreviewUrl(req)
       .then((decoded) => {
         if (!cancelled) setUrl(decoded);
       })
@@ -156,11 +178,14 @@ function HeicPreview({
 
     return () => {
       cancelled = true;
+      releaseHeicPreviewUrl(req);
     };
   }, [visible, fileId, version, query, maxDim]);
 
   // NB: the object URL is owned and revoked by the LRU cache in heic-cache.ts —
-  // do NOT revoke it here. Other mounted components may still be showing it.
+  // never revoke it here (other mounted components may still be showing it). We
+  // only release our refcount on unmount so the cache can revoke it once the
+  // last displaying component is gone.
   if (!url) {
     return <div ref={hostRef} className={`${className ?? ""} animate-pulse bg-[var(--color-bg-tertiary)]`} />;
   }

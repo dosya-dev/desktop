@@ -7,6 +7,8 @@ import { longPath } from "./paths";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
 import http from "http";
 import https from "https";
+import { HttpProxyAgent } from "http-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { URL } from "url";
 
 // ── Bandwidth throttling ────────────────────────────────────────────
@@ -114,6 +116,43 @@ async function resolveProxy(url: string): Promise<string | null> {
   }
 }
 
+// Cache proxy agents per (target-scheme, proxy-url) so keep-alive still works
+// through a corporate proxy instead of a fresh TCP+TLS handshake per request.
+const proxyAgentCache = new Map<string, http.Agent>();
+
+/**
+ * Build (or reuse) a proxy-aware agent for a target URL through `proxyUrl`.
+ * https-proxy-agent tunnels https targets via HTTP CONNECT; http-proxy-agent
+ * sends the absolute-URI form for http targets.
+ */
+function getProxyAgent(targetUrl: string | URL, proxyUrl: string): http.Agent {
+  const isHttps = (typeof targetUrl === "string" ? new URL(targetUrl).protocol : targetUrl.protocol) === "https:";
+  const key = `${isHttps ? "https" : "http"}|${proxyUrl}`;
+  let agent = proxyAgentCache.get(key);
+  if (!agent) {
+    agent = isHttps
+      ? new HttpsProxyAgent(proxyUrl, { keepAlive: true })
+      : new HttpProxyAgent(proxyUrl, { keepAlive: true });
+    proxyAgentCache.set(key, agent);
+  }
+  return agent;
+}
+
+/**
+ * Resolve the agent to use for a request. Returns the shared DIRECT keep-alive
+ * agent when the system says DIRECT (unchanged fast path); otherwise a proxy
+ * agent routed through the resolved system/corporate proxy. Electron's
+ * resolveProxy already applies PAC files and NO_PROXY/bypass rules, so a null
+ * proxy here means "go direct".
+ */
+async function resolveAgent(url: string | URL): Promise<http.Agent | https.Agent> {
+  const urlStr = typeof url === "string" ? url : url.toString();
+  const proxyUrl = await resolveProxy(urlStr);
+  if (!proxyUrl) return agentFor(url);
+  debugLog("[sync] Routing via proxy:", proxyUrl, "for", urlStr);
+  return getProxyAgent(url, proxyUrl);
+}
+
 const isDev = !app.isPackaged;
 function debugLog(...args: unknown[]): void {
   if (isDev) console.log(...args);
@@ -194,6 +233,11 @@ export class RemoteClient {
     if (bucket.unlimited) return src;
     const t = new ThrottleStream(bucket);
     src.on("error", (err) => t.destroy(err));
+    // If the source is destroyed prematurely (aborted upload, socket reset)
+    // without a normal "end", pipe() won't tear down the throttle — do it here
+    // so it doesn't linger. On a clean end (readableEnded) leave it alone so
+    // buffered bytes still flush to the destination.
+    src.on("close", () => { if (!src.readableEnded && !t.destroyed) t.destroy(); });
     return src.pipe(t);
   }
 
@@ -236,8 +280,20 @@ export class RemoteClient {
   private parseRetryAfter(headers: Record<string, string | string[] | undefined>): number {
     const value = headers["retry-after"];
     if (value == null) return 60_000;
-    const seconds = parseInt(String(value), 10);
-    if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
+    const raw = String(value).trim();
+    // Delta-seconds form (a plain integer), e.g. "Retry-After: 120".
+    if (/^\d+$/.test(raw)) {
+      const seconds = parseInt(raw, 10);
+      if (seconds > 0) return seconds * 1000;
+      return 60_000;
+    }
+    // HTTP-date form (RFC 7231), e.g. "Retry-After: Wed, 21 Oct 2025 07:28:00 GMT".
+    const whenMs = Date.parse(raw);
+    if (!isNaN(whenMs)) {
+      const delta = whenMs - Date.now();
+      if (delta > 0) return delta;
+      return 0; // date already passed — retry immediately
+    }
     return 60_000;
   }
 
@@ -314,12 +370,10 @@ export class RemoteClient {
     const isHttps = parsed.protocol === "https:";
     const lib = isHttps ? https : http;
 
-    // Resolve system proxy (supports corporate proxies, PAC files, etc.)
-    // Log proxy detection so users behind corporate proxies can debug connectivity.
-    const proxyUrl = await resolveProxy(fullUrl);
-    if (proxyUrl) {
-      debugLog("[sync] Using proxy:", proxyUrl, "for", fullUrl);
-    }
+    // Resolve system proxy (supports corporate proxies, PAC files, etc.) and
+    // build the actual agent for the request — on proxy-mandatory networks a
+    // direct agent silently fails, so the resolved proxy MUST be applied.
+    const agent = await resolveAgent(fullUrl);
 
     let bodyBuf: Buffer | undefined;
     if (opts.body != null) {
@@ -342,7 +396,7 @@ export class RemoteClient {
       const timeout = opts.timeout ?? 30_000;
       const req = lib.request(
         fullUrl,
-        { method: opts.method ?? "GET", headers, timeout, agent: agentFor(fullUrl) },
+        { method: opts.method ?? "GET", headers, timeout, agent },
         (res) => {
           debugLog("[sync] HTTP response:", res.statusCode, fullUrl);
 
@@ -360,31 +414,35 @@ export class RemoteClient {
             const rHeaders: Record<string, string> = {};
             if (isSameHost) rHeaders.Cookie = `dosya_session=${sessionCookie}`;
 
-            const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout, agent: agentFor(redirectUrl) }, (rRes) => {
-              const chunks: Buffer[] = [];
-              rRes.on("data", (chunk: Buffer) => chunks.push(chunk));
-              rRes.on("end", () => {
-                const body = Buffer.concat(chunks);
-                const resHeaders = rRes.headers as Record<string, string | string[] | undefined>;
-                resolve({
-                  status: rRes.statusCode ?? 200,
-                  headers: resHeaders,
-                  json: () => {
-                    try { return Promise.resolve(JSON.parse(body.toString("utf-8"))); }
-                    catch { return Promise.resolve({ error: "Invalid JSON response" }); }
-                  },
-                  buffer: () => Promise.resolve(body),
+            // Redirect target may be a different host (e.g. R2) — resolve its
+            // proxy independently rather than reusing the origin's agent.
+            resolveAgent(redirectUrl).then((rAgent) => {
+              const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout, agent: rAgent }, (rRes) => {
+                const chunks: Buffer[] = [];
+                rRes.on("data", (chunk: Buffer) => chunks.push(chunk));
+                rRes.on("end", () => {
+                  const body = Buffer.concat(chunks);
+                  const resHeaders = rRes.headers as Record<string, string | string[] | undefined>;
+                  resolve({
+                    status: rRes.statusCode ?? 200,
+                    headers: resHeaders,
+                    json: () => {
+                      try { return Promise.resolve(JSON.parse(body.toString("utf-8"))); }
+                      catch { return Promise.resolve({ error: "Invalid JSON response" }); }
+                    },
+                    buffer: () => Promise.resolve(body),
+                  });
                 });
+                rRes.on("error", reject);
               });
-              rRes.on("error", reject);
-            });
-            rReq.on("error", reject);
-            rReq.on("timeout", () => { rReq.destroy(); reject(new Error("Redirect timed out")); });
-            // Send body for 307/308 redirects (preserves method + body)
-            if ([307, 308].includes(res.statusCode!) && bodyBuf) {
-              rReq.write(bodyBuf);
-            }
-            rReq.end();
+              rReq.on("error", reject);
+              rReq.on("timeout", () => { rReq.destroy(); reject(new Error("Redirect timed out")); });
+              // Send body for 307/308 redirects (preserves method + body)
+              if ([307, 308].includes(res.statusCode!) && bodyBuf) {
+                rReq.write(bodyBuf);
+              }
+              rReq.end();
+            }).catch(reject);
             return;
           }
 
@@ -594,7 +652,10 @@ export class RemoteClient {
             headers["If-Range"] = validator.etag || validator.lastModified || "";
           }
 
-          const req = reqLib.get(url, { headers, timeout: 300_000, agent: agentFor(url) }, (res) => {
+          // Resolve a proxy agent per-URL (redirects can cross hosts); falls
+          // back to the shared DIRECT agent when no proxy is configured.
+          resolveAgent(url).then((agent) => {
+          const req = reqLib.get(url, { headers, timeout: 300_000, agent }, (res) => {
             const status = res.statusCode ?? 500;
             if (status === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
             if (status === 429) {
@@ -622,10 +683,36 @@ export class RemoteClient {
             }
             if (status >= 400) { res.resume(); reject(new Error(`Download failed: HTTP ${status}`)); return; }
 
-            // 206 = server honored our validated range → append. Anything else
-            // (200) = full body → overwrite from scratch (no stale prefix).
-            const isResume = status === 206;
-            const base = isResume ? resumeFrom : 0;
+            // 206 = server claims it honored our range. Anything else (200) =
+            // full body → overwrite from scratch (no stale prefix).
+            let isResume = status === 206;
+            let base = 0;
+            if (isResume) {
+              // Trust-but-verify: a 206 that doesn't actually start at resumeFrom
+              // (or reports a different total) would splice mismatched bytes onto
+              // our partial. Parse Content-Range and, on any disagreement, discard
+              // the partial and restart from 0 rather than appending blindly.
+              const contentRange = typeof res.headers["content-range"] === "string" ? res.headers["content-range"] : "";
+              const m = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+              const rangeStart = m ? parseInt(m[1], 10) : NaN;
+              const rangeTotal = m && m[3] !== "*" ? parseInt(m[3], 10) : NaN;
+              const startOk = rangeStart === resumeFrom;
+              const totalOk = expectedSize < 0 || Number.isNaN(rangeTotal) || rangeTotal === expectedSize;
+              if (!m || !startOk || !totalOk) {
+                res.resume();
+                fsUnlink(tmpPath).catch(() => {}).then(() => fsUnlink(metaPath).catch(() => {})).then(() => {
+                  reject(new Error(`Resume range mismatch (Content-Range: "${contentRange}", expected start ${resumeFrom}) — restarting download`));
+                });
+                return;
+              }
+              base = resumeFrom;
+            }
+
+            // Content-Length of THIS response body (range length for 206, full
+            // body for 200) — used to detect a truncated transfer even when the
+            // caller didn't know expectedSize.
+            const clHeader = res.headers["content-length"];
+            const contentLength = typeof clHeader === "string" ? parseInt(clHeader, 10) : NaN;
 
             // Persist a validator for a possible future resume of THIS content.
             const etag = typeof res.headers.etag === "string" ? res.headers.etag : undefined;
@@ -643,6 +730,14 @@ export class RemoteClient {
             ws.on("finish", async () => {
               try {
                 const total = base + bytes;
+                // Short/truncated-transfer guard: `bytes` is what this response
+                // delivered; it must equal the advertised Content-Length.
+                if (!Number.isNaN(contentLength) && bytes !== contentLength) {
+                  await fsUnlink(tmpPath).catch(() => {});
+                  await fsUnlink(metaPath).catch(() => {});
+                  reject(new Error(`Download truncated: Content-Length ${contentLength}, received ${bytes}`));
+                  return;
+                }
                 if (expectedSize >= 0 && total !== expectedSize) {
                   await fsUnlink(tmpPath).catch(() => {});
                   await fsUnlink(metaPath).catch(() => {});
@@ -660,6 +755,7 @@ export class RemoteClient {
 
           req.on("timeout", () => { req.destroy(); reject(new Error("Download timed out")); });
           req.on("error", reject);
+          }).catch(reject);
         };
 
         makeRequest(startUrl, 0);
@@ -786,6 +882,13 @@ export class RemoteClient {
         onProgress?.(transferred);
       }
 
+      // Integrity guard: parts were streamed from disk against a size/mtime
+      // captured before the upload began. If the file changed underneath us the
+      // parts no longer form a coherent object — fail BEFORE committing so the
+      // reconciler restarts cleanly with a fresh init rather than completing a
+      // torn upload.
+      await this.assertUnchanged(localPath, fileStat.size, fileStat.mtimeMs);
+
       // Complete the multipart upload (with retry — all parts are uploaded,
       // but the complete call itself can fail due to network issues)
       let completeErr: Error | null = null;
@@ -817,24 +920,65 @@ export class RemoteClient {
     }
 
     // ── Small files: single PUT stream (fast, no multipart overhead) ──
-    const sessionCookie = await this.getSessionCookie();
-    if (!sessionCookie) throw new Error("SESSION_EXPIRED");
+    // Per-attempt retry (matching the multipart part loop) with a FRESH read
+    // stream each attempt (streamUpload opens its own), so a transient network
+    // failure on the single PUT is retried instead of surfacing immediately.
+    let putData: any = null;
+    let putErr: Error | null = null;
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+      try {
+        const sessionCookie = await this.getSessionCookie();
+        if (!sessionCookie) throw new Error("SESSION_EXPIRED");
 
-    const putData = await this.streamUpload(
-      `/api/upload/${sessionId}`,
-      localPath,
-      fileStat.size,
-      sessionCookie,
-      onProgress,
-    );
+        const result = await this.streamUpload(
+          `/api/upload/${sessionId}`,
+          localPath,
+          fileStat.size,
+          sessionCookie,
+          onProgress,
+        );
 
-    if (!putData.ok) throw new Error(putData.error || "Upload failed");
+        if (!result.ok) throw new Error(result.error || "Upload failed");
+        putData = result;
+        putErr = null;
+        break;
+      } catch (err: any) {
+        putErr = err;
+        if (err instanceof RateLimitError) throw err;
+        if (NON_RETRYABLE.has(err.message)) throw err;
+        if (attempt < RETRY_DELAYS.length) {
+          await sleep(RETRY_DELAYS[attempt] * (0.5 + Math.random()));
+        }
+      }
+    }
+    if (putErr || !putData) throw putErr ?? new Error("Upload failed after retries");
+
+    // Integrity guard: if the file changed while we streamed it, the bytes the
+    // server received under the initial Content-Length may be torn. Fail so the
+    // reconciler re-uploads with a fresh init rather than trusting this version.
+    await this.assertUnchanged(localPath, fileStat.size, fileStat.mtimeMs);
+
     return {
       fileId: putData.file?.id ?? sessionId,
       name: fileName,
       version: putData.file?.current_version,
       updatedAt: putData.file?.updated_at,
     };
+  }
+
+  /**
+   * Re-stat the file and confirm size + mtime are unchanged since the upload
+   * captured them. A mismatch (or the file vanishing) throws, which unwinds the
+   * whole uploadFile so the reconciler retries from a fresh init.
+   */
+  private async assertUnchanged(localPath: string, startSize: number, startMtimeMs: number): Promise<void> {
+    const s = await stat(localPath).catch(() => null);
+    if (!s) throw new Error("File disappeared during upload — restarting");
+    if (s.size !== startSize || s.mtimeMs !== startMtimeMs) {
+      throw new Error(
+        `File changed during upload (size ${startSize}->${s.size}, mtime ${startMtimeMs}->${s.mtimeMs}) — restarting`,
+      );
+    }
   }
 
   /**
@@ -854,6 +998,8 @@ export class RemoteClient {
       const parsed = new URL(fullUrl);
       const lib = parsed.protocol === "https:" ? https : http;
 
+      // Route through the resolved system/corporate proxy when present.
+      resolveAgent(fullUrl).then((agent) => {
       const req = lib.request(fullUrl, {
         method: "PUT",
         headers: {
@@ -864,7 +1010,7 @@ export class RemoteClient {
           "X-Dosya-Client": "desktop",
         },
         timeout: 300_000,
-        agent: agentFor(fullUrl),
+        agent,
       }, (res) => {
         this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
 
@@ -890,8 +1036,17 @@ export class RemoteClient {
 
       // Stream the byte range directly from disk — no intermediate Buffer
       const stream = createReadStream(filePath, { start, end: start + length - 1 });
+      let read = 0;
+      stream.on("data", (c: string | Buffer) => { read += typeof c === "string" ? Buffer.byteLength(c) : c.length; });
       stream.on("error", (err) => { req.destroy(); reject(err); });
+      // Short-read guard: if the file shrank mid-upload the range yields fewer
+      // bytes than the advertised Content-Length, which would otherwise hang the
+      // request until timeout. Fail fast so the part is retried / upload restarts.
+      stream.on("end", () => {
+        if (read !== length) { req.destroy(); reject(new Error(`Short read on part: expected ${length}, read ${read}`)); }
+      });
       this.throttle(stream, this.uploadBucket).pipe(req);
+      }).catch(reject);
     });
   }
 
@@ -1008,6 +1163,8 @@ export class RemoteClient {
       const urlParsed = new URL(fullUrl);
       const lib = urlParsed.protocol === "https:" ? https : http;
 
+      // Route through the resolved system/corporate proxy when present.
+      resolveAgent(fullUrl).then((agent) => {
       const req = lib.request(fullUrl, {
         method: "PUT",
         headers: {
@@ -1018,7 +1175,7 @@ export class RemoteClient {
           "X-Dosya-Client": "desktop",
         },
         timeout: 300_000,
-        agent: agentFor(fullUrl),
+        agent,
       }, (res) => {
         // Update budget from upload response
         this.updateBudget(res.headers as Record<string, string | string[] | undefined>);
@@ -1068,7 +1225,18 @@ export class RemoteClient {
         reject(err);
       });
 
+      // Short-read guard: if the file shrank between the init stat and now, the
+      // body is shorter than the advertised Content-Length and the request would
+      // hang to timeout. Fail fast so the caller's retry/integrity path kicks in.
+      stream.on("end", () => {
+        if (transferred !== fileSize) {
+          req.destroy();
+          reject(new Error(`Short read: expected ${fileSize} bytes, read ${transferred}`));
+        }
+      });
+
       this.throttle(stream, this.uploadBucket).pipe(req);
+      }).catch(reject);
     });
   }
 
@@ -1249,6 +1417,9 @@ export class RemoteClient {
       const parsed = new URL(presignedUrl);
       const lib = parsed.protocol === "https:" ? https : http;
 
+      // Route through the resolved system/corporate proxy when present (R2 is a
+      // different host, so its proxy is resolved independently).
+      resolveAgent(presignedUrl).then((agent) => {
       const req = lib.request(presignedUrl, {
         method: "PUT",
         headers: {
@@ -1256,7 +1427,7 @@ export class RemoteClient {
           "Content-Length": String(fileSize),
         },
         timeout: 300_000,
-        agent: agentFor(presignedUrl),
+        agent,
       }, (res) => {
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
           res.resume();
@@ -1284,6 +1455,7 @@ export class RemoteClient {
       const stream = createReadStream(filePath);
       stream.on("error", (err) => { req.destroy(); reject(err); });
       this.throttle(stream, this.uploadBucket).pipe(req);
+      }).catch(reject);
     });
   }
 

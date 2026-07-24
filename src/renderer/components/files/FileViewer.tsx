@@ -2,7 +2,7 @@
 // The desktop viewer is read-only: the Edit button, Pintura image/video editor,
 // and CodeMirror text editor from the web version are intentionally absent.
 // Downloads go through the file:download IPC (save dialog) instead of an <a download>.
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   X, Download, ChevronLeft, ChevronRight, Clock,
 } from "lucide-react";
@@ -96,41 +96,56 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
   const hasNext = idx >= 0 && idx < files.length - 1;
   const counter = idx >= 0 ? `${idx + 1} / ${files.length}` : "";
 
-  // Load versions
-  const loadVersions = useCallback(async () => {
-    try {
-      const data = await api.get<{ ok: boolean; current_version: number; versions: Version[] }>(
-        `/api/files/${file.id}/versions`,
-      );
-      if (data.ok && data.versions?.length) {
-        setVersions(data.versions);
-        setActiveVersion(data.versions[0].version_number);
-      } else {
-        setVersions([]);
-        setActiveVersion(-1);
+  // Reset version state synchronously when the viewer is pointed at a different
+  // file (this component isn't remounted on navigation), so the new file never
+  // renders for a frame carrying the previous file's version param. This is the
+  // idiomatic "adjust state during render on a prop change" pattern.
+  const prevFileId = useRef(file.id);
+  if (prevFileId.current !== file.id) {
+    prevFileId.current = file.id;
+    setVersions([]);
+    setActiveVersion(-1);
+  }
+
+  // Load versions. A `cancelled` flag drops a stale response if the file
+  // changed mid-flight, so an out-of-order reply can't overwrite the current
+  // file's version list.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.get<{ ok: boolean; current_version: number; versions: Version[] }>(
+          `/api/files/${file.id}/versions`,
+        );
+        if (cancelled) return;
+        if (data.ok && data.versions?.length) {
+          setVersions(data.versions);
+          setActiveVersion(data.versions[0].version_number);
+        } else {
+          setVersions([]);
+          setActiveVersion(-1);
+        }
+      } catch {
+        if (!cancelled) setVersions([]);
       }
-    } catch {
-      setVersions([]);
-    }
+    })();
+    return () => { cancelled = true; };
   }, [file.id]);
 
-  useEffect(() => { loadVersions(); }, [loadVersions]);
-
-  // Build raw URL for active version
-  const rawUrl = useCallback(() => {
-    const params = new URLSearchParams();
-    if (activeVersion > 0 && versions.length > 0 && activeVersion !== versions[0].version_number) {
-      params.set("version", String(activeVersion));
-    }
-    params.set("_t", String(Date.now()));
-    return fileRawUrl({ fileId: file.id, query: params.toString() });
-  }, [file.id, activeVersion, versions]);
-
-  // The version actually being shown — mirrors the logic inside rawUrl() above.
+  // The version actually being shown — `undefined` means current/latest.
   const previewVersion =
     activeVersion > 0 && versions.length > 0 && activeVersion !== versions[0].version_number
       ? activeVersion
       : undefined;
+
+  // Build the raw URL for the active version. The viewer is read-only, so there
+  // is no cache-buster: a stable URL keeps video/audio/PDF from restarting and
+  // text from re-downloading on every unrelated re-render — it only changes
+  // when the file or the shown version changes.
+  const rawUrl = useMemo(
+    () => fileRawUrl({ fileId: file.id, version: previewVersion }),
+    [file.id, previewVersion],
+  );
 
   // Navigate version
   const navigateVersion = useCallback((dir: number) => {
@@ -211,7 +226,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
       <div className="flex min-h-0 flex-1">
         {/* File content */}
         <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[var(--color-bg-secondary)] p-6">
-          <FileContent file={file} rawUrl={rawUrl()} version={previewVersion} onDownload={onDownload} />
+          <FileContent file={file} rawUrl={rawUrl} version={previewVersion} onDownload={onDownload} />
         </div>
 
         {/* Version sidebar */}

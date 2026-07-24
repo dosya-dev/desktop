@@ -979,6 +979,10 @@ function SyncSettings() {
       setUploadKbps(Math.round((c.maxUploadBytesPerSec ?? 0) / 1024));
       setDownloadKbps(Math.round((c.maxDownloadBytesPerSec ?? 0) / 1024));
       setPauseOnBattery(!!c.pauseOnBattery);
+    }).catch(() => {
+      // Leave the form on its current values rather than letting a rejected
+      // read surface as an unhandled rejection (or silently write defaults on
+      // the next save).
     });
     window.electronAPI.getLaunchAtLogin?.().then(setLaunchAtLogin).catch(() => {});
   }, []);
@@ -1113,6 +1117,21 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
   });
   const folders = foldersData ?? [];
 
+  // Precompute parent_id → children ONCE (O(n)) so each tree node is O(1) to
+  // render, instead of re-filtering the whole list at every node (O(n²)).
+  // Falsy parent_id (null / "" / undefined) is treated as a root, matching the
+  // `!f.parent_id` root check used below.
+  const folderChildren = useMemo(() => {
+    const map = new Map<string | null, any[]>();
+    for (const f of (foldersData ?? []) as any[]) {
+      const key: string | null = f.parent_id ? f.parent_id : null;
+      const arr = map.get(key);
+      if (arr) arr.push(f);
+      else map.set(key, [f]);
+    }
+    return map;
+  }, [foldersData]);
+
   const pickFolder = async () => {
     const path = await window.electronAPI.pickLocalFolder();
     if (path) setLocalPath(path);
@@ -1246,18 +1265,16 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     <svg viewBox="0 0 14 14" fill="none" width="14" height="14"><path d="M2 7.5V12a1 1 0 001 1h3V10h2v3h3a1 1 0 001-1V7.5M1 7l6-5 6 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
                     Root (entire workspace)
                   </button>
-                  {folders
-                    .filter((f: any) => !f.parent_id)
-                    .map((f: any) => (
-                      <SyncFolderTreeItem
-                        key={f.id}
-                        folder={f}
-                        allFolders={folders}
-                        selectedId={remoteFolderId}
-                        onSelect={(id, name) => { setRemoteFolderId(id); setRemoteFolderName(name); }}
-                        depth={0}
-                      />
-                    ))}
+                  {(folderChildren.get(null) ?? []).map((f: any) => (
+                    <SyncFolderTreeItem
+                      key={f.id}
+                      folder={f}
+                      childrenMap={folderChildren}
+                      selectedId={remoteFolderId}
+                      onSelect={(id, name) => { setRemoteFolderId(id); setRemoteFolderName(name); }}
+                      depth={0}
+                    />
+                  ))}
                   {folders.length === 0 && (
                     <p className="py-3 text-center text-xs text-[var(--color-text-muted)]">No folders yet — a new one will be created</p>
                   )}
@@ -1497,19 +1514,19 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
 
 function SyncFolderTreeItem({
   folder,
-  allFolders,
+  childrenMap,
   selectedId,
   onSelect,
   depth,
 }: {
   folder: any;
-  allFolders: any[];
+  childrenMap: Map<string | null, any[]>;
   selectedId: string | null;
   onSelect: (id: string, name: string) => void;
   depth: number;
 }) {
   const [expanded, setExpanded] = useState(depth < 1);
-  const children = allFolders.filter((f: any) => f.parent_id === folder.id);
+  const children = childrenMap.get(folder.id) ?? [];
   const hasChildren = children.length > 0;
   const isSelected = selectedId === folder.id;
 
@@ -1557,7 +1574,7 @@ function SyncFolderTreeItem({
         <SyncFolderTreeItem
           key={child.id}
           folder={child}
-          allFolders={allFolders}
+          childrenMap={childrenMap}
           selectedId={selectedId}
           onSelect={onSelect}
           depth={depth + 1}

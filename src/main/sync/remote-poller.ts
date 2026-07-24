@@ -13,6 +13,8 @@ const MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
 /** Pause briefly every N API requests to avoid exhausting rate budget in a single poll cycle. */
 const PACE_REQUEST_INTERVAL = 40;
 const PACE_DELAY_MS = 3000;
+/** Seconds of overlap subtracted from the delta `since` boundary (avoids missing same-second edits). */
+const DELTA_OVERLAP_SEC = 2;
 
 /** Adaptive poll intervals — slow down when idle, speed up when active. */
 const IDLE_THRESHOLDS = [
@@ -23,6 +25,8 @@ const IDLE_THRESHOLDS = [
 export class RemotePoller extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  /** Set when a poll is requested while one is already running; re-runs once after. */
+  private pollRequested = false;
   private consecutiveErrors = 0;
   private lastSnapshotHash = "";
   private backedOff = false;
@@ -101,8 +105,12 @@ export class RemotePoller extends EventEmitter {
   }
 
   private async poll(): Promise<void> {
-    if (this.polling) return;
+    // A poll requested while one is in flight isn't dropped — record it and
+    // re-run once in finally, so a watcher/user trigger during a long poll
+    // still observes the newest remote state.
+    if (this.polling) { this.pollRequested = true; return; }
     this.polling = true;
+    this.pollRequested = false;
     this.pollRequestCount = 0;
 
     try {
@@ -178,6 +186,11 @@ export class RemotePoller extends EventEmitter {
       }
     } finally {
       this.polling = false;
+      // Honor a single poll that was requested while this one was running.
+      if (this.pollRequested) {
+        this.pollRequested = false;
+        void this.poll();
+      }
     }
   }
 
@@ -230,7 +243,11 @@ export class RemotePoller extends EventEmitter {
     const now = Date.now();
     const forceFull = now - this.lastFullSnapshotAt >= RemotePoller.FULL_SNAPSHOT_INTERVAL_MS;
     const useDelta = this.cachedSnapshot && this.lastPollTimestamp > 0 && !forceFull;
-    const since = useDelta ? this.lastPollTimestamp : undefined;
+    // The `since` boundary is second-granularity; a change made in the same
+    // second as the previous poll's timestamp could be skipped. Overlap by a
+    // couple of seconds (the periodic full snapshot would otherwise be the only
+    // thing to catch it). Re-seeing a few already-known files is idempotent.
+    const since = useDelta ? Math.max(0, this.lastPollTimestamp - DELTA_OVERLAP_SEC) : undefined;
     const beforePoll = Math.floor(Date.now() / 1000);
 
     const fast = await this.client.fetchSnapshotFast(
@@ -249,12 +266,14 @@ export class RemotePoller extends EventEmitter {
         for (const id of fast.deleted) {
           this.cachedSnapshot.files.delete(id);
         }
-        // Folders only come in full snapshots (first page, no cursor)
-        if (fast.folders.length > 0) {
-          this.cachedSnapshot.folders.clear();
-          for (const d of fast.folders) {
-            this.cachedSnapshot.folders.set(d.id, d);
-          }
+        // A delta response's `data.folders` is NOT the authoritative full set
+        // (fetchSnapshotFast returns first-page folders even for delta polls),
+        // so clearing + rebuilding here would let one changed folder wipe the
+        // map and cascade into mass local folder deletion. Merge ADDITIVELY;
+        // folder deletions converge on the next periodic FULL snapshot, which
+        // rebuilds the map from scratch below.
+        for (const d of fast.folders) {
+          this.cachedSnapshot.folders.set(d.id, d);
         }
         this.lastPollTimestamp = beforePoll;
         return this.cachedSnapshot;

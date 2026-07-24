@@ -9,7 +9,24 @@ import {
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "./api-client";
 import { queryClient } from "./query-client";
+import { clearHeicCaches } from "./heic-cache";
+import { applyTheme, writeCache, readCache, initSystemListener } from "./theme";
+import { isThemeId, isMode, DEFAULT_THEME, DEFAULT_MODE } from "./themes";
 import type { User } from "@dosya-dev/shared";
+
+// The API returns the account's saved appearance on /api/me, but it isn't part
+// of the shared User type. Read it loosely and reconcile it onto <html> so the
+// desktop app follows the same theme the user picked on any device.
+function reconcileAppearance(user: unknown): void {
+  const u = user as { ui_theme?: unknown; ui_mode?: unknown } | null;
+  if (!u) return;
+  const pref = {
+    theme: isThemeId(u.ui_theme) ? u.ui_theme : DEFAULT_THEME,
+    mode: isMode(u.ui_mode) ? u.ui_mode : DEFAULT_MODE,
+  };
+  applyTheme(pref);
+  writeCache(pref);
+}
 
 interface AuthState {
   user: User | null;
@@ -38,17 +55,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const data = await api.get<{ user: User }>("/api/me");
       setUser(data.user);
+      reconcileAppearance(data.user);
     } catch (err) {
+      // Only a confirmed 401 means "logged out". A transient error (network
+      // blip, 5xx) must NOT force a logout — keep the current user as-is.
       if (err instanceof ApiError && err.status === 401) {
         setUser(null);
       }
     }
   }, []);
 
-  // Check session on mount
+  // Check session on mount. Retry transient failures a few times before
+  // concluding — otherwise a single network blip / 5xx at startup strands a
+  // logged-in user on the onboarding screen with no way to recover but reload.
   useEffect(() => {
-    refreshUser().finally(() => setIsLoading(false));
-  }, [refreshUser]);
+    let cancelled = false;
+    (async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const data = await api.get<{ user: User }>("/api/me");
+          if (cancelled) return;
+          setUser(data.user);
+          reconcileAppearance(data.user);
+          break;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 401) {
+            if (!cancelled) setUser(null);
+            break; // definitively unauthenticated — no point retrying
+          }
+          // Transient: back off and retry (1s, 2s) before giving up.
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        }
+      }
+      if (!cancelled) setIsLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Re-apply the theme when the OS light/dark preference changes while the
+  // user is on "system" mode.
+  useEffect(() => initSystemListener(readCache), []);
 
   const login = useCallback(
     async (email: string, password: string): Promise<LoginResult> => {
@@ -108,6 +154,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await window.electronAPI.clearSession();
     setUser(null);
     queryClient.clear();
+    // Clear decoded HEIC previews (in-memory object URLs + the persistent
+    // Cache API store) so the previous account's image data doesn't linger on
+    // a shared machine.
+    clearHeicCaches();
     navigate("/onboarding");
   }, [navigate]);
 

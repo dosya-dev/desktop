@@ -36,6 +36,8 @@
     "chokidar": "^4.0.3",
     "electron-updater": "^6.3.9",
     "graceful-fs": "^4.2.11",
+    "http-proxy-agent": "^7.0.2",
+    "https-proxy-agent": "^7.0.6",
     "libheif-js": "^1.19.8",
     "lucide-react": "^0.475.0",
     "qrcode": "^1.5.4",

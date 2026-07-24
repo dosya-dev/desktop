@@ -349,22 +349,6 @@ if (!gotTheLock) {
       }
     });
 
-    // Pause/resume sync on system sleep/wake
-    // Track whether the user had manually paused before sleep
-    let wasPausedBeforeSleep = false;
-    powerMonitor.on("suspend", () => {
-      wasPausedBeforeSleep = syncEngine?.getStatus().globalPaused ?? false;
-      if (!wasPausedBeforeSleep) {
-        syncEngine?.pauseAll().catch(() => {});
-      }
-    });
-    powerMonitor.on("resume", () => {
-      // Only resume if the user hadn't manually paused before sleep
-      if (syncEngine && !wasPausedBeforeSleep) {
-        syncEngine.resumeAll().catch(() => {});
-      }
-    });
-
     // Battery-aware pausing: when "pause on battery" is enabled, pause on
     // unplug and resume on plug-in — but only auto-resume what WE auto-paused,
     // so a manual pause is never clobbered.
@@ -383,7 +367,31 @@ if (!gotTheLock) {
     };
     powerMonitor.on("on-battery", () => applyBatteryState(true));
     powerMonitor.on("on-ac", () => applyBatteryState(false));
-    // Handle the initial state too (events only fire on transitions).
+
+    // Pause/resume sync on system sleep/wake.
+    // Track whether the user had manually paused before sleep.
+    let wasPausedBeforeSleep = false;
+    powerMonitor.on("suspend", () => {
+      wasPausedBeforeSleep = syncEngine?.getStatus().globalPaused ?? false;
+      if (!wasPausedBeforeSleep) {
+        syncEngine?.pauseAll().catch(() => {});
+      }
+    });
+    powerMonitor.on("resume", async () => {
+      // Only auto-resume if the user hadn't manually paused before sleep.
+      if (syncEngine && !wasPausedBeforeSleep) {
+        await syncEngine.resumeAll().catch(() => {});
+      }
+      // The power source may have changed during sleep (e.g. unplugged), and
+      // on-battery/on-ac only fire on live transitions — so reconcile battery
+      // state explicitly on wake. This pauses if we woke on battery with
+      // "pause on battery" enabled, and resumes if we were battery-paused and
+      // woke on AC. Without this, waking on battery leaves sync running against
+      // the user's preference.
+      applyBatteryState(powerMonitor.isOnBatteryPower()).catch(() => {});
+    });
+
+    // Handle the initial battery state too (events only fire on transitions).
     setTimeout(() => {
       try { applyBatteryState(powerMonitor.isOnBatteryPower()); } catch {}
     }, 4000);

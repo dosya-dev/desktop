@@ -211,12 +211,18 @@ export function FileBrowserPage() {
   const [hideTarget, setHideTarget] = useState<{ id: string; name: string; type: "file" | "folder" } | null>(null);
   const [infoTarget, setInfoTarget] = useState<InfoTarget | null>(null);
   const [versionUploadTarget, setVersionUploadTarget] = useState<string | null>(null);
+  // Holds the id for the hidden input's change handler after we clear the state
+  // (see the trigger effect below), so re-selecting the SAME file after
+  // cancelling the OS picker still re-fires the picker.
+  const versionUploadTargetRef = useRef<string | null>(null);
 
   // Favourites
   const [favourites, setFavourites] = useState<Set<string>>(new Set());
 
-  // Unlock gate — unlocked file IDs (fileId → unlock_token) and the pending prompt
-  const [unlockedFiles] = useState(() => new Map<string, string>());
+  // Unlock gate — unlocked file IDs (fileId → unlock_token) and the pending prompt.
+  // Updated immutably so memo/callback dependents (selectableFiles,
+  // openFileWithLockCheck) recompute after a file is unlocked.
+  const [unlockedFiles, setUnlockedFiles] = useState(() => new Map<string, string>());
   const [unlockPrompt, setUnlockPrompt] = useState<{ file: FileRow; action: "detail" | "view" } | null>(null);
   const [unlockPassword, setUnlockPassword] = useState("");
   const [unlockError, setUnlockError] = useState("");
@@ -350,7 +356,7 @@ export function FileBrowserPage() {
         { password: unlockPassword },
       );
       if (res.ok && res.unlock_token) {
-        unlockedFiles.set(unlockPrompt.file.id, res.unlock_token);
+        setUnlockedFiles((prev) => new Map(prev).set(unlockPrompt.file.id, res.unlock_token!));
         const { file, action } = unlockPrompt;
         setUnlockPrompt(null);
         if (action === "detail") setPanel({ file, tab: "info" });
@@ -502,8 +508,9 @@ export function FileBrowserPage() {
   // ── Upload plumbing (drag-and-drop + new version) ──────────
 
   const uploadFiles = useCallback(async (dropped: FileList | File[]) => {
-    if (!active?.id) return 0;
+    if (!active?.id) return { uploaded: 0, failed: 0 };
     let uploaded = 0;
+    let failed = 0;
     for (const file of Array.from(dropped)) {
       try {
         const initRes = await api.post<{ ok: boolean; session_id?: string; error?: string }>("/api/upload/init", {
@@ -513,17 +520,19 @@ export function FileBrowserPage() {
           mime_type: file.type || "application/octet-stream",
           folder_id: folderId || null,
         });
-        if (!initRes.ok || !initRes.session_id) continue;
-        await fetch(`${apiBase()}/api/upload/${initRes.session_id}`, {
+        if (!initRes.ok || !initRes.session_id) { failed++; continue; }
+        const res = await fetch(`${apiBase()}/api/upload/${initRes.session_id}`, {
           method: "PUT",
           headers: { "Content-Type": file.type || "application/octet-stream" },
           body: file,
           credentials: "include",
         });
-        uploaded++;
-      } catch {}
+        // A non-2xx PUT is a failed upload, not a success — count it as such.
+        if (res.ok) uploaded++;
+        else failed++;
+      } catch { failed++; }
     }
-    return uploaded;
+    return { uploaded, failed };
   }, [active?.id, folderId]);
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); if (!showDeleted) setDragging(true); };
@@ -531,10 +540,13 @@ export function FileBrowserPage() {
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault(); e.stopPropagation(); setDragging(false);
     if (showDeleted || !e.dataTransfer.files.length) return;
-    const uploaded = await uploadFiles(e.dataTransfer.files);
+    const { uploaded, failed } = await uploadFiles(e.dataTransfer.files);
     if (uploaded > 0) {
       toast.success("Uploaded", { description: `${uploaded} file${uploaded > 1 ? "s" : ""} uploaded` });
       refresh();
+    }
+    if (failed > 0) {
+      toast.error("Some uploads failed", { description: `${failed} file${failed > 1 ? "s" : ""} could not be uploaded` });
     }
   };
 
@@ -565,10 +577,15 @@ export function FileBrowserPage() {
     }
   };
 
-  // Trigger hidden file input when version upload target is set
+  // Trigger the hidden file input when a version-upload target is set, then
+  // clear the state right away (stashing the id in a ref for the change
+  // handler). Clearing to null means selecting the same file again is a real
+  // state transition, so the picker re-opens even after a cancelled picker.
   useEffect(() => {
     if (versionUploadTarget) {
+      versionUploadTargetRef.current = versionUploadTarget;
       document.getElementById("version-upload-input")?.click();
+      setVersionUploadTarget(null);
     }
   }, [versionUploadTarget]);
 
@@ -1520,10 +1537,11 @@ export function FileBrowserPage() {
         className="hidden"
         onChange={(e) => {
           const file = e.target.files?.[0];
-          if (file && versionUploadTarget) {
-            handleVersionUpload(versionUploadTarget, file);
-            setVersionUploadTarget(null);
+          const targetId = versionUploadTargetRef.current;
+          if (file && targetId) {
+            handleVersionUpload(targetId, file);
           }
+          versionUploadTargetRef.current = null;
           e.target.value = "";
         }}
       />

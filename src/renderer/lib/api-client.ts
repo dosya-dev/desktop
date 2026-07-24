@@ -96,7 +96,18 @@ export async function apiRequest<T>(
     return undefined as T;
   }
 
-  return res.json();
+  // A JSON content-type with an empty/truncated body makes res.json() throw a
+  // raw SyntaxError that callers branching on `instanceof ApiError` won't
+  // recognize. Normalize it: an empty body → undefined, malformed → ApiError.
+  // Clone BEFORE reading so we can still inspect the body if json() fails.
+  const bodyClone = res.clone();
+  try {
+    return await res.json();
+  } catch {
+    const text = await bodyClone.text().catch(() => "");
+    if (!text.trim()) return undefined as T;
+    throw new ApiError("Malformed response from server", res.status);
+  }
 }
 
 // Convenience methods

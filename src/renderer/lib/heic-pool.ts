@@ -100,7 +100,18 @@ export function createHeicPool(opts: { spawn: () => PoolWorker; size: number }):
       let entry = workers.find((w) => w.current === null);
       if (!entry) {
         if (workers.length >= size) break; // at capacity; job stays queued
-        entry = { worker: spawn(), current: null };
+        let worker: PoolWorker;
+        try {
+          worker = spawn();
+        } catch (err) {
+          // Worker construction failed. Reject the head job rather than leaving
+          // it stranded in the queue — a stranded job would poison every future
+          // pump() (re-throwing here) and never settle its caller's promise.
+          const job = queue.shift()!;
+          job.reject(err instanceof Error ? err : new Error('HEIC worker spawn failed'));
+          continue;
+        }
+        entry = { worker, current: null };
         bind(entry);
         workers.push(entry);
       }

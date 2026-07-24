@@ -195,6 +195,9 @@ export class SyncEngine extends EventEmitter {
   /** Per-pair save lock to prevent concurrent writes to the same state file. */
   private saveLocks = new Set<string>();
 
+  /** Pairs whose state changed while a save was in flight — re-saved on completion. */
+  private saveDirty = new Set<string>();
+
   /**
    * Serializes config-mutating operations (add/remove/update pair).
    * Each of those does load → check → save, and `this.config` is shared
@@ -236,14 +239,26 @@ export class SyncEngine extends EventEmitter {
 
   private async safeSaveState(state: SyncPairState): Promise<void> {
     const key = state.pairId;
-    // If a save is already in progress for this pair, skip (the in-progress
-    // save has the latest state since state is a shared reference).
-    if (this.saveLocks.has(key)) return;
+    // If a save is already in progress for this pair, don't drop this request:
+    // the in-flight save snapshotted state at postMessage time (structured
+    // clone in the writer worker) and won't include mutations made since. Mark
+    // the pair dirty so the in-flight save re-runs once more when it finishes.
+    if (this.saveLocks.has(key)) {
+      this.saveDirty.add(key);
+      return;
+    }
     this.saveLocks.add(key);
     try {
-      await savePairState(state);
-    } catch {
-      // Swallow — state save should never break sync operations
+      // Loop so a mutation that lands mid-save is flushed once more. Any number
+      // of skipped saves during a single write coalesce into one follow-up.
+      do {
+        this.saveDirty.delete(key);
+        try {
+          await savePairState(state);
+        } catch {
+          // Swallow — state save should never break sync operations
+        }
+      } while (this.saveDirty.has(key));
     } finally {
       this.saveLocks.delete(key);
     }
@@ -1082,7 +1097,27 @@ export class SyncEngine extends EventEmitter {
         if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
         if (action.type !== "upload-new" && action.type !== "upload-update") continue;
         const relPath = toRelPath(rt.pair.localPath, action.localPath);
-        await this.uploadLocalFile(rt, action.localPath, relPath);
+        try {
+          await this.uploadLocalFile(rt, action.localPath, relPath);
+        } catch (upErr: any) {
+          // A single transient upload failure must NOT abort the batch — the
+          // deletes queued in otherActions (below) would be dropped, and a
+          // dropped remote deletion is permanent data loss. Session/rate-limit
+          // errors are fatal for the whole cycle, so re-throw those; everything
+          // else is recorded per-file (same shape scanAndUpload uses) and we
+          // continue with the next action.
+          if (upErr.message === "SESSION_EXPIRED") throw upErr;
+          if (isRateLimitError(upErr)) throw upErr;
+          console.error(`[sync] upload failed for ${relPath}:`, upErr.message);
+          const existing = rt.state.fileErrors[relPath];
+          rt.state.fileErrors[relPath] = {
+            filePath: relPath,
+            error: upErr.message,
+            retryCount: (existing?.retryCount ?? 0) + 1,
+            lastAttemptAt: Date.now(),
+            permanent: upErr.message.includes("permission") || upErr.message.includes("EPERM") || upErr.message.includes("quota"),
+          };
+        }
         rt.completedFilesInBatch++;
         rt.completedBytesInBatch += action.type === "upload-new" ? action.stat.sizeBytes : action.stat.sizeBytes;
         if (++opCount % STATE_SAVE_INTERVAL === 0) await this.safeSaveState(rt.state);
@@ -1915,7 +1950,26 @@ export class SyncEngine extends EventEmitter {
           // re-trigger once they settle) — avoids backing up partial content.
           if (!(await this.isFileStable(event.path))) continue;
 
-          await this.uploadLocalFile(rt, event.path, relPath);
+          try {
+            await this.uploadLocalFile(rt, event.path, relPath);
+          } catch (upErr: any) {
+            // Don't let one file's transient upload failure abandon the rest of
+            // the batch — later unlink/delete events in this same event list
+            // would be silently dropped. Session/rate-limit errors are fatal
+            // for the cycle (re-throw so the outer handler pauses the pair);
+            // everything else is recorded per-file and we move on.
+            if (upErr.message === "SESSION_EXPIRED") throw upErr;
+            if (isRateLimitError(upErr)) throw upErr;
+            console.error(`[sync] upload failed for ${relPath}:`, upErr.message);
+            const existing = rt.state.fileErrors[relPath];
+            rt.state.fileErrors[relPath] = {
+              filePath: relPath,
+              error: upErr.message,
+              retryCount: (existing?.retryCount ?? 0) + 1,
+              lastAttemptAt: Date.now(),
+              permanent: upErr.message.includes("permission") || upErr.message.includes("EPERM") || upErr.message.includes("quota"),
+            };
+          }
         } else if (event.type === "unlink" && (mode === "two-way" || mode === "push")) {
           // Delete from cloud only in full sync or push mode (not push-safe/backup)
           const found = this.lookupByPath(rt, relPath);
@@ -2031,21 +2085,27 @@ export class SyncEngine extends EventEmitter {
     try {
       // Build path map from remote files
       const folderPaths = new Map<string, string>();
+      // Cycle/depth guard: a corrupt or cyclic parent_id chain would otherwise
+      // recurse until the stack overflows (matches reconciler.buildRemotePaths).
+      const buildingFolder = new Set<string>();
+      const MAX_REMOTE_FOLDER_DEPTH = 100;
       for (const [id] of snapshot.folders) {
-        const buildPath = (fid: string): string => {
+        const buildPath = (fid: string, depth: number): string => {
           if (folderPaths.has(fid)) return folderPaths.get(fid)!;
+          if (buildingFolder.has(fid) || depth > MAX_REMOTE_FOLDER_DEPTH) return ""; // cycle or runaway depth
+          buildingFolder.add(fid);
           const f = snapshot.folders.get(fid);
           if (!f) return "";
           if (!f.parent_id || f.parent_id === rt.pair.remoteFolderId) {
             folderPaths.set(fid, f.name);
             return f.name;
           }
-          const parentPath = buildPath(f.parent_id);
+          const parentPath = buildPath(f.parent_id, depth + 1);
           const p = parentPath ? `${parentPath}/${f.name}` : f.name;
           folderPaths.set(fid, p);
           return p;
         };
-        buildPath(id);
+        buildPath(id, 0);
       }
 
       // Guard disk space up-front — pull can otherwise fill the volume.
@@ -2447,7 +2507,14 @@ export class SyncEngine extends EventEmitter {
   }
 
   async saveGlobalConfig(updates: Partial<SyncConfig>): Promise<void> {
-    if (!this.config) this.config = await loadConfig();
+    return this.withConfigLock(() => this.saveGlobalConfigLocked(updates));
+  }
+
+  private async saveGlobalConfigLocked(updates: Partial<SyncConfig>): Promise<void> {
+    // Reload fresh inside the lock — like addPair/updatePair/removePair — so a
+    // racing pair mutation (each does this.config = await loadConfig()) can't
+    // silently revert the global setting we're about to change.
+    this.config = await loadConfig();
     // Update concurrency limit if changed
     if (typeof updates.maxConcurrentTransfers === "number" && updates.maxConcurrentTransfers > 0) {
       this.transferSemaphore.updateMax(updates.maxConcurrentTransfers);
@@ -2713,7 +2780,13 @@ export class SyncEngine extends EventEmitter {
         // Trigger immediate poll instead of waiting up to 30s
         if (rt.poller) rt.poller.triggerNow();
       } else if (resolution === "keep-both") {
-        const ext = conflict.localPath.includes(".") ? conflict.localPath.substring(conflict.localPath.lastIndexOf(".")) : "";
+        // Derive the extension from the file NAME only. Scanning the whole
+        // absolute path would pick up a dot from a parent directory (e.g.
+        // "/a/my.dir/README" → ".dir/README"), mangling an extensionless file.
+        // dotIdx > 0 also guards dotfiles (".env") and no-extension names.
+        const fileName = basename(conflict.localPath);
+        const dotIdx = fileName.lastIndexOf(".");
+        const ext = dotIdx > 0 ? fileName.substring(dotIdx) : "";
         const base = conflict.localPath.substring(0, conflict.localPath.length - ext.length);
         const dateStr = new Date().toISOString().slice(0, 10);
         const conflictPath = `${base} (conflict ${dateStr})${ext}`;
@@ -2788,9 +2861,15 @@ export class SyncEngine extends EventEmitter {
 
     // Build folder path map
     const folderPaths = new Map<string, string>();
+    // Cycle/depth guard: a corrupt or cyclic parent_id chain would otherwise
+    // recurse until the stack overflows (matches reconciler.buildRemotePaths).
+    const buildingFolder = new Set<string>();
+    const MAX_REMOTE_FOLDER_DEPTH = 100;
     for (const [id] of snapshot.folders) {
-      const buildPath = (fid: string): string => {
+      const buildPath = (fid: string, depth: number): string => {
         if (folderPaths.has(fid)) return folderPaths.get(fid)!;
+        if (buildingFolder.has(fid) || depth > MAX_REMOTE_FOLDER_DEPTH) return ""; // cycle or runaway depth
+        buildingFolder.add(fid);
         const folder = snapshot.folders.get(fid);
         if (!folder) return "";
         const name = normalizeRel(folder.name);
@@ -2798,12 +2877,12 @@ export class SyncEngine extends EventEmitter {
           folderPaths.set(fid, name);
           return name;
         }
-        const parentPath = buildPath(folder.parent_id);
+        const parentPath = buildPath(folder.parent_id, depth + 1);
         const p = parentPath ? `${parentPath}/${name}` : name;
         folderPaths.set(fid, p);
         return p;
       };
-      buildPath(id);
+      buildPath(id, 0);
     }
 
     // Pre-populate folder state
