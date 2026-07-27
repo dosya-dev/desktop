@@ -11,6 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { Workspace } from "@dosya-dev/shared";
 import { api } from "./api-client";
 import { useAuth } from "./auth-context";
+import { SESSION_RESET_EVENT } from "./session-reset";
 
 interface WorkspaceState {
   workspaces: Workspace[];
@@ -64,6 +65,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const setActive = useCallback((ws: Workspace) => {
     setActiveId(ws.id);
+  }, []);
+
+  // The in-memory activeId outlives logout (only the localStorage copy is
+  // wiped by the main process). Reset it so the next account starts from its
+  // own first workspace instead of a dangling previous-account id.
+  useEffect(() => {
+    const onReset = () => setActiveId(null);
+    window.addEventListener(SESSION_RESET_EVENT, onReset);
+    return () => window.removeEventListener(SESSION_RESET_EVENT, onReset);
   }, []);
 
   // Memoize so consumers only re-render when a real input changes — not on every

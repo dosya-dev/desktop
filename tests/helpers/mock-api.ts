@@ -3,6 +3,10 @@ import * as data from "./mock-data";
 
 export interface MockApiOptions {
   authenticated?: boolean;
+  /** Workspaces returned by GET /api/workspaces (default: [mockWorkspace]). */
+  workspaces?: unknown[];
+  /** Delay (ms) before the upload PUT responds — lets tests catch mid-flight state. */
+  uploadDelayMs?: number;
 }
 
 export interface MockServer {
@@ -14,7 +18,13 @@ export interface MockServer {
 export async function startMockServer(
   options: MockApiOptions = {},
 ): Promise<MockServer> {
-  const { authenticated = true } = options;
+  const { authenticated = true, workspaces = [data.mockWorkspace], uploadDelayMs = 0 } = options;
+
+  // Test-only instrumentation: counts POST /api/upload/init calls so specs
+  // can assert no *new* upload activity happens after a given point (e.g.
+  // after a workspace switch should have canceled the queue). Scoped to this
+  // server instance, so it resets per test.
+  let uploadInitCount = 0;
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
@@ -68,7 +78,7 @@ export async function startMockServer(
     if (path === "/api/auth/logout" && method === "POST") return json({ ok: true });
 
     // ── Workspaces ────────────────────────────────────────
-    if (path === "/api/workspaces" && method === "GET") return json({ ok: true, workspaces: [data.mockWorkspace] });
+    if (path === "/api/workspaces" && method === "GET") return json({ ok: true, workspaces });
     if (path === "/api/workspaces" && method === "POST") return json({ ok: true, workspace: data.mockWorkspace });
     if (/^\/api\/workspaces\/[^/]+\/settings$/.test(path) && method === "GET") {
       return json({
@@ -175,6 +185,21 @@ export async function startMockServer(
             .map((f) => ({ id: f.id, name: f.name, size_bytes: f.size_bytes, mime_type: f.mime_type, extension: f.extension, region: f.region, folder_id: f.folder_id, uploader_name: f.uploader_name, created_at: Date.parse(f.created_at) / 1000 }))
         : [];
       return json({ ok: true, query: q, files: matchingFiles, folders: [], shared: [], file_requests: [] });
+    }
+
+    // ── Upload ────────────────────────────────────────────
+    if (path === "/api/upload/init" && method === "POST") {
+      uploadInitCount++;
+      return json({ ok: true, session_id: "sess_1" });
+    }
+    if (path.startsWith("/api/upload/") && method === "PUT") {
+      setTimeout(() => json({ ok: true }), uploadDelayMs);
+      return;
+    }
+
+    // ── Test-only instrumentation ───────────────────────────
+    if (path === "/__test/upload-init-count" && method === "GET") {
+      return json({ count: uploadInitCount });
     }
 
     // ── Regions ───────────────────────────────────────────

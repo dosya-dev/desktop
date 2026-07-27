@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
+import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { formatRelative } from "@/lib/format";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
@@ -86,6 +87,7 @@ function getInitials(name: string | null): string {
 export function ActivityPage() {
   const { active } = useWorkspace();
   const { user } = useAuth();
+  const avatarVersion = useAvatarVersion((s) => s.version);
   const [page, setPage] = useState(1);
   const [apiBase, setApiBase] = useState("");
   const perPage = 50;
@@ -171,9 +173,10 @@ export function ActivityPage() {
                 }}
               >
                 {/* Avatar — use /api/me/avatar for current user, initials for others */}
-                {a.user_avatar && a.user_id === user?.id && apiBase ? (
+                {a.user_avatar && user && a.user_id === user.id && apiBase ? (
                   <img
-                    src={`${apiBase}/api/me/avatar`}
+                    key={user.id}
+                    src={avatarUrl(apiBase, user.id, avatarVersion)}
                     alt=""
                     className="h-9 w-9 shrink-0 rounded-full object-cover"
                   />

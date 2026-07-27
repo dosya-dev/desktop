@@ -25,6 +25,7 @@ import type { Workspace } from "@dosya-dev/shared";
 import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useSyncPaused, useSyncPairs } from "@/lib/sync-store";
+import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { api, ApiError } from "@/lib/api-client";
 import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
@@ -81,6 +82,8 @@ export function Sidebar() {
   useEffect(() => {
     window.electronAPI.getApiBase().then(setApiBase);
   }, []);
+
+  const avatarVersion = useAvatarVersion((s) => s.version);
 
   const { data: dashData } = useQuery({
     queryKey: ["dashboard-storage", active?.id],
@@ -394,7 +397,8 @@ export function Sidebar() {
           >
             {user?.avatar_url ? (
               <img
-                src={`${apiBase}/api/me/avatar`}
+                key={user.id}
+                src={avatarUrl(apiBase, user.id, avatarVersion)}
                 alt={user.name}
                 className="h-8 w-8 shrink-0 rounded-full object-cover"
               />

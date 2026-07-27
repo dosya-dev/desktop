@@ -186,6 +186,7 @@ export function FileBrowserPage() {
   };
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const [searchInput, setSearchInput] = useState(search);
   const [dragging, setDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
@@ -199,9 +200,10 @@ export function FileBrowserPage() {
   const [renameName, setRenameName] = useState("");
   const [moveTarget, setMoveTarget] = useState<{ id: string; name: string; kind: "file" | "folder" } | null>(null);
   const [bulkMoveIds, setBulkMoveIds] = useState<string[] | null>(null);
+  const [bulkMoveFolderIds, setBulkMoveFolderIds] = useState<string[] | null>(null);
   const [copyTarget, setCopyTarget] = useState<{ id: string; name: string } | null>(null);
   const [pickerFolder, setPickerFolder] = useState<string | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; names: string[]; kinds: ("file" | "folder")[] } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; names: string[]; kinds: ("file" | "folder")[]; bulk?: boolean; folderIds?: string[] } | null>(null);
 
   // Viewer + detail panel + modals (web parity)
   const [viewerFile, setViewerFile] = useState<FileRow | null>(null);
@@ -215,6 +217,21 @@ export function FileBrowserPage() {
   // (see the trigger effect below), so re-selecting the SAME file after
   // cancelling the OS picker still re-fires the picker.
   const versionUploadTargetRef = useRef<string | null>(null);
+
+  // Uploads started from this page must not outlive it. The PUT fetches get
+  // this signal so logout/navigation aborts them, and pageAliveRef gates the
+  // result toasts — the app-root <Toaster> outlives this page, so without the
+  // gate an upload finishing after logout pops a toast on the login screen.
+  const pageAliveRef = useRef(true);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    pageAliveRef.current = true;
+    uploadAbortRef.current = new AbortController();
+    return () => {
+      pageAliveRef.current = false;
+      uploadAbortRef.current?.abort();
+    };
+  }, []);
 
   // Favourites
   const [favourites, setFavourites] = useState<Set<string>>(new Set());
@@ -252,7 +269,7 @@ export function FileBrowserPage() {
 
   const navigateToFolder = useCallback(
     (id: string) => {
-      setSelected(new Set());
+      clearSelection();
       setSearchParams({ folder: id });
     },
     [setSearchParams],
@@ -295,6 +312,15 @@ export function FileBrowserPage() {
     const file = allFiles.find((f) => f.id === id);
     if (file?.lock_mode === "full_lock" && !unlockedFiles.has(id)) return;
     setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectFolder = (id: string) => {
+    setSelectedFolders((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -436,7 +462,7 @@ export function FileBrowserPage() {
       api.get<{ ok: boolean; folders: { id: string; name: string; parent_id: string | null; file_count: number }[] }>(
         `/api/folders/tree?workspace_id=${active?.id}`,
       ),
-    enabled: !!active && (!!moveTarget || !!copyTarget || !!bulkMoveIds),
+    enabled: !!active && (!!moveTarget || !!copyTarget || !!bulkMoveIds || !!bulkMoveFolderIds),
   });
 
   const openFileInSystemApp = useCallback(async (fileId: string, fileName: string) => {
@@ -467,7 +493,13 @@ export function FileBrowserPage() {
 
   const selectAll = useCallback(() => {
     setSelected(new Set(selectableFiles.map((f) => f.id)));
-  }, [selectableFiles]);
+    setSelectedFolders(new Set(folders.map((f) => f.id)));
+  }, [selectableFiles, folders]);
+  const clearSelection = useCallback(() => {
+    setSelected(new Set());
+    setSelectedFolders(new Set());
+  }, []);
+  const totalSelected = selected.size + selectedFolders.size;
 
   // ── Deep links: ?view=<id> / ?panel=<id> (web parity) ──────
 
@@ -526,11 +558,17 @@ export function FileBrowserPage() {
           headers: { "Content-Type": file.type || "application/octet-stream" },
           body: file,
           credentials: "include",
+          signal: uploadAbortRef.current?.signal,
         });
         // A non-2xx PUT is a failed upload, not a success — count it as such.
         if (res.ok) uploaded++;
         else failed++;
-      } catch { failed++; }
+      } catch (err) {
+        // Page unmounted (logout/navigation) mid-upload — stop silently,
+        // don't count the aborted-and-unattempted rest as failures.
+        if ((err instanceof DOMException && err.name === "AbortError") || (err as { name?: string })?.name === "AbortError") break;
+        failed++;
+      }
     }
     return { uploaded, failed };
   }, [active?.id, folderId]);
@@ -541,6 +579,7 @@ export function FileBrowserPage() {
     e.preventDefault(); e.stopPropagation(); setDragging(false);
     if (showDeleted || !e.dataTransfer.files.length) return;
     const { uploaded, failed } = await uploadFiles(e.dataTransfer.files);
+    if (!pageAliveRef.current) return; // page (or session) is gone — no toasts
     if (uploaded > 0) {
       toast.success("Uploaded", { description: `${uploaded} file${uploaded > 1 ? "s" : ""} uploaded` });
       refresh();
@@ -561,6 +600,7 @@ export function FileBrowserPage() {
         mime_type: file.type || "application/octet-stream",
       });
       if (!initRes.ok || !initRes.session_id) {
+        if (!pageAliveRef.current) return;
         toast.error("Upload failed", { description: initRes.error ?? "The new version could not be uploaded." });
         return;
       }
@@ -569,10 +609,13 @@ export function FileBrowserPage() {
         headers: { "Content-Type": file.type || "application/octet-stream" },
         body: file,
         credentials: "include",
+        signal: uploadAbortRef.current?.signal,
       });
+      if (!pageAliveRef.current) return;
       toast.success("Version uploaded", { description: "The file now points to your new version." });
       refresh();
     } catch {
+      if (!pageAliveRef.current) return;
       toast.error("Upload failed", { description: "The new version could not be uploaded." });
     }
   };
@@ -619,7 +662,7 @@ export function FileBrowserPage() {
       try { await api.put(`/api/files/${id}`); } catch {}
     }
     toast.success("Restored", { description: `${selected.size} files restored` });
-    setSelected(new Set());
+    clearSelection();
     refresh();
   };
 
@@ -628,7 +671,7 @@ export function FileBrowserPage() {
       try { await api.delete(`/api/files/${id}/permanent`); } catch {}
     }
     toast.success("Deleted", { description: `${selected.size} files permanently deleted` });
-    setSelected(new Set());
+    clearSelection();
     refresh();
   };
 
@@ -824,9 +867,9 @@ export function FileBrowserPage() {
       </div>
 
       {/* Bulk Actions */}
-      {selected.size > 0 && (
+      {totalSelected > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg bg-[var(--color-bg-tertiary)] px-4 py-2 text-sm">
-          <span className="font-medium">{selected.size} selected</span>
+          <span className="font-medium">{totalSelected} selected</span>
           {showDeleted ? (
             <>
               <button
@@ -848,10 +891,9 @@ export function FileBrowserPage() {
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
                 onClick={async () => {
                   try {
-                    const ids = Array.from(selected);
-                    const res = await api.post<{ ok: boolean; url: string }>("/api/files/download-zip", { file_ids: ids, workspace_id: active!.id });
-                    if (res.url) window.open(res.url, "_blank");
-                    else toast.success("Download started");
+                    const r = await window.electronAPI.downloadArchive(Array.from(selected), Array.from(selectedFolders));
+                    if (r.ok) toast.success("Downloaded", { description: `Saved to ${r.path ?? "disk"}` });
+                    else if (!r.canceled) toast.error("Download failed");
                   } catch (e: any) {
                     toast.error(e instanceof ApiError ? e.message : "Failed");
                   }
@@ -878,16 +920,20 @@ export function FileBrowserPage() {
               </button>
               <button
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-                onClick={() => { setBulkMoveIds(Array.from(selected)); setPickerFolder(null); }}
+                onClick={() => { setBulkMoveIds(Array.from(selected)); setBulkMoveFolderIds(Array.from(selectedFolders)); setPickerFolder(null); }}
               >
                 <Move size={14} /> Move
               </button>
               <button
                 className="flex items-center gap-1 text-[var(--color-danger)] hover:text-[var(--color-danger-hover)]"
                 onClick={() => {
-                  const ids = Array.from(selected);
-                  const names = ids.map((id) => allFiles.find((f) => f.id === id)?.name ?? id);
-                  setDeleteConfirm({ ids, names, kinds: ids.map(() => "file" as const) });
+                  const fileIds = Array.from(selected);
+                  const folderIds = Array.from(selectedFolders);
+                  const names = [
+                    ...fileIds.map((id) => allFiles.find((f) => f.id === id)?.name ?? id),
+                    ...folderIds.map((id) => folders.find((f) => f.id === id)?.name ?? id),
+                  ];
+                  setDeleteConfirm({ ids: fileIds, folderIds, names, kinds: fileIds.map(() => "file" as const), bulk: true });
                 }}
               >
                 <Trash2 size={14} /> Delete
@@ -898,7 +944,7 @@ export function FileBrowserPage() {
             <button className="text-xs text-[var(--color-text-muted)]" onClick={selectAll}>
               Select all
             </button>
-            <button className="text-xs text-[var(--color-text-muted)]" onClick={() => setSelected(new Set())}>
+            <button className="text-xs text-[var(--color-text-muted)]" onClick={clearSelection}>
               Clear
             </button>
           </div>
@@ -920,10 +966,10 @@ export function FileBrowserPage() {
                 <th className="w-8 py-2 pl-3">
                   <input
                     type="checkbox"
-                    checked={selected.size > 0 && selected.size >= selectableFiles.length && selectableFiles.length > 0}
+                    checked={totalSelected > 0 && selected.size >= selectableFiles.length && selectedFolders.size >= folders.length && (selectableFiles.length + folders.length) > 0}
                     onChange={(e) => {
                       if (e.target.checked) selectAll();
-                      else setSelected(new Set());
+                      else clearSelection();
                     }}
                   />
                 </th>
@@ -939,13 +985,19 @@ export function FileBrowserPage() {
                   key={folder.id}
                   className="cursor-pointer border-b transition-colors hover:bg-[var(--color-bg-secondary)]"
                   style={{ borderColor: "var(--color-border)" }}
-                  onClick={() => navigateToFolder(folder.id)}
+                  onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelectFolder(folder.id); else navigateToFolder(folder.id); }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setContextMenu({ x: e.clientX, y: e.clientY, item: { id: folder.id, name: folder.name, kind: "folder" } });
                   }}
                 >
-                  <td className="py-2 pl-3" onClick={(e) => e.stopPropagation()}></td>
+                  <td className="py-2 pl-3" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedFolders.has(folder.id)}
+                      onChange={() => toggleSelectFolder(folder.id)}
+                    />
+                  </td>
                   {visibleCols.map((col) => {
                     if (col.key === "name") {
                       return (
@@ -1074,25 +1126,35 @@ export function FileBrowserPage() {
             <div className="mb-5">
               <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Folders</p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                {folders.map((folder) => (
-                  <div
-                    key={folder.id}
-                    className="cursor-pointer rounded-xl border p-4 transition-colors hover:bg-[var(--color-bg-secondary)]"
-                    style={{ borderColor: "var(--color-border)" }}
-                    onClick={() => navigateToFolder(folder.id)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setContextMenu({ x: e.clientX, y: e.clientY, item: { id: folder.id, name: folder.name, kind: "folder" } });
-                    }}
-                  >
-                    <span className="relative mb-3 inline-block">
-                      <FolderIcon fileCount={folder.file_count} size={32} synced={!!(syncedFolderIds.has(folder.id) || folder.is_synced)} />
-                      <OriginBadge origin={folder.origin} />
-                    </span>
-                    <p className="truncate text-sm font-medium">{folder.name}</p>
-                    <p className="text-xs text-[var(--color-text-muted)]">{folder.file_count} items</p>
-                  </div>
-                ))}
+                {folders.map((folder) => {
+                  const isFolderSel = selectedFolders.has(folder.id);
+                  return (
+                    <div
+                      key={folder.id}
+                      className={`group relative cursor-pointer rounded-xl border p-4 transition-colors hover:bg-[var(--color-bg-secondary)] ${isFolderSel ? "ring-2 ring-[var(--color-primary)]" : ""}`}
+                      style={{ borderColor: "var(--color-border)" }}
+                      onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelectFolder(folder.id); else navigateToFolder(folder.id); }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setContextMenu({ x: e.clientX, y: e.clientY, item: { id: folder.id, name: folder.name, kind: "folder" } });
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isFolderSel}
+                        onChange={() => toggleSelectFolder(folder.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        className={`absolute left-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-all ${isFolderSel || selectedFolders.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                      />
+                      <span className="relative mb-3 inline-block">
+                        <FolderIcon fileCount={folder.file_count} size={32} synced={!!(syncedFolderIds.has(folder.id) || folder.is_synced)} />
+                        <OriginBadge origin={folder.origin} />
+                      </span>
+                      <p className="truncate text-sm font-medium">{folder.name}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">{folder.file_count} items</p>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1418,15 +1480,15 @@ export function FileBrowserPage() {
               <Trash2 size={20} className="text-[var(--color-danger)]" />
             </div>
             <div>
-              <h3 className="text-lg font-semibold">Delete {deleteConfirm.ids.length === 1 ? "item" : `${deleteConfirm.ids.length} items`}?</h3>
+              <h3 className="text-lg font-semibold">Delete {deleteConfirm.names.length === 1 ? "item" : `${deleteConfirm.names.length} items`}?</h3>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                {deleteConfirm.ids.length === 1 ? (
+                {deleteConfirm.names.length === 1 ? (
                   <>Are you sure you want to delete <strong>{deleteConfirm.names[0]}</strong>?</>
                 ) : (
-                  <>Are you sure you want to delete these {deleteConfirm.ids.length} items?</>
+                  <>Are you sure you want to delete these {deleteConfirm.names.length} items?</>
                 )}
               </p>
-              {deleteConfirm.ids.length > 1 && deleteConfirm.ids.length <= 5 && (
+              {deleteConfirm.names.length > 1 && deleteConfirm.names.length <= 5 && (
                 <ul className="mt-2 space-y-0.5 text-xs text-[var(--color-text-muted)]">
                   {deleteConfirm.names.map((n, i) => (
                     <li key={i} className="truncate">· {n}</li>
@@ -1447,10 +1509,26 @@ export function FileBrowserPage() {
               Cancel
             </button>
             <button
-              onClick={() => {
-                deleteConfirm.ids.forEach((id, i) => deleteMut.mutate({ id, kind: deleteConfirm.kinds[i] }));
-                toast.success("Deleted");
-                setSelected(new Set());
+              onClick={async () => {
+                if (deleteConfirm.bulk) {
+                  try {
+                    await api.post("/api/files/batch-delete", {
+                      workspace_id: active!.id,
+                      file_ids: deleteConfirm.ids,
+                      folder_ids: deleteConfirm.folderIds ?? [],
+                    });
+                    const count = deleteConfirm.ids.length + (deleteConfirm.folderIds?.length ?? 0);
+                    toast.success("Deleted", { description: `${count} item${count === 1 ? "" : "s"} deleted` });
+                    refresh();
+                    clearSelection();
+                  } catch (e: any) {
+                    toast.error(e instanceof ApiError ? e.message : "Delete failed");
+                  }
+                } else {
+                  deleteConfirm.ids.forEach((id, i) => deleteMut.mutate({ id, kind: deleteConfirm.kinds[i] }));
+                  toast.success("Deleted");
+                  clearSelection();
+                }
                 setPanel((p) => (p && deleteConfirm.ids.includes(p.file.id) ? null : p));
                 setDeleteConfirm(null);
               }}
@@ -1463,12 +1541,12 @@ export function FileBrowserPage() {
       )}
 
       {/* Move / Copy / Bulk-move Folder Picker Modal */}
-      {(moveTarget || copyTarget || bulkMoveIds) && (
+      {(moveTarget || copyTarget || bulkMoveIds || bulkMoveFolderIds) && (
         <FolderPickerModal
           title={
             moveTarget ? `Move "${moveTarget.name}"`
             : copyTarget ? `Copy "${copyTarget.name}"`
-            : `Move ${bulkMoveIds!.length} files`
+            : `Move ${(bulkMoveIds?.length ?? 0) + (bulkMoveFolderIds?.length ?? 0)} items`
           }
           actionLabel={copyTarget ? "Copy here" : "Move here"}
           folders={folderTreeData?.folders ?? []}
@@ -1487,18 +1565,23 @@ export function FileBrowserPage() {
               for (const id of bulkMoveIds) {
                 try { await moveMut.mutateAsync({ id, kind: "file", targetId: pickerFolder }); } catch {}
               }
-              toast.success("Moved", { description: `${bulkMoveIds.length} files moved` });
-              setSelected(new Set());
+              for (const id of bulkMoveFolderIds ?? []) {
+                try { await moveMut.mutateAsync({ id, kind: "folder", targetId: pickerFolder }); } catch {}
+              }
+              toast.success("Moved", { description: `${(bulkMoveIds?.length ?? 0) + (bulkMoveFolderIds?.length ?? 0)} items moved` });
+              clearSelection();
             }
             refresh();
             setMoveTarget(null);
             setBulkMoveIds(null);
+            setBulkMoveFolderIds(null);
             setPickerFolder(null);
           }}
           onClose={() => {
             setMoveTarget(null);
             setCopyTarget(null);
             setBulkMoveIds(null);
+            setBulkMoveFolderIds(null);
             setPickerFolder(null);
           }}
         />

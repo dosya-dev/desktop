@@ -15,7 +15,7 @@ import {
   RefreshCw,
   AlertCircle,
 } from "lucide-react";
-import { api, ApiError, apiRequest } from "@/lib/api-client";
+import { api, apiBase, ApiError, apiRequest } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes } from "@/lib/format";
 import { toast } from "sonner";
@@ -30,6 +30,11 @@ interface QueueItem {
   progress: number; // 0-100 byte-level
   bytesUploaded: number;
   error?: string;
+  // Destination captured at enqueue time. Uploads must never retarget when
+  // the active workspace/folder/region changes mid-queue.
+  workspaceId: string;
+  folderId: string | null;
+  region: string;
 }
 
 interface RegionInfo {
@@ -162,12 +167,12 @@ export function UploadPage() {
     try {
       // Step 1: Init upload session
       const initRes = await api.post<{ ok: boolean; session_id: string }>("/api/upload/init", {
-        workspace_id: active!.id,
+        workspace_id: item.workspaceId,
         file_name: item.file.name,
         file_size: item.file.size,
         mime_type: item.file.type || "application/octet-stream",
-        folder_id: selectedFolder.id,
-        region: selectedRegion,
+        folder_id: item.folderId,
+        region: item.region,
       });
 
       if (controller.signal.aborted) throw new Error("Cancelled");
@@ -176,8 +181,11 @@ export function UploadPage() {
       // (fetch API doesn't support upload progress in browsers/Electron renderer)
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        const apiBase = (window as any).__apiBase || "";
-        xhr.open("PUT", `${apiBase}/api/upload/${initRes.session_id}`);
+        // Uses the IPC-primed apiBase() (same pattern as FileBrowserPage's
+        // upload flow) — a bare relative path would resolve against the
+        // renderer's own app://bundle origin and get swallowed by the
+        // static-asset protocol handler instead of reaching the real API.
+        xhr.open("PUT", `${apiBase()}/api/upload/${initRes.session_id}`);
         xhr.withCredentials = true;
         xhr.setRequestHeader("Content-Type", "application/octet-stream");
 
@@ -277,20 +285,58 @@ export function UploadPage() {
     };
   }, []);
 
+  // Switching workspace mid-queue: cancel everything. Continuing would keep a
+  // progress panel on screen for a workspace the user has left, and pending
+  // items pointing at the old workspace would quietly upload "somewhere else".
+  const prevWsIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const wsId = active?.id ?? null;
+    const prev = prevWsIdRef.current;
+    prevWsIdRef.current = wsId;
+    if (!prev || !wsId || prev === wsId) return; // initial load or no real switch
+    if (queueRef.current.length === 0) return;
+    for (const [, ctrl] of abortControllers.current) ctrl.abort();
+    abortControllers.current.clear();
+    // Each aborted controller's uploadFile() eventually settles and its
+    // processQueue().finally() re-entry reads queueRef.current to claim the
+    // next "pending" sibling. queueRef.current is normally kept in sync only
+    // by the render-time `queueRef.current = queue` assignment above, which
+    // depends on React flushing the setQueue([]) update before that re-entry
+    // runs. That ordering currently holds (React 18 flushes a passive
+    // effect's own setState synchronously before the callstack returns to
+    // the microtask queue, so it wins against the abort's continuation) but
+    // it is an implementation detail of the framework/engine, not a
+    // contract this scheduler should depend on. Clearing the ref here,
+    // synchronously and unconditionally, makes the invariant hold by
+    // construction instead of by scheduling luck.
+    queueRef.current = [];
+    setQueue([]);
+    toast.info("Uploads canceled", {
+      description: "The upload queue was cleared because you switched workspace.",
+    });
+  }, [active?.id]);
+
   // ── Drop handler ──────────────────────────────────────────────────
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    const items: QueueItem[] = acceptedFiles.map((file) => ({
-      file,
-      id: crypto.randomUUID(),
-      status: "pending" as const,
-      progress: 0,
-      bytesUploaded: 0,
-    }));
-    setQueue((prev) => [...prev, ...items]);
-    // Start processing after state update
-    setTimeout(() => processQueue(), 50);
-  }, [processQueue]);
+  const onDrop = useCallback(
+    (acceptedFiles: File[]) => {
+      if (!active) return;
+      const items: QueueItem[] = acceptedFiles.map((file) => ({
+        file,
+        id: crypto.randomUUID(),
+        status: "pending" as const,
+        progress: 0,
+        bytesUploaded: 0,
+        workspaceId: active.id,
+        folderId: selectedFolder.id,
+        region: selectedRegion,
+      }));
+      setQueue((prev) => [...prev, ...items]);
+      // Start processing after state update
+      setTimeout(() => processQueue(), 50);
+    },
+    [processQueue, active, selectedFolder.id, selectedRegion],
+  );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,

@@ -340,6 +340,35 @@ export function registerIpcHandlers(apiBase: string): void {
     },
   );
 
+  ipcMain.handle(
+    "archive:download",
+    async (_event, { fileIds, folderIds }: { fileIds: string[]; folderIds: string[] }) => {
+      if (!Array.isArray(fileIds) || !Array.isArray(folderIds) || (fileIds.length === 0 && folderIds.length === 0)) {
+        throw new Error("Nothing to download");
+      }
+      const { canceled, filePath } = await dialog.showSaveDialog({
+        title: "Save archive",
+        defaultPath: join(app.getPath("downloads"), "dosya-download.zip"),
+      });
+      if (canceled || !filePath) return { ok: false, canceled: true };
+
+      const cookies = await session.defaultSession.cookies.get({ url: apiBase });
+      const sessionCookie = cookies.find((c) => c.name === "dosya_session");
+      if (!sessionCookie) throw new Error("Not authenticated");
+
+      const res = await fetch(`${apiBase}/api/files/download-archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `dosya_session=${sessionCookie.value}` },
+        body: JSON.stringify({ file_ids: fileIds, folder_ids: folderIds }),
+      });
+      if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+
+      const fileStream = createWriteStream(filePath);
+      await pipeline(Readable.fromWeb(res.body as any), fileStream);
+      return { ok: true, path: filePath };
+    },
+  );
+
   ipcMain.handle("file:show-in-folder", async (_event, path: string) => {
     if (typeof path !== "string" || path.length === 0 || path.length > 2000) {
       throw new Error("Invalid path");

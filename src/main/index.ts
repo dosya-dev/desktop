@@ -213,11 +213,17 @@ function createWindow(): void {
     }
   });
 
-  // Restrict navigation to the app's own URLs (prevents XSS escalation)
+  // Restrict navigation to the app's own URLs (prevents XSS escalation).
+  // Mirrors the loadURL branch below exactly: only the Vite dev server case
+  // (!app.isPackaged && ELECTRON_RENDERER_URL set) gets the localhost origin;
+  // every other case — packaged builds AND the built-but-unpackaged case (test
+  // harness / `electron-vite preview`) — loads from app://bundle, so a bare
+  // `app.isPackaged` check on this side used to wrongly block reload() there.
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    const allowed = app.isPackaged
-      ? url.startsWith(`${APP_ORIGIN}/`)
-      : url.startsWith(process.env.ELECTRON_RENDERER_URL || "http://localhost");
+    const devServerUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined;
+    const allowed = devServerUrl
+      ? url.startsWith(devServerUrl)
+      : url.startsWith(`${APP_ORIGIN}/`);
     if (!allowed) {
       event.preventDefault();
     }

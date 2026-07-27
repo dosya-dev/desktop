@@ -4,12 +4,11 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
-import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "./api-client";
-import { queryClient } from "./query-client";
-import { clearHeicCaches } from "./heic-cache";
+import { resetSessionState } from "./session-reset";
 import { applyTheme, writeCache, readCache, initSystemListener } from "./theme";
 import { isThemeId, isMode, DEFAULT_THEME, DEFAULT_MODE } from "./themes";
 import type { User } from "@dosya-dev/shared";
@@ -49,7 +48,6 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const navigate = useNavigate();
 
   const refreshUser = useCallback(async () => {
     try {
@@ -139,6 +137,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [refreshUser],
   );
 
+  // If the session ends WITHOUT an explicit logout (401 during refreshUser or
+  // the boot check), run the same teardown so the next account never sees this
+  // account's caches. prevUserRef distinguishes "was signed in, now isn't"
+  // from the initial user=null state.
+  const prevUserRef = useRef<User | null>(null);
+  useEffect(() => {
+    if (prevUserRef.current && !user) {
+      resetSessionState();
+    }
+    prevUserRef.current = user;
+  }, [user]);
+
   const logout = useCallback(async () => {
     // Server-side: invalidate session in DB + KV cache
     try {
@@ -153,13 +163,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // to disk, which would prevent sync from starting on the next login.
     await window.electronAPI.clearSession();
     setUser(null);
-    queryClient.clear();
-    // Clear decoded HEIC previews (in-memory object URLs + the persistent
-    // Cache API store) so the previous account's image data doesn't linger on
-    // a shared machine.
-    clearHeicCaches();
-    navigate("/onboarding");
-  }, [navigate]);
+    resetSessionState();
+    // Hard guarantee: reload the renderer so NOTHING from this session survives
+    // in memory — Chromium's in-process image cache (the stale-avatar culprit),
+    // module-level state, and any stray promise chains all die here. The app
+    // boots onto onboarding because the session cookie is already cleared.
+    window.location.hash = "#/onboarding";
+    window.location.reload();
+  }, []);
 
   return (
     <AuthContext.Provider

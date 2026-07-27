@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
+import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { formatDate } from "@/lib/format";
 import { validatePassword } from "@dosya-dev/shared";
 import { toast } from "sonner";
@@ -209,10 +210,8 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
   const { user, refreshUser } = useAuth();
   const [name, setName] = useState(user?.name ?? "");
   const fileRef = useRef<HTMLInputElement>(null);
-  // Cache-buster for the avatar <img>: the avatar URL is a fixed endpoint, so
-  // without this a newly uploaded avatar keeps showing the browser-cached old
-  // image. Bumped whenever the avatar changes.
-  const [avatarVersion, setAvatarVersion] = useState(0);
+  const avatarVersion = useAvatarVersion((s) => s.version);
+  const bumpAvatar = useAvatarVersion((s) => s.bump);
 
   // Email change state
   const [showEmailModal, setShowEmailModal] = useState(false);
@@ -233,13 +232,13 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
       fd.append("avatar", file);
       return apiRequest("/api/me/avatar", { method: "POST", body: fd });
     },
-    onSuccess: () => { setAvatarVersion((v) => v + 1); refreshUser(); toast.success("Avatar updated"); },
+    onSuccess: () => { bumpAvatar(); refreshUser(); toast.success("Avatar updated"); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
   });
 
   const deleteAvatarMut = useMutation({
     mutationFn: () => api.delete("/api/me/avatar"),
-    onSuccess: () => { setAvatarVersion((v) => v + 1); refreshUser(); toast.success("Avatar removed"); },
+    onSuccess: () => { bumpAvatar(); refreshUser(); toast.success("Avatar removed"); },
   });
 
   // Phase 1: request email change → sends code to new email
@@ -280,7 +279,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
         <div className="relative group">
           {user?.avatar_url ? (
             <img
-              src={`${apiBase}/api/me/avatar${avatarVersion ? `?v=${avatarVersion}` : ""}`}
+              src={avatarUrl(apiBase, user.id, avatarVersion)}
               alt={user.name}
               className="h-20 w-20 rounded-full object-cover"
             />

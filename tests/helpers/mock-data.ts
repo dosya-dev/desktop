@@ -7,7 +7,7 @@ export const mockUser = {
   login_method: "email",
   subscription_status: "active",
   cancel_at_period_end: 0,
-  avatar_url: null,
+  avatar_url: "/api/me/avatar",
   created_at: "2025-01-15T10:00:00Z",
 };
 
@@ -19,6 +19,14 @@ export const mockWorkspace = {
   icon_color: "#3B82F6",
   owner_id: "user_test_1",
   created_at: "2025-01-15T10:00:00Z",
+};
+
+export const mockWorkspaceB = {
+  ...mockWorkspace,
+  id: "ws_2",
+  name: "Second Workspace",
+  slug: "second-workspace",
+  icon_initials: "SW",
 };
 
 export const mockFiles = [

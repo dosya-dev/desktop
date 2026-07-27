@@ -50,6 +50,12 @@ const electronAPI = {
   ): Promise<{ ok: boolean; canceled?: boolean; path?: string }> =>
     ipcRenderer.invoke("file:download", { fileId, fileName, version }),
 
+  downloadArchive: (
+    fileIds: string[],
+    folderIds: string[],
+  ): Promise<{ ok: boolean; canceled?: boolean; path?: string }> =>
+    ipcRenderer.invoke("archive:download", { fileIds, folderIds }),
+
   showInFolder: (path: string): Promise<void> =>
     ipcRenderer.invoke("file:show-in-folder", path),
 
