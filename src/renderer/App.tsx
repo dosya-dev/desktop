@@ -39,6 +39,7 @@ const LanTransferPage = lazyPage(() => import("./pages/LanTransferPage"), "LanTr
 const VerifyPage = lazyPage(() => import("./pages/VerifyPage"), "VerifyPage");
 const TwoFactorPage = lazyPage(() => import("./pages/TwoFactorPage"), "TwoFactorPage");
 const CreateWorkspacePage = lazyPage(() => import("./pages/CreateWorkspacePage"), "CreateWorkspacePage");
+const WorkspaceDashboardPage = lazyPage(() => import("./pages/WorkspaceDashboardPage"), "WorkspaceDashboardPage");
 
 /** Full-screen spinner shown while a lazily-loaded page chunk downloads. */
 function PageFallback() {
@@ -124,6 +125,7 @@ function AppRoutes() {
       <Route path="/sync" element={<ProtectedPage><SyncPage /></ProtectedPage>} />
       <Route path="/file-requests" element={<ProtectedPage><FileRequestsPage /></ProtectedPage>} />
       <Route path="/lan-transfer" element={<ProtectedPage><LanTransferPage /></ProtectedPage>} />
+      <Route path="/workspaces" element={<ProtectedPage><WorkspaceDashboardPage /></ProtectedPage>} />
       <Route path="/verify" element={<VerifyPage />} />
 
       {/* Default: always start at onboarding */}

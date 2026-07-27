@@ -11,10 +11,12 @@ import {
   Pencil,
   Trash2,
   ImagePlus,
+  DownloadCloud,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes } from "@/lib/format";
+import { UpdatesSection } from "@/components/UpdatesSection";
 import { toast } from "sonner";
 
 interface SettingsResponse {
@@ -47,13 +49,14 @@ interface SettingsResponse {
   }[];
 }
 
-type Tab = "general" | "limits" | "security" | "roles" | "danger";
+type Tab = "general" | "limits" | "security" | "roles" | "updates" | "danger";
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "general", label: "General", icon: <Settings size={16} /> },
   { id: "limits", label: "Hard limits", icon: <HardDrive size={16} /> },
   { id: "security", label: "Security", icon: <Shield size={16} /> },
   { id: "roles", label: "Roles", icon: <Users size={16} /> },
+  { id: "updates", label: "Updates", icon: <DownloadCloud size={16} /> },
   { id: "danger", label: "Danger zone", icon: <AlertTriangle size={16} /> },
 ];
 
@@ -321,6 +324,12 @@ export function SettingsPage() {
                 Open on web
               </button>
             </div>
+          </Section>
+        )}
+
+        {tab === "updates" && (
+          <Section title="App updates">
+            <UpdatesSection />
           </Section>
         )}
 

@@ -19,7 +19,9 @@ import {
   RefreshCw,
   FileUp,
   Inbox,
+  LayoutGrid,
 } from "lucide-react";
+import type { Workspace } from "@dosya-dev/shared";
 import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useSyncPaused, useSyncPairs } from "@/lib/sync-store";
@@ -50,6 +52,7 @@ export function Sidebar() {
   const [newWsColor, setNewWsColor] = useState("#22c55e");
   const [collapsed, setCollapsed] = useState(false);
   const [platform, setPlatform] = useState<string>("darwin");
+  const [switchingWs, setSwitchingWs] = useState<Workspace | null>(null);
 
   // Sync state now comes from the single shared store (see AppShell.init).
   const syncPaused = useSyncPaused();
@@ -111,6 +114,24 @@ export function Sidebar() {
   });
 
   return (
+    <>
+    {switchingWs && (
+      <div className="fixed inset-0 z-[9999] flex flex-col items-center justify-center gap-4 bg-[var(--color-bg)]">
+        <div
+          className="flex h-16 w-16 items-center justify-center rounded-2xl text-xl font-bold text-white"
+          style={{ background: switchingWs.icon_color || "var(--color-primary)" }}
+        >
+          {switchingWs.icon_initials}
+        </div>
+        <div className="text-center">
+          <p className="text-sm font-semibold">{switchingWs.name}</p>
+          <p className="mt-1 flex items-center justify-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--color-primary)] border-t-transparent" />
+            Switching workspace…
+          </p>
+        </div>
+      </div>
+    )}
     <aside
       className="relative flex h-full flex-col border-r transition-all duration-200"
       style={{
@@ -178,8 +199,11 @@ export function Sidebar() {
                   <button
                     key={ws.id}
                     onClick={() => {
-                      setActive(ws);
                       setWsOpen(false);
+                      if (ws.id === active?.id) return;
+                      setSwitchingWs(ws);
+                      setActive(ws);
+                      window.setTimeout(() => setSwitchingWs(null), 2000);
                     }}
                     className="flex w-full items-center gap-2.5 px-3 py-2 text-sm hover:bg-[var(--color-bg-secondary)] transition-colors"
                   >
@@ -189,7 +213,14 @@ export function Sidebar() {
                     >
                       {ws.icon_initials}
                     </div>
-                    <span className="flex-1 truncate text-left">{ws.name}</span>
+                    <div className="min-w-0 flex-1 text-left">
+                      <span className="block truncate">{ws.name}</span>
+                      {ws.storage && ws.storage.total > 0 && (
+                        <span className="block truncate text-[10px] leading-tight text-[var(--color-text-muted)]">
+                          {formatBytes(Math.max(0, ws.storage.total - ws.storage.used))} free of {formatBytes(ws.storage.total)}
+                        </span>
+                      )}
+                    </div>
                     {wsSync && wsSync.count > 0 && (
                       <span
                         className="flex items-center gap-1 text-[10px] font-medium"
@@ -218,6 +249,16 @@ export function Sidebar() {
                 );
               })}
               <div className="my-1 h-px bg-[var(--color-border)]" />
+              <button
+                onClick={() => {
+                  setWsOpen(false);
+                  navigate("/workspaces");
+                }}
+                className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] transition-colors"
+              >
+                <LayoutGrid size={14} />
+                Workspace dashboard
+              </button>
               <button
                 onClick={() => {
                   setWsOpen(false);
@@ -455,5 +496,6 @@ export function Sidebar() {
       )}
       </div>{/* end inner scrollable */}
     </aside>
+    </>
   );
 }
