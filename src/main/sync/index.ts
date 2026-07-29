@@ -1430,10 +1430,14 @@ export class SyncEngine extends EventEmitter {
       this.log(pair.id, `Verification done: ${actuallyChanged} actually changed, ${skippedByHash} unchanged (content identical)`);
     }
 
-    // Phase 2: Create remote folders via batch API.
-    // One HTTP request per batch of 500 folders (API limit), sorted by depth
-    // so parents are created before children within each request.
-    // For 29K folders: ~58 requests instead of 29K individual calls.
+    // Phase 2: Create remote folders via batch API, one depth level at a time.
+    // The server assigns IDs only when a batch returns, so a folder can never
+    // share a request with its own parent — the parent's ID wouldn't exist yet
+    // to send. Grouping by depth guarantees every parent was created (and its
+    // ID recorded in state.folders) by an earlier level's request. Chunking
+    // the whole depth-sorted list instead flattens the tree: any folder whose
+    // parent sat in the same chunk of 500 silently fell back to the pair root.
+    // For 29K folders: requests = depth levels + ~58 chunk requests.
     newFolders.sort((a, b) => a.split("/").length - b.split("/").length);
     const FOLDER_BATCH_SIZE = 500;
 
@@ -1444,55 +1448,79 @@ export class SyncEngine extends EventEmitter {
     }
 
     let foldersCreated = 0;
-    for (let i = 0; i < newFolders.length; i += FOLDER_BATCH_SIZE) {
-      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+    // Folders whose parent has no recorded ID even in level order (the server
+    // skipped the parent, e.g. over-length name). Created individually below —
+    // never batched with a guessed parent, which is what flattened trees.
+    const deferred: string[] = [];
+    let levelStart = 0;
+    while (levelStart < newFolders.length) {
+      const depth = newFolders[levelStart].split("/").length;
+      let levelEnd = levelStart;
+      while (levelEnd < newFolders.length && newFolders[levelEnd].split("/").length === depth) levelEnd++;
 
-      const chunk = newFolders.slice(i, i + FOLDER_BATCH_SIZE);
+      for (let i = levelStart; i < levelEnd; i += FOLDER_BATCH_SIZE) {
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
-      // Build the batch request: resolve parent IDs from already-created folders
-      const batchEntries: { name: string; parent_id: string | null }[] = [];
-      for (const relPath of chunk) {
-        const parts = relPath.split("/");
-        const folderName = parts[parts.length - 1];
-        const parentRelPath = parts.slice(0, -1).join("/");
-        const parentId = parentRelPath
-          ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
-          : pair.remoteFolderId;
-        batchEntries.push({ name: folderName, parent_id: parentId });
-      }
+        const chunk = newFolders.slice(i, Math.min(i + FOLDER_BATCH_SIZE, levelEnd));
 
-      try {
-        const resultMap = await this.client.createFoldersBatch(pair.workspaceId, batchEntries);
-        foldersCreated += chunk.length;
-        rt.statusText = `Creating folders... ${foldersCreated.toLocaleString()} of ${newFolders.length.toLocaleString()}`;
-        this.emitStatus();
+        // Build the batch request: resolve parent IDs from already-created folders
+        const batchEntries: { name: string; parent_id: string | null }[] = [];
+        const batchRelPaths: string[] = [];
+        for (const relPath of chunk) {
+          const parts = relPath.split("/");
+          const folderName = parts[parts.length - 1];
+          const parentRelPath = parts.slice(0, -1).join("/");
+          if (parentRelPath && !state.folders[parentRelPath]) {
+            deferred.push(relPath);
+            continue;
+          }
+          batchEntries.push({
+            name: folderName,
+            parent_id: parentRelPath ? state.folders[parentRelPath].remoteId : pair.remoteFolderId,
+          });
+          batchRelPaths.push(relPath);
+        }
+        if (batchEntries.length === 0) continue;
 
-        // Update local state with created folder IDs
-        for (let j = 0; j < chunk.length; j++) {
-          const relPath = chunk[j];
-          const entry = batchEntries[j];
-          const key = `${entry.parent_id ?? "null"}:${entry.name}`;
-          const folderId = resultMap.get(key);
-          if (folderId) {
-            state.folders[relPath] = {
-              remoteId: folderId,
-              remoteName: entry.name,
-              remoteParentId: entry.parent_id,
-              localPath: relPath,
-              syncedAt: Date.now(),
-            };
+        try {
+          const resultMap = await this.client.createFoldersBatch(pair.workspaceId, batchEntries);
+          foldersCreated += batchEntries.length;
+          rt.statusText = `Creating folders... ${foldersCreated.toLocaleString()} of ${newFolders.length.toLocaleString()}`;
+          this.emitStatus();
+
+          // Update local state with created folder IDs
+          for (let j = 0; j < batchEntries.length; j++) {
+            const relPath = batchRelPaths[j];
+            const entry = batchEntries[j];
+            const key = `${entry.parent_id ?? "null"}:${entry.name}`;
+            const folderId = resultMap.get(key);
+            if (folderId) {
+              state.folders[relPath] = {
+                remoteId: folderId,
+                remoteName: entry.name,
+                remoteParentId: entry.parent_id,
+                localPath: relPath,
+                syncedAt: Date.now(),
+              };
+            }
+          }
+        } catch (err: any) {
+          if (err.message === "SESSION_EXPIRED") throw err;
+          if (isRateLimitError(err)) throw err;
+          // Batch failed — fall back to individual creation for this chunk
+          console.error("[sync] Batch folder creation failed, falling back to individual:", err.message);
+          for (const relPath of batchRelPaths) {
+            if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+            await this.ensureRemoteFolder(rt, relPath);
           }
         }
-      } catch (err: any) {
-        if (err.message === "SESSION_EXPIRED") throw err;
-        if (isRateLimitError(err)) throw err;
-        // Batch failed — fall back to individual creation for this chunk
-        console.error("[sync] Batch folder creation failed, falling back to individual:", err.message);
-        for (const relPath of chunk) {
-          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
-          await this.ensureRemoteFolder(rt, relPath);
-        }
       }
+      levelStart = levelEnd;
+    }
+    for (const relPath of deferred) {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+      await this.ensureRemoteFolder(rt, relPath);
+      foldersCreated++;
     }
     if (foldersCreated > 0) {
       this.log(pair.id, `Created ${foldersCreated.toLocaleString()} folders on server`);

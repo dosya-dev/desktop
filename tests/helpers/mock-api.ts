@@ -26,10 +26,35 @@ export async function startMockServer(
   // server instance, so it resets per test.
   let uploadInitCount = 0;
 
+  // Test-only folder store: POST /api/folders and /api/folders/batch persist
+  // here so sync specs can assert the remote tree shape (parent linkage) via
+  // GET /__test/folders. Semantics mirror apps/api folders/batch.ts: parent_id
+  // is used literally (no in-batch placeholder resolution), an unresolvable
+  // parent drops the entry, and (parent_id, name) is find-or-create.
+  const folderStore = new Map<string, { id: string; name: string; parent_id: string | null; is_synced: number }>();
+  let folderSeq = 0;
+  const createFolderRecord = (name: string, parentId: string | null) => {
+    for (const f of folderStore.values()) {
+      if (f.name === name && f.parent_id === parentId) return { folder: f, created: false };
+    }
+    const folder = { id: `fld_${++folderSeq}`, name, parent_id: parentId, is_synced: 0 };
+    folderStore.set(folder.id, folder);
+    return { folder, created: true };
+  };
+  const readBody = (req: http.IncomingMessage): Promise<any> =>
+    new Promise((resolve) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        try { resolve(JSON.parse(raw || "{}")); } catch { resolve({}); }
+      });
+    });
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const path = url.pathname;
     const method = req.method || "GET";
+    if (process.env.MOCK_API_DEBUG) console.log(`[mock] ${method} ${path}`);
 
     // Credentialed CORS forbids the "*" wildcard — the renderer fetches with
     // credentials: "include" from a real origin (app://bundle) now that
@@ -42,10 +67,11 @@ export async function startMockServer(
       "Vary": "Origin",
     };
 
-    const json = (body: unknown, status = 200) => {
+    const json = (body: unknown, status = 200, extraHeaders: Record<string, string> = {}) => {
       res.writeHead(status, {
         "Content-Type": "application/json",
         ...corsHeaders,
+        ...extraHeaders,
       });
       res.end(JSON.stringify(body));
     };
@@ -59,7 +85,13 @@ export async function startMockServer(
     // ── Auth ──────────────────────────────────────────────
     if (path === "/api/me" && method === "GET") {
       if (!authenticated) return json({ ok: false, error: "Unauthorized" }, 401);
-      return json({ ok: true, user: data.mockUser });
+      // The main process mirrors dosya_session Set-Cookie headers into the
+      // Electron cookie jar (src/main/session.ts) — the sync engine's
+      // hasSession() login gate checks that jar, so authenticated fixtures
+      // must carry a session cookie, not just a 200 from /api/me.
+      return json({ ok: true, user: data.mockUser }, 200, {
+        "Set-Cookie": "dosya_session=mock-session; Path=/",
+      });
     }
     if (path === "/api/me" && method === "PATCH") return json({ ok: true, user: data.mockUser });
     if (path === "/api/me/sessions" && method === "GET") return json({ ok: true, sessions: data.mockSessions });
@@ -125,7 +157,38 @@ export async function startMockServer(
       return json({ ok: true, files: data.mockFiles, total: data.mockFiles.length, page: 1, per_page: 50, total_pages: 1 });
     }
     if ((path === "/api/files/folder" || path === "/api/folders") && method === "POST") {
-      return json({ ok: true, folder: { id: "new_folder_1", name: "New Folder", kind: "folder" } });
+      readBody(req).then((body) => {
+        const { folder } = createFolderRecord(body.name || "New Folder", body.parent_id ?? null);
+        json({ ok: true, folder: { ...folder, kind: "folder" } });
+      });
+      return;
+    }
+    if (/^\/api\/folders\/[^/]+\/sync$/.test(path) && method === "POST") {
+      readBody(req).then((body) => {
+        const folder = folderStore.get(path.split("/")[3]);
+        if (folder) folder.is_synced = body.enabled ? 1 : 0;
+        json({ ok: true });
+      });
+      return;
+    }
+    if (/^\/api\/folders\/[^/]+$/.test(path) && method === "GET") {
+      const folder = folderStore.get(path.split("/")[3]);
+      if (!folder) return json({ ok: false, error: "Not found" }, 404);
+      return json({ ok: true, folder });
+    }
+    if (path === "/api/folders/batch" && method === "POST") {
+      readBody(req).then((body) => {
+        const results: { name: string; parent_id: string | null; id: string; created: boolean }[] = [];
+        for (const entry of body.folders ?? []) {
+          const parentId = entry.parent_id ?? null;
+          // Prod drops entries whose parent_id doesn't resolve to an existing folder
+          if (parentId && !folderStore.has(parentId)) continue;
+          const { folder, created } = createFolderRecord(entry.name, parentId);
+          results.push({ name: folder.name, parent_id: folder.parent_id, id: folder.id, created });
+        }
+        json({ ok: true, folders: results });
+      });
+      return;
     }
     if (/^\/api\/files\/[^/]+$/.test(path) && method === "DELETE") return json({ ok: true });
     if (/^\/api\/files\/[^/]+$/.test(path) && method === "PATCH") return json({ ok: true });
@@ -200,6 +263,9 @@ export async function startMockServer(
     // ── Test-only instrumentation ───────────────────────────
     if (path === "/__test/upload-init-count" && method === "GET") {
       return json({ count: uploadInitCount });
+    }
+    if (path === "/__test/folders" && method === "GET") {
+      return json({ folders: [...folderStore.values()] });
     }
 
     // ── Regions ───────────────────────────────────────────
