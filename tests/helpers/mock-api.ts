@@ -5,7 +5,7 @@ export interface MockApiOptions {
   authenticated?: boolean;
   /** Workspaces returned by GET /api/workspaces (default: [mockWorkspace]). */
   workspaces?: unknown[];
-  /** Delay (ms) before the upload PUT responds — lets tests catch mid-flight state. */
+  /** Delay (ms) before the upload PUT responds - lets tests catch mid-flight state. */
   uploadDelayMs?: number;
 }
 
@@ -56,7 +56,7 @@ export async function startMockServer(
     const method = req.method || "GET";
     if (process.env.MOCK_API_DEBUG) console.log(`[mock] ${method} ${path}`);
 
-    // Credentialed CORS forbids the "*" wildcard — the renderer fetches with
+    // Credentialed CORS forbids the "*" wildcard - the renderer fetches with
     // credentials: "include" from a real origin (app://bundle) now that
     // webSecurity is enabled, so echo the request origin back instead.
     const corsHeaders = {
@@ -86,7 +86,7 @@ export async function startMockServer(
     if (path === "/api/me" && method === "GET") {
       if (!authenticated) return json({ ok: false, error: "Unauthorized" }, 401);
       // The main process mirrors dosya_session Set-Cookie headers into the
-      // Electron cookie jar (src/main/session.ts) — the sync engine's
+      // Electron cookie jar (src/main/session.ts) - the sync engine's
       // hasSession() login gate checks that jar, so authenticated fixtures
       // must carry a session cookie, not just a 200 from /api/me.
       return json({ ok: true, user: data.mockUser }, 200, {

@@ -18,7 +18,7 @@ export { expect } from "@playwright/test";
  * across separate `electron.launch()` calls, so `localStorage` (e.g. the
  * `dosya_active_workspace` key) from one Playwright run silently leaks into
  * the next. That only ever mattered once a fixture introduced more than one
- * workspace — a stale id could then resolve to a *different* real workspace
+ * workspace - a stale id could then resolve to a *different* real workspace
  * instead of falling back to `workspaces[0]`.
  */
 async function launchApp(apiBase: string) {
@@ -41,7 +41,7 @@ async function launchApp(apiBase: string) {
   };
 }
 
-/** Authenticated test — waits until the app auto-redirects to /dashboard */
+/** Authenticated test - waits until the app auto-redirects to /dashboard */
 export const test = base.extend<{ appPage: Page }>({
   appPage: async ({}, use) => {
     const mock = await startMockServer({ authenticated: true });
@@ -59,7 +59,7 @@ export const test = base.extend<{ appPage: Page }>({
 
     await use(page);
     // try/finally: a failed app.close() must not skip mock.close() or the
-    // temp userData dir cleanup — otherwise the mock server and/or the temp
+    // temp userData dir cleanup - otherwise the mock server and/or the temp
     // profile directory leak on every test that hits this path.
     try {
       await app.close();
@@ -73,7 +73,7 @@ export const test = base.extend<{ appPage: Page }>({
   },
 });
 
-/** Authenticated test with two workspaces and slow uploads — for switch-cancel specs. */
+/** Authenticated test with two workspaces and slow uploads - for switch-cancel specs. */
 export const multiWsTest = base.extend<{ appPage: Page }>({
   appPage: async ({}, use) => {
     const mock = await startMockServer({
@@ -102,7 +102,7 @@ export const multiWsTest = base.extend<{ appPage: Page }>({
   },
 });
 
-/** Guest test — /api/me returns 401, app stays on onboarding/login */
+/** Guest test - /api/me returns 401, app stays on onboarding/login */
 export const guestTest = base.extend<{ appPage: Page }>({
   appPage: async ({}, use) => {
     const mock = await startMockServer({ authenticated: false });

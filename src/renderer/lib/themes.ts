@@ -1,4 +1,4 @@
-// Theme registry — MUST stay in sync with apps/web/src/lib/themes.ts and the
+// Theme registry - MUST stay in sync with apps/web/src/lib/themes.ts and the
 // API allow-list in apps/api/src/lib/appearance.ts. Ported to the desktop app so
 // the same theme options offered on the web are available here too.
 

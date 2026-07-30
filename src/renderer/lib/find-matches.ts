@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/find-matches.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/find-matches.ts - keep in sync with the web copy.
 interface NodeEntry { node: Text; start: number; }
 
 function flatten(container: Node): { text: string; nodes: NodeEntry[] } {

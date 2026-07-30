@@ -18,7 +18,7 @@ applyTheme(readCache());
     await primeApiBase();
   } catch {
     root.innerHTML =
-      '<div style="display:flex;height:100vh;align-items:center;justify-content:center;font-family:system-ui;font-size:14px;color:#666">Failed to start — could not reach the main process. Please restart the app.</div>';
+      '<div style="display:flex;height:100vh;align-items:center;justify-content:center;font-family:system-ui;font-size:14px;color:#666">Failed to start - could not reach the main process. Please restart the app.</div>';
     return;
   }
   createRoot(root).render(

@@ -83,7 +83,7 @@ export function setupSession(apiBase: string): void {
     }
 
     // Capture dosya_session from Set-Cookie and store it manually.
-    // This is the primary mechanism for cookie storage — the cookies.on("changed")
+    // This is the primary mechanism for cookie storage - the cookies.on("changed")
     // listener below is a safety net for cookies that Chromium does store natively.
     if (details.url.startsWith(apiBase)) {
       const setCookies = responseHeaders["set-cookie"] || responseHeaders["Set-Cookie"] || [];

@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/text-detect.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/text-detect.ts - keep in sync with the web copy.
 import { extOf } from '@/lib/file-type';
 
 // Extensions that render as text (superset of the old helpers TEXT_EXTS).

@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/heic.worker.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/heic.worker.ts - keep in sync with the web copy.
 /// <reference lib="webworker" />
 
 import { decodeHeicToRgba } from './heic-decode';
@@ -14,7 +14,7 @@ async function toBitmap(blob: Blob): Promise<ImageBitmap> {
     // Safari decodes HEIC natively, so it never pays for the WASM at all.
     return await createImageBitmap(blob);
   } catch {
-    // Everyone else: ~1.4MB of real-WASM libheif, fetched only now — i.e.
+    // Everyone else: ~1.4MB of real-WASM libheif, fetched only now - i.e.
     // only when a HEIC is actually on screen in a browser that can't decode
     // it natively.
     const { data, width, height } = await decodeHeicToRgba(await blob.arrayBuffer());
@@ -22,7 +22,7 @@ async function toBitmap(blob: Blob): Promise<ImageBitmap> {
     // (not the wider ArrayBufferLike that a bare `Uint8ClampedArray` type
     // resolves to). `data` is always backed by a real ArrayBuffer (freshly
     // allocated in decodeHeicToRgba), so this is a type-only cast, not a
-    // copy — copying here would double peak transient memory for a full-size
+    // copy - copying here would double peak transient memory for a full-size
     // RGBA buffer (a 12MP photo is ~48MB) for no runtime benefit.
     const imageData = new ImageData(data as Uint8ClampedArray<ArrayBuffer>, width, height);
     // Can't drawImage() an ImageData directly; round-trip it through a bitmap.

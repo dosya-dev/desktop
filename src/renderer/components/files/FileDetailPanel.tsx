@@ -1,5 +1,5 @@
 // Ported from apps/web/src/components/file-detail-panel.tsx, merged with the
-// desktop app's existing comments tab — keep in sync with the web copy.
+// desktop app's existing comments tab - keep in sync with the web copy.
 import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -318,7 +318,7 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                       <PropRow label="Uploaded by" value={file.uploader_name ?? "Unknown"} />
                       <PropRow label="Region" value={regionLabel(file.region)} />
                       <PropRow label="Created" value={timeAgo(file.created_at)} />
-                      <PropRow label="Extension" value={file.extension || extOf(file.name).toUpperCase() || "—"} />
+                      <PropRow label="Extension" value={file.extension || extOf(file.name).toUpperCase() || "-"} />
                       {file.origin != null && <PropRow label="Origin" value={originLabel(file.origin)} />}
                     </div>
                   </div>

@@ -7,7 +7,7 @@ import logoSvg from "@/assets/logo.svg";
 
 export function TitleBar() {
   const [platform, setPlatform] = useState<string>("darwin");
-  // Read from the shared store via primitive selectors — this component now
+  // Read from the shared store via primitive selectors - this component now
   // only re-renders when one of these booleans actually flips, not on every
   // sync-status tick during a transfer.
   const syncPaused = useSyncPaused();

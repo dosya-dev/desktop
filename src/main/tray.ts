@@ -34,7 +34,7 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
       const transferCount = syncStatus.activeTransfers.length;
 
       // Icon + human label for a single pair. A paused folder is a deliberate
-      // stop, not a failure — it reads "Paused", never as an error.
+      // stop, not a failure - it reads "Paused", never as an error.
       const stateLabel = (status: string): { icon: string; text: string } => {
         switch (status) {
           case "idle": return { icon: "✓", text: "Synced" };
@@ -64,7 +64,7 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
       for (const pair of pairs) {
         const { icon, text } = stateLabel(pair.status);
         syncItems.push({
-          label: `  ${icon} ${pair.workspaceName}/${pair.remoteFolderName}${text ? ` — ${text}` : ""}`,
+          label: `  ${icon} ${pair.workspaceName}/${pair.remoteFolderName}${text ? ` - ${text}` : ""}`,
           enabled: false,
         });
       }
@@ -147,7 +147,7 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
     // Update tooltip
     if (syncStatus) {
       const syncing = syncStatus.activeTransfers.length;
-      tray?.setToolTip(syncing > 0 ? `dosya — Syncing ${syncing} file${syncing !== 1 ? "s" : ""}...` : "dosya — All synced");
+      tray?.setToolTip(syncing > 0 ? `dosya - Syncing ${syncing} file${syncing !== 1 ? "s" : ""}...` : "dosya - All synced");
     }
   }
 

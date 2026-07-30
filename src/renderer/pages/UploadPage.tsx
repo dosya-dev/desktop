@@ -182,7 +182,7 @@ export function UploadPage() {
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         // Uses the IPC-primed apiBase() (same pattern as FileBrowserPage's
-        // upload flow) — a bare relative path would resolve against the
+        // upload flow) - a bare relative path would resolve against the
         // renderer's own app://bundle origin and get swallowed by the
         // static-asset protocol handler instead of reaching the real API.
         xhr.open("PUT", `${apiBase()}/api/upload/${initRes.session_id}`);
@@ -212,7 +212,7 @@ export function UploadPage() {
         xhr.onerror = () => reject(new Error("Network error"));
         xhr.ontimeout = () => reject(new Error("Upload timed out"));
         // Aborting an XHR fires `abort` (not `error`), so settle the promise
-        // here — otherwise it hangs forever and the scheduler's in-flight
+        // here - otherwise it hangs forever and the scheduler's in-flight
         // counter never decrements for a cancelled/removed upload.
         xhr.onabort = () => reject(new Error("Cancelled"));
         xhr.timeout = 600_000; // 10 minutes
@@ -220,7 +220,7 @@ export function UploadPage() {
         // Cancel support
         controller.signal.addEventListener("abort", () => xhr.abort());
 
-        // Send the File object directly — XHR streams it, no arrayBuffer() needed.
+        // Send the File object directly - XHR streams it, no arrayBuffer() needed.
         // Memory: ~0 extra (browser/Electron handles File → stream internally)
         xhr.send(item.file);
       });
@@ -268,7 +268,7 @@ export function UploadPage() {
       uploadFile(next).finally(() => {
         inFlightCount.current--;
         claimedIds.current.delete(next.id);
-        // A slot freed up — try to start the next pending file. No shared
+        // A slot freed up - try to start the next pending file. No shared
         // "processing" guard is cleared here, so this can't race the loop above.
         processQueue();
       });
@@ -657,7 +657,7 @@ export function UploadPage() {
             <span className="font-medium">Secure upload</span>
           </div>
           <p>Encrypted in transit with TLS 1.3</p>
-          <p className="mt-1">No egress fees — ever</p>
+          <p className="mt-1">No egress fees - ever</p>
         </div>
       </div>
 

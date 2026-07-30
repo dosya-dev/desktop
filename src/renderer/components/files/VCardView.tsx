@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/vcard-viewer.tsx (read-only) — keep in sync with the web copy.
+// Ported from apps/web/src/components/vcard-viewer.tsx (read-only) - keep in sync with the web copy.
 // The desktop viewer is read-only: ContactEditor/EditList and the save path are
 // intentionally absent.
 import { useEffect, useMemo, useState } from "react";

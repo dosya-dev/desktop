@@ -68,7 +68,7 @@ export function CreateWorkspacePage() {
 
   return (
     <div className="flex h-screen">
-      {/* Left — form */}
+      {/* Left - form */}
       <div className="flex w-[40%] flex-col justify-center bg-[var(--color-bg)] px-12">
         <div className="max-w-sm">
           <div className="mb-8 flex items-center gap-2.5">
@@ -166,7 +166,7 @@ export function CreateWorkspacePage() {
         </div>
       </div>
 
-      {/* Right — features grid */}
+      {/* Right - features grid */}
       <div className="bg-grid flex w-[60%] flex-col items-center justify-center bg-[var(--color-bg-secondary)] p-12">
         <div className="max-w-md">
           <h2 className="mb-2 text-center text-xl font-bold text-[var(--color-text)]">

@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/vcard.ts (parse-only subset) — keep in sync with the web copy.
+// Ported from apps/web/src/lib/vcard.ts (parse-only subset) - keep in sync with the web copy.
 // The desktop viewer is read-only, so the serializer/editor half
 // (serializeVCards, applyEdits, escapeText, foldLine) is intentionally absent.
 

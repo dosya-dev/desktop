@@ -530,7 +530,7 @@ function WorkspaceIconUpload({
             </button>
           )}
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-            PNG, JPEG, WebP or GIF — max 2 MB
+            PNG, JPEG, WebP or GIF - max 2 MB
           </p>
         </div>
       </div>

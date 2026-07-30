@@ -1,4 +1,4 @@
-// File type icon SVGs — matches the web app's icon set exactly
+// File type icon SVGs - matches the web app's icon set exactly
 
 const icons = import.meta.glob("../../assets/file-icons/*.svg", {
   eager: true,

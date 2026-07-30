@@ -145,7 +145,7 @@ export function Sidebar() {
         overflow: "visible",
       }}
     >
-      {/* Collapse toggle — sits on the sidebar/content border, near the user profile */}
+      {/* Collapse toggle - sits on the sidebar/content border, near the user profile */}
       <button
         onClick={() => setCollapsed(!collapsed)}
         className="absolute z-30 flex h-6 w-6 items-center justify-center rounded-full border bg-[var(--color-bg)] text-[var(--color-text-muted)] shadow-sm hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"

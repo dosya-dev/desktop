@@ -88,7 +88,7 @@ export function registerIpcHandlers(apiBase: string): void {
       const ready = cookies.some((c) => c.sameSite === "no_restriction");
       if (ready) return;
 
-      // Cookie exists but hasn't been fixed yet — apply the fix directly
+      // Cookie exists but hasn't been fixed yet - apply the fix directly
       // instead of waiting for the cookies.on("changed") listener.
       const unfixed = cookies.find((c) => c.sameSite !== "no_restriction");
       if (unfixed) {
@@ -104,7 +104,7 @@ export function registerIpcHandlers(apiBase: string): void {
           });
           return;
         } catch {
-          // set() failed — fall through and retry on next iteration
+          // set() failed - fall through and retry on next iteration
         }
       }
 

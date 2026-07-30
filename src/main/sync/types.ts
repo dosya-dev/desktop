@@ -1,11 +1,11 @@
 // ── Persisted Configuration ─────────────────────────────────────────
 
 export type SyncMode =
-  | "two-way"        // Full Sync — mirror both directions
-  | "push"           // Push to Cloud — local changes → cloud, ignore cloud changes
-  | "push-safe"      // Protect & Upload — upload only, never delete on cloud
-  | "pull"           // Pull from Cloud — cloud changes → local, ignore local changes
-  | "pull-safe";     // Save to Device — download only, never delete locally
+  | "two-way"        // Full Sync - mirror both directions
+  | "push"           // Push to Cloud - local changes → cloud, ignore cloud changes
+  | "push-safe"      // Protect & Upload - upload only, never delete on cloud
+  | "pull"           // Pull from Cloud - cloud changes → local, ignore local changes
+  | "pull-safe";     // Save to Device - download only, never delete locally
 
 export interface SyncPair {
   id: string;

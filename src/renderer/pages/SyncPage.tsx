@@ -72,7 +72,7 @@ export function SyncPage() {
 
   // Tick every second while anything is syncing so the elapsed-time readouts
   // advance even when the engine emits no status updates (a slow or stuck
-  // phase) — that ticking clock is what tells the user it's alive, not frozen.
+  // phase) - that ticking clock is what tells the user it's alive, not frozen.
   const [nowTick, setNowTick] = useState(() => Date.now());
   const anySyncing = (status?.pairs ?? EMPTY_PAIRS).some((p) => p.status === "syncing");
   useEffect(() => {
@@ -88,7 +88,7 @@ export function SyncPage() {
   const allConflicts = (status?.unresolvedConflicts?.length ? status.unresolvedConflicts : conflicts) ?? EMPTY_CONFLICTS;
 
   // Show only data belonging to the active workspace.
-  // Sync runs in the background for all workspaces — this is just a UI filter.
+  // Sync runs in the background for all workspaces - this is just a UI filter.
   // Memoized on the underlying store data (stable refs when status is unchanged)
   // so unrelated re-renders (typing in a form, switching tabs) don't rebuild
   // these arrays or re-run the syncProgress aggregation below.
@@ -161,7 +161,7 @@ export function SyncPage() {
     }
 
     // Check if any pair is in a preparatory phase (connecting, comparing, scanning, hashing, creating folders).
-    // Show the indeterminate scanning banner for all of these — not just phase === "scanning".
+    // Show the indeterminate scanning banner for all of these - not just phase === "scanning".
     const hasStatusText = syncing.some(p => p.statusText);
     const isTransferring = syncing.some(p => p.phase === "transferring");
     const scanning = !isTransferring && (syncing.some(p => p.phase === "scanning") || hasStatusText);
@@ -258,7 +258,7 @@ export function SyncPage() {
                   {formatBytes(syncProgress.completedBytes)} of {formatBytes(syncProgress.totalBytes)}
                 </p>
               )}
-              {/* Active transfers — show what's currently uploading/downloading */}
+              {/* Active transfers - show what's currently uploading/downloading */}
               {transfers.length > 0 && (
                 <div className="mt-2 space-y-1">
                   {transfers.slice(0, 5).map((t, i) => {
@@ -617,7 +617,7 @@ function SyncPairRow({
     "rate-limited": { icon: <Clock size={12} />, color: "#f59e0b", label: "Waiting", dot: "bg-yellow-500" },
   };
 
-  // Unknown/transient status falls back to a neutral state, NOT "Error" — a
+  // Unknown/transient status falls back to a neutral state, NOT "Error" - a
   // status we don't recognize is not a failure and shouldn't be alarmed as one.
   const s = statusConfig[pair.status] ?? { icon: <Clock size={12} />, color: "var(--color-text-muted)", label: "Idle", dot: "bg-gray-400" };
 
@@ -730,7 +730,7 @@ function SyncPairRow({
 
         {/* Last synced */}
         <td className="py-2.5 px-2 text-xs text-[var(--color-text-muted)] whitespace-nowrap">
-          {pair.lastSyncedAt ? formatRelative(pair.lastSyncedAt) : "—"}
+          {pair.lastSyncedAt ? formatRelative(pair.lastSyncedAt) : "-"}
         </td>
 
         {/* Actions */}
@@ -864,7 +864,7 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
   }, [logs.length]);
 
   // Live "what's happening right now" header. Ticks every second while a pair
-  // is syncing so the elapsed clock advances even during a silent phase — the
+  // is syncing so the elapsed clock advances even during a silent phase - the
   // difference between "working on something big" and "wedged" is now visible.
   const syncingPairs = pairs.filter((p) => p.status === "syncing");
   const [now, setNow] = useState(() => Date.now());
@@ -1005,7 +1005,7 @@ function SyncSettings() {
 
   const snooze = async (ms: number, label: string) => {
     await window.electronAPI.pauseAllSyncFor?.(ms);
-    toast.success(`Sync paused for ${label} — will resume automatically`);
+    toast.success(`Sync paused for ${label} - will resume automatically`);
   };
 
   const numCls = "w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]";
@@ -1276,7 +1276,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     />
                   ))}
                   {folders.length === 0 && (
-                    <p className="py-3 text-center text-xs text-[var(--color-text-muted)]">No folders yet — a new one will be created</p>
+                    <p className="py-3 text-center text-xs text-[var(--color-text-muted)]">No folders yet - a new one will be created</p>
                   )}
                 </div>
               </div>
@@ -1443,7 +1443,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
               {/* Pattern list */}
               <div className="max-h-48 overflow-y-auto rounded-lg border p-1" style={{ borderColor: "var(--color-border)" }}>
                 {excludedPatterns.length === 0 ? (
-                  <p className="py-4 text-center text-xs text-[var(--color-text-muted)]">No exclusions — all files will be synced</p>
+                  <p className="py-4 text-center text-xs text-[var(--color-text-muted)]">No exclusions - all files will be synced</p>
                 ) : (
                   <div className="space-y-0.5">
                     {excludedPatterns.map((p) => (

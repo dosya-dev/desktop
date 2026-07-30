@@ -14,7 +14,7 @@ import { homedir } from "os";
 
 const WORKFLOW_NAME = "Sync with Dosya.workflow";
 // v2: added the required Contents/Info.plist (NSServices). v1 installs shipped
-// only document.wflow, so macOS never registered the Quick Action — bumping the
+// only document.wflow, so macOS never registered the Quick Action - bumping the
 // version forces those broken installs to be reinstalled with the plist.
 const WORKFLOW_VERSION = "2";
 
@@ -47,7 +47,7 @@ export function installQuickAction(): void {
     writeFileSync(join(contentsDir, "Info.plist"), buildInfoPlist());
     writeFileSync(versionFile, WORKFLOW_VERSION);
     // Refresh the Services registry so the action appears without a re-login
-    // (best-effort — pbs may not exist / may fail silently on some setups).
+    // (best-effort - pbs may not exist / may fail silently on some setups).
     execFile("/System/Library/CoreServices/pbs", ["-update"], () => {});
     console.log("[services] Installed Quick Action: Sync with Dosya");
   } catch (err) {

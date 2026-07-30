@@ -26,7 +26,7 @@ test.describe("Onboarding", () => {
     await nextBtn.click();
     await expect(appPage.getByRole("heading", { name: "Secure by default" })).toBeVisible();
 
-    // Step 5 — last step, button changes to "Get Started"
+    // Step 5 - last step, button changes to "Get Started"
     await nextBtn.click();
     await expect(appPage.getByRole("heading", { name: "Stay in the loop" })).toBeVisible();
     await expect(

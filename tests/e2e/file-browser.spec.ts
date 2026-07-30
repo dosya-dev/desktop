@@ -6,7 +6,7 @@ test.describe("File Browser", () => {
 
     await expect(appPage.getByText("Project Report.pdf")).toBeVisible();
     await expect(appPage.getByText("Photo.png")).toBeVisible();
-    // "Documents" matches both filter chip and folder name — use the table row
+    // "Documents" matches both filter chip and folder name - use the table row
     await expect(appPage.getByRole("table").getByText("Documents")).toBeVisible();
   });
 

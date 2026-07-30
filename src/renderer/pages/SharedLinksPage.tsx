@@ -198,7 +198,7 @@ export function SharedLinksPage() {
                       </div>
                     </td>
                     <td className="py-3 text-xs text-[var(--color-text-muted)]">
-                      {link.region || "—"}
+                      {link.region || "-"}
                     </td>
                     <td className="py-3 text-[var(--color-text-muted)]">
                       {link.view_count}

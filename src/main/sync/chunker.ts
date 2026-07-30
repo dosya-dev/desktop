@@ -4,15 +4,15 @@
  * Splits a file into variable-length chunks at boundaries determined by the
  * *content* (a rolling gear hash), not fixed offsets. The key property: when
  * you insert or remove bytes in the middle of a file, only the chunks around
- * the edit change — every other chunk keeps the same hash and can be skipped on
+ * the edit change - every other chunk keeps the same hash and can be skipped on
  * upload. That's what makes delta sync possible.
  *
  * This module is pure and deterministic (fixed gear table, no RNG), so its
- * output is stable across machines — a prerequisite for cross-client dedup.
+ * output is stable across machines - a prerequisite for cross-client dedup.
  * It is the client half of feature #3 in docs/desktop-native-features-spec.md;
  * the server chunk store is a separate piece.
  *
- * Memory: `chunkFile` streams — it holds at most one in-flight chunk
+ * Memory: `chunkFile` streams - it holds at most one in-flight chunk
  * (≤ maxSize) plus the current read buffer, never the whole file.
  */
 
@@ -25,7 +25,7 @@ export interface Chunk {
   offset: number;
   /** Length of this chunk in bytes. */
   size: number;
-  /** Strong content hash (sha256, hex) — the chunk's identity for dedup. */
+  /** Strong content hash (sha256, hex) - the chunk's identity for dedup. */
   hash: string;
 }
 
@@ -47,7 +47,7 @@ const DEFAULTS = { min: 256 * 1024, avg: 1024 * 1024, max: 4 * 1024 * 1024 };
 
 /**
  * Deterministic 256-entry gear table derived from a fixed seed (xorshift32),
- * so chunk boundaries are identical everywhere — no Math.random.
+ * so chunk boundaries are identical everywhere - no Math.random.
  */
 const GEAR: Uint32Array = (() => {
   const g = new Uint32Array(256);
@@ -154,7 +154,7 @@ export function chunkFile(path: string, opts?: ChunkOptions): Promise<Chunk[]> {
 }
 
 export interface ChunkDiff {
-  /** Chunks the server doesn't have yet — the only bytes that need uploading. */
+  /** Chunks the server doesn't have yet - the only bytes that need uploading. */
   toUpload: Chunk[];
   uploadBytes: number;
   reusedBytes: number;
@@ -177,9 +177,9 @@ export function diffChunks(known: Set<string>, chunks: Chunk[]): ChunkDiff {
 }
 
 export interface FileDelta {
-  /** Full ordered chunk list of the new file — this becomes the new version's manifest. */
+  /** Full ordered chunk list of the new file - this becomes the new version's manifest. */
   manifest: Chunk[];
-  /** Chunks whose hash the server/previous-version doesn't have — the only bytes to send. */
+  /** Chunks whose hash the server/previous-version doesn't have - the only bytes to send. */
   toUpload: Chunk[];
   uploadBytes: number;
   reusedBytes: number;

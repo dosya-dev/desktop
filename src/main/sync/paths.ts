@@ -2,17 +2,17 @@
  * Shared path utilities for the sync engine.
  *
  * Three concerns, one place:
- *  1. Unicode normalization — macOS returns filenames as NFD, most other
+ *  1. Unicode normalization - macOS returns filenames as NFD, most other
  *     systems (and our server) store NFC. Comparing raw strings makes the
  *     same file look different → re-upload loops. We normalize every path
  *     we derive from disk or from the server to NFC before comparing.
- *  2. Case-insensitive filesystems — macOS (default) and Windows treat
+ *  2. Case-insensitive filesystems - macOS (default) and Windows treat
  *     "Foo.txt" and "foo.txt" as the same file. Our in-memory indexes must
  *     collapse them to a single key so we don't clobber or duplicate.
- *  3. Windows long paths — paths over 259 chars need the "\\?\" prefix or
+ *  3. Windows long paths - paths over 259 chars need the "\\?\" prefix or
  *     fs calls throw ENOENT/ENAMETOOLONG.
  *
- * Keys are computed lazily and never stored in place of the real path — the
+ * Keys are computed lazily and never stored in place of the real path - the
  * real (case- and NFC-preserving) path is always what we write to disk and
  * persist in state. Keys exist only for map lookups, so this adds no
  * meaningful memory (one transient string per lookup, GC'd immediately).
@@ -40,7 +40,7 @@ export function normalizeRel(relPath: string): string {
  * Compute the lookup key for a relative path. On case-insensitive
  * filesystems this folds case so that case-only variants collapse to one
  * entry (matching how the OS treats them on disk). The real path is kept
- * separately in the record — this is only for indexing.
+ * separately in the record - this is only for indexing.
  */
 export function pathKey(relPath: string): string {
   const nfc = relPath.normalize("NFC");

@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/heic-pool.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/heic-pool.ts - keep in sync with the web copy.
 /** Minimal surface of a Worker that the pool needs. Lets tests inject a fake. */
 export interface PoolWorker {
   postMessage(msg: unknown): void;
@@ -42,7 +42,7 @@ interface PoolEntry {
  * workers so they actually run in parallel.
  *
  * Worker-free and Worker-construction-free by design (the constructor is
- * injected via `spawn`) so this stays importable — and testable — under
+ * injected via `spawn`) so this stays importable - and testable - under
  * jsdom, which cannot construct a real Worker.
  */
 export function createHeicPool(opts: { spawn: () => PoolWorker; size: number }): HeicPool {
@@ -105,7 +105,7 @@ export function createHeicPool(opts: { spawn: () => PoolWorker; size: number }):
           worker = spawn();
         } catch (err) {
           // Worker construction failed. Reject the head job rather than leaving
-          // it stranded in the queue — a stranded job would poison every future
+          // it stranded in the queue - a stranded job would poison every future
           // pump() (re-throwing here) and never settle its caller's promise.
           const job = queue.shift()!;
           job.reject(err instanceof Error ? err : new Error('HEIC worker spawn failed'));

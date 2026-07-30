@@ -14,12 +14,12 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
 
   // Pending OAuth teardown (IPC listener + 2-min timeout). Held in a ref so we
-  // can tear it down when the flow completes AND if the page unmounts first —
+  // can tear it down when the flow completes AND if the page unmounts first -
   // otherwise the timer would fire on an unmounted component.
   const oauthCleanup = useRef<(() => void) | null>(null);
   useEffect(() => () => oauthCleanup.current?.(), []);
 
-  // Already logged in — skip login page and go straight to dashboard
+  // Already logged in - skip login page and go straight to dashboard
   if (!authLoading && isAuthenticated) {
     return <Navigate to="/dashboard" replace />;
   }
@@ -45,7 +45,7 @@ export function LoginPage() {
     setError("");
     setLoading(true);
 
-    // Open the system browser for OAuth — user is already logged into Google/GitHub there.
+    // Open the system browser for OAuth - user is already logged into Google/GitHub there.
     // beginOAuth mints a single-use nonce in the main process and returns the
     // provider URL carrying it; the dosya://auth/callback is only accepted if it
     // echoes that nonce back. The server redirects to dosya://auth/callback?token=…&state=…

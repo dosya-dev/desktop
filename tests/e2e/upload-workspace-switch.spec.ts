@@ -25,7 +25,7 @@ test.describe("Upload queue vs workspace switch", () => {
   test("switching workspace with more items than MAX_CONCURRENT starts no further uploads for the old workspace", async ({ appPage }) => {
     await navigateTo(appPage, "/upload");
 
-    // MAX_CONCURRENT is 3 — enqueue 5 so 3 start "uploading" (stalled 8s by
+    // MAX_CONCURRENT is 3 - enqueue 5 so 3 start "uploading" (stalled 8s by
     // the mock PUT) and 2 sit "pending" behind them. This is the queue depth
     // where a scheduler re-entry (each aborted upload's `.finally()` calling
     // `processQueue()` again) can resurrect a sibling pending item into the
@@ -57,11 +57,11 @@ test.describe("Upload queue vs workspace switch", () => {
     await expect(appPage.getByText("race-0.bin")).toBeHidden({ timeout: 10_000 });
 
     // No further /api/upload/init calls should ever happen for the old
-    // workspace's 2 leftover "pending" items — the count must stay at
+    // workspace's 2 leftover "pending" items - the count must stay at
     // exactly the 3 that were already in flight *before* the switch. (A
     // baseline taken only *after* the switch/toast is too late: the
     // resurrection races the toast itself, so it can already have happened
-    // by the time we'd read a "right after" baseline — asserting against
+    // by the time we'd read a "right after" baseline - asserting against
     // the known pre-switch value of 3 is what actually catches the bug.)
     await appPage.waitForTimeout(3_000);
     expect(await readInitCount()).toBe(3);

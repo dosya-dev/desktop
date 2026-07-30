@@ -1,4 +1,4 @@
-// Patch fs to handle EMFILE (too many open files) gracefully — must run before anything touches fs.
+// Patch fs to handle EMFILE (too many open files) gracefully - must run before anything touches fs.
 import { gracefulify } from "graceful-fs";
 import fs from "fs";
 gracefulify(fs);
@@ -29,7 +29,7 @@ import { installQuickAction } from "./macos-services";
 // After an uncaught exception the process is in an undefined state.
 // Log the error and exit to avoid silent data corruption.
 process.on("uncaughtException", (err) => {
-  console.error("[crash] Uncaught exception — exiting:", err);
+  console.error("[crash] Uncaught exception - exiting:", err);
   setTimeout(() => app.exit(1), 2000);
 });
 process.on("unhandledRejection", (reason) => {
@@ -44,7 +44,7 @@ const API_BASE = process.env.API_BASE || (app.isPackaged ? "https://api.dosya.de
 // ── Custom renderer scheme (packaged builds) ───────────────────────
 // Packaged builds serve the renderer from app://bundle/ instead of file://.
 // A registered "standard" scheme gives the renderer a real, stable origin
-// (app://bundle) — which is what lets us run with webSecurity ENABLED and do
+// (app://bundle) - which is what lets us run with webSecurity ENABLED and do
 // credentialed CORS to the API. file:// serializes to the "null" origin, which
 // can't do credentialed CORS, which is the whole reason webSecurity was off.
 const APP_SCHEME = "app";
@@ -99,7 +99,7 @@ function handleDosyaUrl(url: string): void {
   try {
     const parsed = new URL(url);
 
-    // dosya://auth/callback?token=xxx&state=<nonce> — OAuth login from system browser
+    // dosya://auth/callback?token=xxx&state=<nonce> - OAuth login from system browser
     if (parsed.hostname === "auth" || parsed.pathname === "//auth/callback") {
       const token = parsed.searchParams.get("token");
       if (!token) return;
@@ -137,7 +137,7 @@ function handleDosyaUrl(url: string): void {
       return;
     }
 
-    // dosya://sync?path=/Users/john/Documents — sync folder request
+    // dosya://sync?path=/Users/john/Documents - sync folder request
     if (parsed.hostname === "sync" || parsed.pathname === "//sync") {
       const folderPath = parsed.searchParams.get("path");
       if (!folderPath) return;
@@ -192,7 +192,7 @@ function createWindow(): void {
       sandbox: true,
       // webSecurity ENABLED. Credentialed cross-origin requests to the API work
       // because the renderer now has a real origin (app://bundle in packaged
-      // builds, http://localhost:5174 in dev) that the API allows via CORS —
+      // builds, http://localhost:5174 in dev) that the API allows via CORS -
       // rather than the "null" file:// origin that forced webSecurity off before.
       webSecurity: true,
       // Chromium's built-in PDF viewer is plugin-gated in Electron; the in-app
@@ -205,7 +205,7 @@ function createWindow(): void {
     mainWindow?.show();
   });
 
-  // Hide window instead of closing — app keeps running in tray
+  // Hide window instead of closing - app keeps running in tray
   mainWindow.on("close", (e) => {
     if (!(app as any).isQuitting) {
       e.preventDefault();
@@ -216,8 +216,8 @@ function createWindow(): void {
   // Restrict navigation to the app's own URLs (prevents XSS escalation).
   // Mirrors the loadURL branch below exactly: only the Vite dev server case
   // (!app.isPackaged && ELECTRON_RENDERER_URL set) gets the localhost origin;
-  // every other case — packaged builds AND the built-but-unpackaged case (test
-  // harness / `electron-vite preview`) — loads from app://bundle, so a bare
+  // every other case - packaged builds AND the built-but-unpackaged case (test
+  // harness / `electron-vite preview`) - loads from app://bundle, so a bare
   // `app.isPackaged` check on this side used to wrongly block reload() there.
   mainWindow.webContents.on("will-navigate", (event, url) => {
     const devServerUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined;
@@ -310,7 +310,7 @@ if (!gotTheLock) {
       });
     }
 
-    // Initialize sync engine (non-critical — app works without it).
+    // Initialize sync engine (non-critical - app works without it).
     // The engine checks for a valid session cookie before starting.
     // If the user is not logged in, it skips and waits for a login event.
     try {
@@ -344,11 +344,11 @@ if (!gotTheLock) {
 
       if (removed) {
         // Logout: stop the sync engine
-        console.log("[sync] Session cookie removed — stopping sync engine");
+        console.log("[sync] Session cookie removed - stopping sync engine");
         syncEngine.stop().catch(() => {});
       } else if (!syncEngine.isRunning()) {
         // Login: start the sync engine
-        console.log("[sync] Session cookie set — starting sync engine");
+        console.log("[sync] Session cookie set - starting sync engine");
         syncEngine.start().catch((err) => {
           console.error("[sync] Failed to start after login:", err);
         });
@@ -356,7 +356,7 @@ if (!gotTheLock) {
     });
 
     // Battery-aware pausing: when "pause on battery" is enabled, pause on
-    // unplug and resume on plug-in — but only auto-resume what WE auto-paused,
+    // unplug and resume on plug-in - but only auto-resume what WE auto-paused,
     // so a manual pause is never clobbered.
     let batteryPaused = false;
     const applyBatteryState = async (onBattery: boolean) => {
@@ -389,7 +389,7 @@ if (!gotTheLock) {
         await syncEngine.resumeAll().catch(() => {});
       }
       // The power source may have changed during sleep (e.g. unplugged), and
-      // on-battery/on-ac only fire on live transitions — so reconcile battery
+      // on-battery/on-ac only fire on live transitions - so reconcile battery
       // state explicitly on wake. This pauses if we woke on battery with
       // "pause on battery" enabled, and resumes if we were battery-paused and
       // woke on AC. Without this, waking on battery leaves sync running against
@@ -412,7 +412,7 @@ if (!gotTheLock) {
     });
   });
 
-  // Don't quit when all windows are closed — keep running in tray for sync.
+  // Don't quit when all windows are closed - keep running in tray for sync.
   // Exception: on Linux without a system tray (e.g. GNOME 40+), the user
   // has no way to reopen the app, so we quit instead.
   app.on("window-all-closed", () => {
@@ -421,7 +421,7 @@ if (!gotTheLock) {
       (app as any).isQuitting = true;
       app.quit();
     }
-    // macOS/Windows: do nothing — app stays alive in tray
+    // macOS/Windows: do nothing - app stays alive in tray
   });
 
   // Clean shutdown: prevent quit until sync state is persisted.
@@ -431,7 +431,7 @@ if (!gotTheLock) {
 
     if (!syncEngine || isShuttingDown) return;
 
-    // Prevent the default quit — we need to await async cleanup
+    // Prevent the default quit - we need to await async cleanup
     e.preventDefault();
     isShuttingDown = true;
 

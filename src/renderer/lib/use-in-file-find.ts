@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/use-in-file-find.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/use-in-file-find.ts - keep in sync with the web copy.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { collectMatchRanges } from '@/lib/find-matches';
 

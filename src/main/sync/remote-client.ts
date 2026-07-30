@@ -80,7 +80,7 @@ class ThrottleStream extends Transform {
 
 // Persistent HTTP agents with keep-alive and a bounded socket pool.
 // Without these, each request opens a new TCP+TLS handshake (~100ms).
-// With keep-alive, connections are reused — critical when uploading
+// With keep-alive, connections are reused - critical when uploading
 // 38K files (saves ~38K x 100ms = ~63 min of handshake overhead).
 // maxSockets is the real concurrency ceiling per host and the main RAM lever
 // (each socket ~= one in-flight stream). Kept modest on purpose; the engine's
@@ -160,7 +160,7 @@ function debugLog(...args: unknown[]): void {
 
 const RETRY_DELAYS = [1000, 3000, 8000]; // exponential-ish backoff
 // Backstop for snapshot pagination. At a typical ~1000 files/page this covers
-// tens of millions of files — far beyond any real workspace — while still
+// tens of millions of files - far beyond any real workspace - while still
 // stopping a misbehaving cursor from looping forever.
 const MAX_SNAPSHOT_PAGES = 50_000;
 const NON_RETRYABLE = new Set(["SESSION_EXPIRED", "RATE_LIMITED"]);
@@ -234,7 +234,7 @@ export class RemoteClient {
     const t = new ThrottleStream(bucket);
     src.on("error", (err) => t.destroy(err));
     // If the source is destroyed prematurely (aborted upload, socket reset)
-    // without a normal "end", pipe() won't tear down the throttle — do it here
+    // without a normal "end", pipe() won't tear down the throttle - do it here
     // so it doesn't linger. On a clean end (readableEnded) leave it alone so
     // buffered bytes still flush to the destination.
     src.on("close", () => { if (!src.readableEnded && !t.destroyed) t.destroy(); });
@@ -292,7 +292,7 @@ export class RemoteClient {
     if (!isNaN(whenMs)) {
       const delta = whenMs - Date.now();
       if (delta > 0) return delta;
-      return 0; // date already passed — retry immediately
+      return 0; // date already passed - retry immediately
     }
     return 60_000;
   }
@@ -317,7 +317,7 @@ export class RemoteClient {
   }
 
   private async getSessionCookie(): Promise<string | null> {
-    // Return cached cookie if still fresh — avoids IPC round-trip per request.
+    // Return cached cookie if still fresh - avoids IPC round-trip per request.
     // For a 10K-file sync this saves ~30K–40K async IPC calls.
     if (this.cachedCookie && Date.now() - this.cookieCachedAt < RemoteClient.COOKIE_CACHE_TTL) {
       return this.cachedCookie;
@@ -371,7 +371,7 @@ export class RemoteClient {
     const lib = isHttps ? https : http;
 
     // Resolve system proxy (supports corporate proxies, PAC files, etc.) and
-    // build the actual agent for the request — on proxy-mandatory networks a
+    // build the actual agent for the request - on proxy-mandatory networks a
     // direct agent silently fails, so the resolved proxy MUST be applied.
     const agent = await resolveAgent(fullUrl);
 
@@ -414,7 +414,7 @@ export class RemoteClient {
             const rHeaders: Record<string, string> = {};
             if (isSameHost) rHeaders.Cookie = `dosya_session=${sessionCookie}`;
 
-            // Redirect target may be a different host (e.g. R2) — resolve its
+            // Redirect target may be a different host (e.g. R2) - resolve its
             // proxy independently rather than reusing the origin's agent.
             resolveAgent(redirectUrl).then((rAgent) => {
               const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout, agent: rAgent }, (rRes) => {
@@ -496,12 +496,12 @@ export class RemoteClient {
         // Update rate budget from every response
         this.updateBudget(res.headers);
 
-        // Handle 429 — throw RateLimitError with Retry-After info
+        // Handle 429 - throw RateLimitError with Retry-After info
         if (res.status === 429) {
           throw this.createRateLimitError(res.headers);
         }
 
-        // Don't retry on client errors (4xx) — they won't change
+        // Don't retry on client errors (4xx) - they won't change
         if (res.status >= 400 && res.status < 500) return res;
 
         // Retry on server errors (5xx)
@@ -561,7 +561,7 @@ export class RemoteClient {
         return total;
       } catch (err: any) {
         lastErr = err;
-        // DON'T delete tmp file on retryable errors — we'll resume from it
+        // DON'T delete tmp file on retryable errors - we'll resume from it
         if (err instanceof RateLimitError) throw err;
         if (NON_RETRYABLE.has(err.message)) {
           await fsUnlink(tmpPath).catch(() => {});
@@ -573,7 +573,7 @@ export class RemoteClient {
           debugLog("[sync] Download retry in", Math.round(delay), "ms:", err.message);
           await sleep(delay);
         } else {
-          // Final attempt failed — keep tmp file for next sync cycle resume
+          // Final attempt failed - keep tmp file for next sync cycle resume
         }
       }
     }
@@ -627,16 +627,16 @@ export class RemoteClient {
             if (validator) {
               resumeFrom = tmpStat.size;
             } else {
-              // No validator — cannot prove the partial matches the current
+              // No validator - cannot prove the partial matches the current
               // remote content. Discard and start fresh.
               await fsUnlink(tmpPath).catch(() => {});
             }
           } else if (tmpStat.size >= expectedSize && expectedSize > 0) {
-            // A "complete" tmp we can't verify by content — re-download to be safe.
+            // A "complete" tmp we can't verify by content - re-download to be safe.
             await fsUnlink(tmpPath).catch(() => {});
             await fsUnlink(metaPath).catch(() => {});
           }
-        } catch { /* no tmp file — start from scratch */ }
+        } catch { /* no tmp file - start from scratch */ }
 
         const makeRequest = (url: string, redirectCount: number): void => {
           if (redirectCount > 5) { reject(new Error("Too many redirects")); return; }
@@ -673,11 +673,11 @@ export class RemoteClient {
               return;
             }
 
-            // 416 — the partial is unusable (past end / range rejected). Reset and restart.
+            // 416 - the partial is unusable (past end / range rejected). Reset and restart.
             if (status === 416) {
               res.resume();
               fsUnlink(tmpPath).catch(() => {}).then(() => fsUnlink(metaPath).catch(() => {})).then(() => {
-                reject(new Error("Range not satisfiable — restarting download"));
+                reject(new Error("Range not satisfiable - restarting download"));
               });
               return;
             }
@@ -701,7 +701,7 @@ export class RemoteClient {
               if (!m || !startOk || !totalOk) {
                 res.resume();
                 fsUnlink(tmpPath).catch(() => {}).then(() => fsUnlink(metaPath).catch(() => {})).then(() => {
-                  reject(new Error(`Resume range mismatch (Content-Range: "${contentRange}", expected start ${resumeFrom}) — restarting download`));
+                  reject(new Error(`Resume range mismatch (Content-Range: "${contentRange}", expected start ${resumeFrom}) - restarting download`));
                 });
                 return;
               }
@@ -709,7 +709,7 @@ export class RemoteClient {
             }
 
             // Content-Length of THIS response body (range length for 206, full
-            // body for 200) — used to detect a truncated transfer even when the
+            // body for 200) - used to detect a truncated transfer even when the
             // caller didn't know expectedSize.
             const clHeader = res.headers["content-length"];
             const contentLength = typeof clHeader === "string" ? parseInt(clHeader, 10) : NaN;
@@ -832,13 +832,13 @@ export class RemoteClient {
           }
         }
       } catch {
-        // Status check failed — upload all parts from scratch
+        // Status check failed - upload all parts from scratch
       }
 
       let transferred = bytesAlreadyDone;
       onProgress?.(transferred);
 
-      // Upload each part by streaming from disk — no buffering the entire
+      // Upload each part by streaming from disk - no buffering the entire
       // part in memory. For a 1.5GB file with 10MB parts, the old approach
       // buffered each part as a Buffer (~10MB), passed it through fetch()
       // which copied it again (~20MB), and GC didn't always free the previous
@@ -884,12 +884,12 @@ export class RemoteClient {
 
       // Integrity guard: parts were streamed from disk against a size/mtime
       // captured before the upload began. If the file changed underneath us the
-      // parts no longer form a coherent object — fail BEFORE committing so the
+      // parts no longer form a coherent object - fail BEFORE committing so the
       // reconciler restarts cleanly with a fresh init rather than completing a
       // torn upload.
       await this.assertUnchanged(localPath, fileStat.size, fileStat.mtimeMs);
 
-      // Complete the multipart upload (with retry — all parts are uploaded,
+      // Complete the multipart upload (with retry - all parts are uploaded,
       // but the complete call itself can fail due to network issues)
       let completeErr: Error | null = null;
       for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
@@ -973,17 +973,17 @@ export class RemoteClient {
    */
   private async assertUnchanged(localPath: string, startSize: number, startMtimeMs: number): Promise<void> {
     const s = await stat(localPath).catch(() => null);
-    if (!s) throw new Error("File disappeared during upload — restarting");
+    if (!s) throw new Error("File disappeared during upload - restarting");
     if (s.size !== startSize || s.mtimeMs !== startMtimeMs) {
       throw new Error(
-        `File changed during upload (size ${startSize}->${s.size}, mtime ${startMtimeMs}->${s.mtimeMs}) — restarting`,
+        `File changed during upload (size ${startSize}->${s.size}, mtime ${startMtimeMs}->${s.mtimeMs}) - restarting`,
       );
     }
   }
 
   /**
    * Stream a file part directly from disk to the server via HTTP PUT.
-   * No buffering — bytes flow: disk → stream → TCP socket.
+   * No buffering - bytes flow: disk → stream → TCP socket.
    * Memory usage is ~64KB (Node.js stream highWaterMark) regardless of part size.
    */
   private streamPartUpload(
@@ -1034,7 +1034,7 @@ export class RemoteClient {
       req.on("timeout", () => { req.destroy(); reject(new Error("Upload timed out")); });
       req.on("error", reject);
 
-      // Stream the byte range directly from disk — no intermediate Buffer
+      // Stream the byte range directly from disk - no intermediate Buffer
       const stream = createReadStream(filePath, { start, end: start + length - 1 });
       let read = 0;
       stream.on("data", (c: string | Buffer) => { read += typeof c === "string" ? Buffer.byteLength(c) : c.length; });
@@ -1244,8 +1244,8 @@ export class RemoteClient {
 
   /**
    * Fetch workspace snapshot via paginated endpoint.
-   * Handles pagination automatically — fetches all pages until hasMore=false.
-   * Supports delta polling via `since` (unix timestamp) — only returns changed files.
+   * Handles pagination automatically - fetches all pages until hasMore=false.
+   * Supports delta polling via `since` (unix timestamp) - only returns changed files.
    *
    * For 1M files: fetches in pages of 5000 (200 requests instead of 1M).
    * For delta polls: typically 1 request (only changed files since last poll).
@@ -1293,7 +1293,7 @@ export class RemoteClient {
 
         if (!data.hasMore) break;
         // Guard against a runaway loop: if the server claims more pages but
-        // gives no usable cursor — or repeats the one we just used — advancing
+        // gives no usable cursor - or repeats the one we just used - advancing
         // is impossible and the loop would refetch page 0 forever (real HTTP
         // calls that never error, so the socket timeout never rescues it). This
         // is the "stuck at Starting initial sync..." hang: sync never returns.
@@ -1361,7 +1361,7 @@ export class RemoteClient {
     localPath = longPath(localPath);
     const tmpPath = `${localPath}.dosya-sync-tmp`;
     const metaPath = `${tmpPath}.meta`;
-    // No cookie for presigned R2 URLs — they carry their own signed auth.
+    // No cookie for presigned R2 URLs - they carry their own signed auth.
     return this.downloadToFile(presignedUrl, localPath, tmpPath, metaPath, expectedSize, {}, onProgress);
   }
 
@@ -1540,7 +1540,7 @@ export class RemoteClient {
 
     const res = await this.fetch(`/api/files?${params}`);
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
-    // 429 is now handled inside fetch() — no need to check here
+    // 429 is now handled inside fetch() - no need to check here
 
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "Failed to list files");
@@ -1604,7 +1604,7 @@ export class RemoteClient {
 
   /**
    * Batch delete multiple files in a single request.
-   * Used when a user deletes a folder locally — 10K files in 20 requests instead of 10K.
+   * Used when a user deletes a folder locally - 10K files in 20 requests instead of 10K.
    */
   async deleteFilesBatch(workspaceId: string, fileIds: string[]): Promise<void> {
     const CHUNK = 500;
@@ -1659,7 +1659,7 @@ export class RemoteClient {
         chunk.map(id =>
           this.setFileSyncFlag(id, enabled).catch(err => {
             if (err.message === "SESSION_EXPIRED") throw err;
-            // Non-critical — log and continue
+            // Non-critical - log and continue
           }),
         ),
       );

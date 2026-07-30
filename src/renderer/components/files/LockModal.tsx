@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/lock-modal.tsx — keep in sync with the web copy.
+// Ported from apps/web/src/components/lock-modal.tsx - keep in sync with the web copy.
 import { useState, useEffect } from "react";
 import { Lock, Unlock, Eye, Loader2 } from "lucide-react";
 import { toast } from "sonner";

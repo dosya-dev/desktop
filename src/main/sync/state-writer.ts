@@ -73,11 +73,11 @@ export function stringifyOffThread(state: unknown): Promise<string> {
       const id = nextId++;
       pending.set(id, { resolve, reject });
 
-      // Structured clone transfer to worker — typically ~20ms for 50K entries,
+      // Structured clone transfer to worker - typically ~20ms for 50K entries,
       // vs 200-500ms for JSON.stringify on the main thread.
       w.postMessage({ id, data: state });
     } catch {
-      // Worker creation failed — fall back to sync stringify
+      // Worker creation failed - fall back to sync stringify
       try {
         const json = JSON.stringify(state);
         resolve(json);

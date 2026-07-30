@@ -1,4 +1,4 @@
-/** Shared modal shell for the files surfaces — same look as the page-level dialogs. */
+/** Shared modal shell for the files surfaces - same look as the page-level dialogs. */
 export function Modal({
   children,
   onClose,

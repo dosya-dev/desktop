@@ -28,7 +28,7 @@ export default defineConfig({
     // The HEIC decode worker (lib/heic.worker.ts) is loaded via
     // `new Worker(new URL(...), { type: "module" })`. The renderer build uses
     // manualChunks (code-splitting), and the default "iife" worker format can't
-    // code-split — force ES module workers.
+    // code-split - force ES module workers.
     worker: { format: "es" },
     // Pin the dev port so the renderer's dev origin is stable and matches the
     // API's CORS allowlist (http://localhost:5174) now that webSecurity is on.

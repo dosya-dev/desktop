@@ -11,13 +11,13 @@ export const SESSION_RESET_EVENT = "dosya:session-reset";
 /**
  * Tear down every piece of renderer state that belongs to the current
  * account. Runs on explicit logout AND on 401-detected session expiry, so
- * the next account can never see this account's data. Must stay idempotent —
+ * the next account can never see this account's data. Must stay idempotent -
  * it can run twice in a row (expiry watcher + explicit logout).
  */
 export function resetSessionState(): void {
   queryClient.clear();
   clearHeicCaches();
-  // Kill any visible toasts (e.g. upload progress/results) — the root-level
+  // Kill any visible toasts (e.g. upload progress/results) - the root-level
   // <Toaster> outlives the protected routes, so stale toasts would otherwise
   // show on the login screen or to the next account.
   toast.dismiss();

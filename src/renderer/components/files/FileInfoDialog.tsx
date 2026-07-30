@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/file-info-dialog.tsx — keep in sync with the web copy.
+// Ported from apps/web/src/components/file-info-dialog.tsx - keep in sync with the web copy.
 import { useState } from "react";
 import { Copy, Check, Lock, EyeOff, Share2, MessageSquare } from "lucide-react";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
@@ -21,7 +21,7 @@ export type InfoTarget =
   | { type: "folder"; item: FolderLike };
 
 function fullDate(ts: number): string {
-  if (!ts) return "—";
+  if (!ts) return "-";
   return new Date(ts * 1000).toLocaleString(undefined, {
     year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
@@ -124,7 +124,7 @@ function FileInfo({ file, location }: { file: FileLike; location?: string }) {
         <Row label="Created">{fullDate(file.created_at)}</Row>
         <Row label="Modified">{fullDate(file.updated_at)}</Row>
         <Row label="Versions">{versions} {versions === 1 ? "version" : "versions"}</Row>
-        <Row label="Uploaded by">{file.uploader_name || "—"}</Row>
+        <Row label="Uploaded by">{file.uploader_name || "-"}</Row>
         <Row label="Region">{regionLabel(file.region)}</Row>
         <Row label="Sharing">
           <span className="flex items-center gap-3">
@@ -152,8 +152,8 @@ function FolderInfo({ folder, location }: { folder: FolderLike; location?: strin
         {location && <Row label="Where">{location}</Row>}
         <Row label="Created">{fullDate(folder.created_at)}</Row>
         <Row label="Modified">{fullDate(folder.content_updated_at)}</Row>
-        {folder.uploader_name != null && <Row label="Created by">{folder.uploader_name || "—"}</Row>}
-        <Row label="Region">{folder.region ? regionLabel(folder.region) : "—"}</Row>
+        {folder.uploader_name != null && <Row label="Created by">{folder.uploader_name || "-"}</Row>}
+        <Row label="Region">{folder.region ? regionLabel(folder.region) : "-"}</Row>
         <Row label="Status"><StatusBadges lock_mode={folder.lock_mode} is_hidden={folder.is_hidden} /></Row>
         <Row label="ID"><CopyableId id={folder.id} /></Row>
       </div>

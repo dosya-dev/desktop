@@ -16,7 +16,7 @@ files:
   - "!node_modules/**/*.{ts,map,md}"
   - "!node_modules/**/{.eslintrc,.prettier*,tsconfig}*"
 
-# Disable auto-update publish — we upload to R2 via our own API
+# Disable auto-update publish - we upload to R2 via our own API
 publish: []
 
 # ── macOS ───────────────────────────────────────────────────────────

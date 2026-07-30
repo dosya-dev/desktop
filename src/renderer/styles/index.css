@@ -6,7 +6,7 @@
    The web app offers 8 themes × light/dark/system. We mirror the same set
    here: each theme is a `[data-theme]` block defining shadcn-style tokens,
    and dark mode is a `.dark` class (toggled by lib/theme.ts), NOT a media
-   query — so the JS-selected mode wins. The desktop's components consume a
+   query - so the JS-selected mode wins. The desktop's components consume a
    simpler `--color-*` vocabulary, so we ALIAS those onto the tokens once (in
    :root); the aliases resolve against whichever token values the active
    theme/mode cascades onto <html>. Keep this in sync with
@@ -211,7 +211,7 @@ body {
   }
 }
 
-/* In-file find highlights (CSS Custom Highlight API) — ported from apps/web/src/index.css */
+/* In-file find highlights (CSS Custom Highlight API) - ported from apps/web/src/index.css */
 ::highlight(find-match) {
   background-color: rgba(255, 213, 0, 0.35);
 }

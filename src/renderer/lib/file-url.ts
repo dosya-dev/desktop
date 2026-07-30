@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/file-url.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/file-url.ts - keep in sync with the web copy.
 // Desktop delta: API base comes from the IPC-primed apiBase() instead of a
 // build-time constant, plus a fileDownloadUrl helper for version downloads.
 
@@ -14,7 +14,7 @@ export interface FileRef {
 
 /**
  * The single place a /raw URL is built. Every preview surface goes through
- * here — the endpoint streams the original bytes inline with cookie auth.
+ * here - the endpoint streams the original bytes inline with cookie auth.
  */
 export function fileRawUrl({ fileId, version, query }: FileRef): string {
   const params = new URLSearchParams();

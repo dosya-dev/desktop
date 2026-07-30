@@ -42,7 +42,7 @@ async function scanLocal(
   const dirs = new Set<string>();
   let yieldCounter = 0;
   // True if ANY directory failed to read. When set, the reconciler must NOT
-  // treat locally-absent files as deletions — they may just be unreadable
+  // treat locally-absent files as deletions - they may just be unreadable
   // (drive spun down, permission flip, AV lock), and deleting them from the
   // cloud would be catastrophic data loss for a backup.
   let incomplete = false;
@@ -364,7 +364,7 @@ export async function reconcile(
       // Pre-populated from a remote snapshot (reinstall): localMtimeMs === 0 is
       // a "match by size on next scan" sentinel. When the size matches, the
       // local file is byte-identical to what we recorded, so adopt its real
-      // mtime into state and treat it as unchanged — otherwise every already-
+      // mtime into state and treat it as unchanged - otherwise every already-
       // identical file gets a spurious upload-update. Mirrors the same handling
       // in the engine's scanAndUpload.
       if (stored.localMtimeMs === 0 && localStat.sizeBytes === stored.localSizeBytes) {
@@ -433,13 +433,13 @@ export async function reconcile(
     }
 
     // Case 6: NOT remote, In stored, NOT local → both deleted, clean up state
-    // (no action needed — will be cleaned below)
+    // (no action needed - will be cleaned below)
   }
 
   // ── Brand-new local files (no remote id, no stored record) ─────────
   // The id-based loop above is keyed on remote ids ∪ stored records, so a
-  // genuinely new local file — one with neither a remote id nor a stored
-  // record — is never visited and the upload-new branch (Case 2) never fires
+  // genuinely new local file - one with neither a remote id nor a stored
+  // record - is never visited and the upload-new branch (Case 2) never fires
   // for it. Walk localFiles directly to catch these and queue them for upload.
   // Paths already covered by the loop (present in pathToRemoteFile or
   // storedPathToId) are skipped, so nothing is double-processed.
@@ -463,7 +463,7 @@ export async function reconcile(
   }
 
   // Clean up stale records: files that exist in stored state but are gone from both
-  // remote and local (Case 6). Skip when the local scan was incomplete — a file
+  // remote and local (Case 6). Skip when the local scan was incomplete - a file
   // that only *looks* absent this pass must not have its tracking dropped.
   if (!localScanIncomplete) {
     for (const id of Object.keys(storedState.files)) {
@@ -495,7 +495,7 @@ export async function reconcile(
       const reason = localScanIncomplete
         ? "local scan was incomplete (a directory could not be read)"
         : `${deleteCount}/${storedCount} deletions exceeds the safety threshold`;
-      console.warn(`[sync] Suppressing ${deleteCount} deletion(s) this cycle — ${reason}. Will retry when healthy.`);
+      console.warn(`[sync] Suppressing ${deleteCount} deletion(s) this cycle - ${reason}. Will retry when healthy.`);
       return actions.filter((a) => a.type !== "delete-local" && a.type !== "delete-remote");
     }
   }
@@ -504,7 +504,7 @@ export async function reconcile(
 }
 
 /**
- * Lightweight remote-only reconcile — no local filesystem scan.
+ * Lightweight remote-only reconcile - no local filesystem scan.
  * Only detects remote changes (new, updated, deleted files) by comparing
  * the remote snapshot against stored state. Used when the watcher reports
  * no local changes since the last full reconcile.
@@ -576,11 +576,11 @@ export function reconcileRemoteOnly(
 
   // Deletion safety valve (same rationale as reconcile): if an implausibly
   // large share of tracked files appear deleted, the remote snapshot is
-  // likely incomplete — suppress deletions until a healthy pass.
+  // likely incomplete - suppress deletions until a healthy pass.
   if (deleteCount > 0) {
     const storedCount = Object.keys(storedState.files).length;
     if (storedCount > 10 && deleteCount > 5 && deleteCount > storedCount * 0.5) {
-      console.warn(`[sync] Suppressing ${deleteCount} local deletion(s) — ${deleteCount}/${storedCount} exceeds safety threshold (snapshot likely incomplete).`);
+      console.warn(`[sync] Suppressing ${deleteCount} local deletion(s) - ${deleteCount}/${storedCount} exceeds safety threshold (snapshot likely incomplete).`);
       return Promise.resolve(actions.filter((a) => a.type !== "delete-local"));
     }
   }

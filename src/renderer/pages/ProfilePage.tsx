@@ -312,7 +312,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
         <div>
           <p className="text-sm font-medium">{user?.name}</p>
           <p className="text-xs text-[var(--color-text-muted)]">
-            PNG, JPEG, WebP or GIF — max 2 MB
+            PNG, JPEG, WebP or GIF - max 2 MB
           </p>
           {user?.avatar_url && (
             <button
@@ -371,7 +371,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
 
       {/* Member since */}
       <div className="rounded-lg bg-[var(--color-bg-secondary)] px-4 py-3 text-sm text-[var(--color-text-secondary)]">
-        Member since {user?.created_at ? formatDate(user.created_at) : "—"}
+        Member since {user?.created_at ? formatDate(user.created_at) : "-"}
       </div>
 
       {/* Change Email Modal */}
@@ -776,7 +776,7 @@ function SessionsSection() {
               <DeviceIcon kind={s.kind} />
               <div className="flex-1">
                 <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium">{s.device} — {s.browser}</p>
+                  <p className="text-sm font-medium">{s.device} - {s.browser}</p>
                   {s.is_current && (
                     <span className="rounded-full bg-[var(--color-primary)]/10 px-2 py-0.5 text-xs font-medium text-[var(--color-primary)]">Current</span>
                   )}
@@ -1012,7 +1012,7 @@ function AboutSection() {
           <div>
             <h3 className="text-sm font-semibold">dosya desktop</h3>
             <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
-              Version {version || "—"}
+              Version {version || "-"}
             </p>
           </div>
 
@@ -1063,7 +1063,7 @@ function AboutSection() {
           <div className="mt-3 flex items-center gap-2 rounded-lg bg-[var(--color-primary)]/10 px-3 py-2 text-sm text-[var(--color-primary)]">
             <ArrowDownCircle size={14} />
             {isLinux
-              ? `Version ${status.version} downloaded — open the file to install manually`
+              ? `Version ${status.version} downloaded - open the file to install manually`
               : `Version ${status.version} is ready to install`}
           </div>
         )}

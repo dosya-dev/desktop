@@ -109,13 +109,13 @@ const ALL_COLUMNS: ColumnDef[] = [
   { key: "created", label: "Created", defaultVisible: true, width: "w-24", render: (f) => timeAgo(f.created_at), renderFolder: (f) => timeAgo(f.created_at) },
   { key: "modified", label: "Modified", defaultVisible: false, width: "w-24", render: (f) => timeAgo(f.updated_at), renderFolder: (f) => timeAgo(f.content_updated_at ?? f.created_at) },
   { key: "type", label: "Type", defaultVisible: false, width: "w-28", render: (f) => f.mime_type, renderFolder: () => "Folder" },
-  { key: "extension", label: "Extension", defaultVisible: false, width: "w-16", render: (f) => (f.extension || extOf(f.name) || "—").toUpperCase() },
-  { key: "version", label: "Version", defaultVisible: false, width: "w-16", render: (f) => (f.current_version ?? 1) > 1 ? `v${f.current_version}` : "—" },
-  { key: "uploader", label: "Uploader", defaultVisible: false, width: "w-28", render: (f) => f.uploader_name ?? "—", renderFolder: (f) => f.uploader_name ?? "—" },
-  { key: "region", label: "Region", defaultVisible: true, width: "w-24", render: (f) => f.region || "—", renderFolder: (f) => f.region === "multi" ? "Multiple" : (f.region || "—") },
+  { key: "extension", label: "Extension", defaultVisible: false, width: "w-16", render: (f) => (f.extension || extOf(f.name) || "-").toUpperCase() },
+  { key: "version", label: "Version", defaultVisible: false, width: "w-16", render: (f) => (f.current_version ?? 1) > 1 ? `v${f.current_version}` : "-" },
+  { key: "uploader", label: "Uploader", defaultVisible: false, width: "w-28", render: (f) => f.uploader_name ?? "-", renderFolder: (f) => f.uploader_name ?? "-" },
+  { key: "region", label: "Region", defaultVisible: true, width: "w-24", render: (f) => f.region || "-", renderFolder: (f) => f.region === "multi" ? "Multiple" : (f.region || "-") },
   { key: "origin", label: "Origin", defaultVisible: true, width: "w-20", render: (f) => originLabel(f.origin), renderFolder: (f) => originLabel(f.origin) },
-  { key: "shares", label: "Shares", defaultVisible: false, width: "w-14", render: (f) => f.share_count > 0 ? String(f.share_count) : "—", renderFolder: (f) => f.share_count > 0 ? String(f.share_count) : "—" },
-  { key: "comments", label: "Comments", defaultVisible: false, width: "w-14", render: (f) => f.comment_count > 0 ? String(f.comment_count) : "—", renderFolder: (f) => f.comment_count > 0 ? String(f.comment_count) : "—" },
+  { key: "shares", label: "Shares", defaultVisible: false, width: "w-14", render: (f) => f.share_count > 0 ? String(f.share_count) : "-", renderFolder: (f) => f.share_count > 0 ? String(f.share_count) : "-" },
+  { key: "comments", label: "Comments", defaultVisible: false, width: "w-14", render: (f) => f.comment_count > 0 ? String(f.comment_count) : "-", renderFolder: (f) => f.comment_count > 0 ? String(f.comment_count) : "-" },
 ];
 
 const DEFAULT_VISIBLE: Set<ColumnKey> = new Set(ALL_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key));
@@ -220,7 +220,7 @@ export function FileBrowserPage() {
 
   // Uploads started from this page must not outlive it. The PUT fetches get
   // this signal so logout/navigation aborts them, and pageAliveRef gates the
-  // result toasts — the app-root <Toaster> outlives this page, so without the
+  // result toasts - the app-root <Toaster> outlives this page, so without the
   // gate an upload finishing after logout pops a toast on the login screen.
   const pageAliveRef = useRef(true);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -236,7 +236,7 @@ export function FileBrowserPage() {
   // Favourites
   const [favourites, setFavourites] = useState<Set<string>>(new Set());
 
-  // Unlock gate — unlocked file IDs (fileId → unlock_token) and the pending prompt.
+  // Unlock gate - unlocked file IDs (fileId → unlock_token) and the pending prompt.
   // Updated immutably so memo/callback dependents (selectableFiles,
   // openFileWithLockCheck) recompute after a file is unlocked.
   const [unlockedFiles, setUnlockedFiles] = useState(() => new Map<string, string>());
@@ -478,7 +478,7 @@ export function FileBrowserPage() {
   const breadcrumbs = data?.breadcrumbs ?? [];
   const pagination = data?.pagination;
 
-  // Client-side chips — "shared" shows only files with share links, "favourites"
+  // Client-side chips - "shared" shows only files with share links, "favourites"
   // only starred files (both hide folders, like the web sidebar's views).
   const folders = activeFilter === "shared" || activeFilter === "favourites" ? [] : allFolders;
   const files =
@@ -517,7 +517,7 @@ export function FileBrowserPage() {
       try {
         const res = await api.get<{ ok: boolean; file?: FileRow }>(`/api/files/${id}`);
         if (!cancelled && res.ok && res.file) openFileWithLockCheck(res.file, action);
-      } catch { /* stale/deleted file — the mirror effect will drop the param */ }
+      } catch { /* stale/deleted file - the mirror effect will drop the param */ }
       finally { if (!cancelled) openRestored.current = true; }
     })();
     return () => { cancelled = true; };
@@ -560,11 +560,11 @@ export function FileBrowserPage() {
           credentials: "include",
           signal: uploadAbortRef.current?.signal,
         });
-        // A non-2xx PUT is a failed upload, not a success — count it as such.
+        // A non-2xx PUT is a failed upload, not a success - count it as such.
         if (res.ok) uploaded++;
         else failed++;
       } catch (err) {
-        // Page unmounted (logout/navigation) mid-upload — stop silently,
+        // Page unmounted (logout/navigation) mid-upload - stop silently,
         // don't count the aborted-and-unattempted rest as failures.
         if ((err instanceof DOMException && err.name === "AbortError") || (err as { name?: string })?.name === "AbortError") break;
         failed++;
@@ -579,7 +579,7 @@ export function FileBrowserPage() {
     e.preventDefault(); e.stopPropagation(); setDragging(false);
     if (showDeleted || !e.dataTransfer.files.length) return;
     const { uploaded, failed } = await uploadFiles(e.dataTransfer.files);
-    if (!pageAliveRef.current) return; // page (or session) is gone — no toasts
+    if (!pageAliveRef.current) return; // page (or session) is gone - no toasts
     if (uploaded > 0) {
       toast.success("Uploaded", { description: `${uploaded} file${uploaded > 1 ? "s" : ""} uploaded` });
       refresh();
@@ -1018,7 +1018,7 @@ export function FileBrowserPage() {
                     }
                     return (
                       <td key={col.key} className={`py-2 text-xs text-[var(--color-text-muted)] ${col.width ?? ""}`}>
-                        {col.renderFolder ? col.renderFolder(folder) : "—"}
+                        {col.renderFolder ? col.renderFolder(folder) : "-"}
                       </td>
                     );
                   })}
@@ -1111,7 +1111,7 @@ export function FileBrowserPage() {
                   <td colSpan={visibleCols.length + 2} className="py-16 text-center text-sm text-[var(--color-text-muted)]">
                     {showDeleted ? "Trash is empty"
                       : search ? "No files match your search"
-                      : activeFilter === "favourites" ? "No favourites yet — star a file to collect it here"
+                      : activeFilter === "favourites" ? "No favourites yet - star a file to collect it here"
                       : "This folder is empty"}
                   </td>
                 </tr>
@@ -1196,7 +1196,7 @@ export function FileBrowserPage() {
             <div className="py-16 text-center text-sm text-[var(--color-text-muted)]">
               {showDeleted ? "Trash is empty"
                 : search ? "No files match your search"
-                : activeFilter === "favourites" ? "No favourites yet — star a file to collect it here"
+                : activeFilter === "favourites" ? "No favourites yet - star a file to collect it here"
                 : "This folder is empty"}
             </div>
           )}
@@ -1771,7 +1771,7 @@ function FileCard({
         {file.comment_count > 0 && (
           <button
             className="relative flex h-8 w-8 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-colors hover:bg-black/55"
-            title={`${file.comment_count} comment${file.comment_count === 1 ? "" : "s"} — open`}
+            title={`${file.comment_count} comment${file.comment_count === 1 ? "" : "s"} - open`}
             onClick={(e) => { e.stopPropagation(); onComments(); }}
           >
             <MessageCircle size={16} className="text-white" />
@@ -1780,7 +1780,7 @@ function FileCard({
         )}
         <button
           className="flex h-8 w-8 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-colors hover:bg-black/55"
-          title={file.share_count > 0 ? `Shared (${file.share_count}) — manage` : "Share"}
+          title={file.share_count > 0 ? `Shared (${file.share_count}) - manage` : "Share"}
           onClick={(e) => { e.stopPropagation(); onShare(); }}
         >
           <Share2 size={16} className={file.share_count > 0 ? "text-green-400" : "text-white"} />
@@ -1840,7 +1840,7 @@ function FolderPickerModal({
   type Folder = { id: string; name: string; parent_id: string | null; file_count: number };
 
   // Flatten the (always-expanded) tree into a single ordered list ONCE, in
-  // O(n) via a children map — the old code re-filtered the whole array at every
+  // O(n) via a children map - the old code re-filtered the whole array at every
   // node (O(n²)) and rendered every folder unconditionally. Row 0 is the
   // synthetic "Root" option so the whole thing virtualizes uniformly.
   const rows = useMemo(() => {

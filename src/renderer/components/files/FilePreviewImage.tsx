@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/file-preview-image.tsx — keep in sync with the web copy.
+// Ported from apps/web/src/components/file-preview-image.tsx - keep in sync with the web copy.
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { fileThumbUrl, fileRawUrl, type ThumbSize } from "@/lib/file-url";
 import { getHeicPreviewUrl, releaseHeicPreviewUrl } from "@/lib/heic";
@@ -83,7 +83,7 @@ function FilePreviewImageForFile({
   }
 
   // Every other image format: request a server-generated thumbnail sized to the
-  // caller's `size` — a 28px table row or a grid tile shouldn't download and
+  // caller's `size` - a 28px table row or a grid tile shouldn't download and
   // decode the full-resolution original. Fall back to the raw original only if
   // the thumbnail itself fails to load.
   if (!thumbFailed) {
@@ -182,7 +182,7 @@ function HeicPreview({
     };
   }, [visible, fileId, version, query, maxDim]);
 
-  // NB: the object URL is owned and revoked by the LRU cache in heic-cache.ts —
+  // NB: the object URL is owned and revoked by the LRU cache in heic-cache.ts -
   // never revoke it here (other mounted components may still be showing it). We
   // only release our refcount on unmount so the cache can revoke it once the
   // last displaying component is gone.

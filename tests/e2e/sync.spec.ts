@@ -69,7 +69,7 @@ guestTest.describe("Sync login gate", () => {
           remoteFolderName: "login-gate",
           region: "eu-central",
         });
-        // Gate failed and the pair was persisted — clean it up so repeated
+        // Gate failed and the pair was persisted - clean it up so repeated
         // runs don't pollute the config.
         if (pair?.id) await api.removeSyncPair(pair.id);
         return { rejected: false, message: "" };

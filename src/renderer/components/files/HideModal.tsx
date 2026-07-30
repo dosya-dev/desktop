@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/hide-modal.tsx — keep in sync with the web copy.
+// Ported from apps/web/src/components/hide-modal.tsx - keep in sync with the web copy.
 import { useState, useEffect } from "react";
 import { Eye, EyeOff, UserMinus, Shield, Loader2, Check } from "lucide-react";
 import { toast } from "sonner";
@@ -87,7 +87,7 @@ export function HideModal({ open, target, workspaceId, onClose, onDone }: HideMo
     setLoading(false);
   };
 
-  // You can't hide your own files from yourself or your own role — still shown, but disabled.
+  // You can't hide your own files from yourself or your own role - still shown, but disabled.
   const myRoleId = members.find((m) => m.is_you)?.role_id;
 
   const MODES: { value: HiddenMode; label: string; desc: string; icon: React.ReactNode }[] = [

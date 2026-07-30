@@ -1,32 +1,32 @@
 # dosya desktop
 
-The official desktop client for [dosya.dev](https://dosya.dev) — sync, upload, and manage your files.
+The official desktop client for [dosya.dev](https://dosya.dev) - sync, upload, and manage your files.
 
 ## Features
 
-- **Bidirectional file sync** — 5 sync modes: two-way, push, push-safe, pull, pull-safe
-- **Conflict detection** — 3-way reconciliation with resolution strategies
-- **Dashboard** — Storage usage, recent files, activity feed
-- **File browser** — Navigate, upload, download, and manage files
-- **Shared links** — Create and manage share links with passwords and expiry
-- **Team collaboration** — Manage workspace members and roles
-- **File requests** — Receive files from external users
-- **LAN transfer** — Peer-to-peer file transfer on local networks
-- **Search** — Full-text search across files and folders
-- **Auto-updates** — Built-in update mechanism
-- **System tray** — Background sync with tray icon
-- **macOS Quick Action** — `dosya://` protocol handler for direct sync setup
+- **Bidirectional file sync** - 5 sync modes: two-way, push, push-safe, pull, pull-safe
+- **Conflict detection** - 3-way reconciliation with resolution strategies
+- **Dashboard** - Storage usage, recent files, activity feed
+- **File browser** - Navigate, upload, download, and manage files
+- **Shared links** - Create and manage share links with passwords and expiry
+- **Team collaboration** - Manage workspace members and roles
+- **File requests** - Receive files from external users
+- **LAN transfer** - Peer-to-peer file transfer on local networks
+- **Search** - Full-text search across files and folders
+- **Auto-updates** - Built-in update mechanism
+- **System tray** - Background sync with tray icon
+- **macOS Quick Action** - `dosya://` protocol handler for direct sync setup
 
 ## Tech Stack
 
-- **Electron 34** — Cross-platform desktop framework
-- **React 19** — UI framework
-- **TypeScript 5.7** — Type safety
-- **TanStack React Query** — Server state management
-- **Zustand** — Client state management
-- **Tailwind CSS 4** — Styling
-- **Radix UI** — Accessible UI primitives
-- **electron-vite** — Build tooling
+- **Electron 34** - Cross-platform desktop framework
+- **React 19** - UI framework
+- **TypeScript 5.7** - Type safety
+- **TanStack React Query** - Server state management
+- **Zustand** - Client state management
+- **Tailwind CSS 4** - Styling
+- **Radix UI** - Accessible UI primitives
+- **electron-vite** - Build tooling
 
 ## Development
 
@@ -77,7 +77,7 @@ src/
 
 ## Transparency
 
-Every dosya.dev client is source-available. Your files are yours — this repository lets
+Every dosya.dev client is source-available. Your files are yours - this repository lets
 you verify exactly what the app sends to and receives from our servers: what gets
 uploaded, what metadata travels with it, and what comes back. If a claim we make about
 privacy or sync behavior can't be verified in this code, open an issue and call it out.
@@ -109,7 +109,7 @@ public issue.
 
 | Repository | What it is | License |
 |---|---|---|
-| [desktop](https://github.com/dosya-dev/desktop) | Desktop client — sync, upload, manage | Source-available |
+| [desktop](https://github.com/dosya-dev/desktop) | Desktop client - sync, upload, manage | Source-available |
 | [cli](https://github.com/dosya-dev/cli) | Command-line interface | Source-available |
 | [app.dosya.dev](https://github.com/dosya-dev/app.dosya.dev) | Web application | Source-available |
 | [shared](https://github.com/dosya-dev/shared) | Shared TypeScript types & utilities | Source-available |

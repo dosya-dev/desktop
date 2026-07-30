@@ -333,7 +333,7 @@ export function DashboardPage() {
 
 function SyncCard() {
   const navigate = useNavigate();
-  // Live, typed pairs from the shared store — updates in place as sync runs.
+  // Live, typed pairs from the shared store - updates in place as sync runs.
   const pairs = useSyncPairs();
 
   return (

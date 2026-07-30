@@ -27,7 +27,7 @@ const steps = [
   {
     title: "Sync folders automatically",
     description:
-      "Pick any folder on your computer and dosya.dev keeps it in sync with the cloud. Changes upload in the background — no manual steps needed.",
+      "Pick any folder on your computer and dosya.dev keeps it in sync with the cloud. Changes upload in the background - no manual steps needed.",
     icon: FolderSync,
     features: [
       "Two-way, push, or pull sync modes",
@@ -38,7 +38,7 @@ const steps = [
   {
     title: "Upload anything, instantly",
     description:
-      "Drag and drop files straight from your desktop. Large files are handled natively — no browser upload limits, no timeouts.",
+      "Drag and drop files straight from your desktop. Large files are handled natively - no browser upload limits, no timeouts.",
     icon: Upload,
     features: [
       "No file size limits",
@@ -78,7 +78,7 @@ export function OnboardingPage() {
   const Icon = current.icon;
   const isLast = step === steps.length - 1;
 
-  // Already logged in — skip onboarding and go to dashboard
+  // Already logged in - skip onboarding and go to dashboard
   if (!isLoading && isAuthenticated) {
     return <Navigate to="/dashboard" replace />;
   }
@@ -98,7 +98,7 @@ export function OnboardingPage() {
 
   return (
     <div className="flex h-screen">
-      {/* Left panel — 30% */}
+      {/* Left panel - 30% */}
       <div className="flex w-[30%] flex-col justify-between bg-[var(--color-bg)] p-8">
         {/* Logo */}
         <div className="flex items-center gap-2.5">
@@ -146,7 +146,7 @@ export function OnboardingPage() {
         </button>
       </div>
 
-      {/* Right panel — 70% */}
+      {/* Right panel - 70% */}
       <div className="bg-grid relative flex w-[70%] flex-col items-center justify-center bg-[var(--color-bg-secondary)] p-12">
         {/* Content card */}
         <div className="flex max-w-lg flex-col items-center text-center">

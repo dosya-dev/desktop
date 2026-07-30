@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/heic.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/heic.ts - keep in sync with the web copy.
 import { createHeicCache, type HeicRequest } from '@/lib/heic-cache';
 import { createHeicPool, type PoolWorker } from '@/lib/heic-pool';
 import { persistGet, persistPut } from '@/lib/heic-persist';
@@ -8,7 +8,7 @@ import { persistGet, persistPut } from '@/lib/heic-persist';
 // cache admits at once. A pool of workers spreads decodes across cores instead.
 //
 // Capped at 2 (was 4): each worker holds a *full-size* decoded RGBA bitmap of
-// the source — ~48MB for a 12MP photo, ~190MB for a 48MP one — and
+// the source - ~48MB for a 12MP photo, ~190MB for a 48MP one - and
 // createImageBitmap transiently doubles that, so N concurrent decodes cost
 // N times that peak. Crucially, the renderer only decodes photos the server
 // *couldn't* thumbnail (the 415 path), i.e. the large ones, so every decode
@@ -35,7 +35,7 @@ const pool = createHeicPool({
 // admitted more, the extra decodes would just queue inside the pool anyway.
 //
 // `persistGet`/`persistPut` back the in-memory LRU with the Cache API, so a
-// decoded thumbnail survives a page reload — a refresh serves it without
+// decoded thumbnail survives a page reload - a refresh serves it without
 // re-downloading the original or re-running the WASM decode.
 const cache = createHeicCache({
   decoder: (url, maxDim) => pool.decode(url, maxDim),
@@ -59,5 +59,5 @@ export function releaseHeicPreviewUrl(req: HeicRequest): void {
 }
 
 // `clearHeicCaches()` (logout teardown) lives in heic-cache.ts, which tracks
-// every cache it creates — so it clears this singleton's LRU without an import
+// every cache it creates - so it clears this singleton's LRU without an import
 // cycle back to this module.

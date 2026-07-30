@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/heic-cache.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/heic-cache.ts - keep in sync with the web copy.
 import { fileRawUrl, type FileRef } from '@/lib/file-url';
 
 export interface HeicRequest extends FileRef {
@@ -18,7 +18,7 @@ export function heicCacheKey({ fileId, version, maxDim }: HeicRequest): string {
 // (which lives in heic.ts and would create an import cycle).
 const liveCaches = new Set<{ clear: () => void }>();
 
-/** Cache API store name — mirrors CACHE_NAME in heic-persist.ts. */
+/** Cache API store name - mirrors CACHE_NAME in heic-persist.ts. */
 const PERSIST_CACHE_NAME = 'heic-thumbs-v1';
 
 /**
@@ -31,7 +31,7 @@ export async function clearHeicCaches(): Promise<void> {
   try {
     if (typeof caches !== 'undefined') await caches.delete(PERSIST_CACHE_NAME);
   } catch {
-    // best-effort — persistence teardown must never throw
+    // best-effort - persistence teardown must never throw
   }
 }
 
@@ -71,7 +71,7 @@ export function createHeicCache(opts: HeicCacheOptions) {
 
   // Live refcount per key: how many mounted consumers currently hold this key's
   // object URL. `insert()` won't revoke an evicted URL while its key is still
-  // referenced — it parks the URL in `deferredRevoke` and `release()` revokes
+  // referenced - it parks the URL in `deferredRevoke` and `release()` revokes
   // it once the last holder lets go. Without this, a long-mounted preview can
   // have its URL revoked out from under it when the LRU evicts a cold entry.
   const refcounts = new Map<string, number>();
@@ -89,7 +89,7 @@ export function createHeicCache(opts: HeicCacheOptions) {
       return;
     }
     refcounts.delete(key);
-    // Last holder gone — flush a revoke we deferred while it was on screen.
+    // Last holder gone - flush a revoke we deferred while it was on screen.
     const dead = deferredRevoke.get(key);
     if (dead !== undefined) {
       deferredRevoke.delete(key);
@@ -100,7 +100,7 @@ export function createHeicCache(opts: HeicCacheOptions) {
   let active = 0;
   // Queued starters, not queued promises: each entry *starts* the decode (and
   // therefore calls the decoder) the moment a slot frees up. This must happen
-  // synchronously with `release()` — an `await`-based gate here would delay
+  // synchronously with `release()` - an `await`-based gate here would delay
   // the decoder call by a microtask tick, which breaks callers (like the
   // controllable-decoder tests) that inspect "how many decodes started" or
   // resolve pending decodes before yielding back to the event loop.
@@ -120,7 +120,7 @@ export function createHeicCache(opts: HeicCacheOptions) {
       const lru = entries.keys().next().value as string;
       const dead = entries.get(lru)!;
       entries.delete(lru);
-      // Don't revoke a URL a mounted consumer is still displaying — defer it
+      // Don't revoke a URL a mounted consumer is still displaying - defer it
       // until the last holder releases (see release()).
       if ((refcounts.get(lru) ?? 0) > 0) {
         deferredRevoke.set(lru, dead);

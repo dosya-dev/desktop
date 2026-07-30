@@ -165,7 +165,7 @@ export function WorkspaceDashboardPage() {
   );
 }
 
-/** Workspace icon chip — authed custom icon, else initials on the workspace colour. */
+/** Workspace icon chip - authed custom icon, else initials on the workspace colour. */
 function WsIcon({ ws, size }: { ws: OwnedWorkspace | SharedWorkspace; size: number }) {
   return (
     <div

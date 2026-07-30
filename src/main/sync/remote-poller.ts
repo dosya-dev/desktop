@@ -16,7 +16,7 @@ const PACE_DELAY_MS = 3000;
 /** Seconds of overlap subtracted from the delta `since` boundary (avoids missing same-second edits). */
 const DELTA_OVERLAP_SEC = 2;
 
-/** Adaptive poll intervals — slow down when idle, speed up when active. */
+/** Adaptive poll intervals - slow down when idle, speed up when active. */
 const IDLE_THRESHOLDS = [
   { afterMs: 60 * 60 * 1000, intervalMs: 300_000 },  // idle >1h → poll every 5 min
   { afterMs: 5 * 60 * 1000,  intervalMs: 120_000 },  // idle >5 min → poll every 2 min
@@ -75,7 +75,7 @@ export class RemotePoller extends EventEmitter {
   }
 
   triggerNow(): void {
-    // User/watcher triggered — reset to active interval
+    // User/watcher triggered - reset to active interval
     this.lastChangeAt = Date.now();
     if (this.currentIntervalMs !== this.pair.pollIntervalMs && !this.backedOff) {
       this.setInterval(this.pair.pollIntervalMs);
@@ -87,7 +87,7 @@ export class RemotePoller extends EventEmitter {
   setAppVisible(visible: boolean): void {
     this.appVisible = visible;
     if (visible) {
-      // App became visible — speed up polling
+      // App became visible - speed up polling
       this.lastChangeAt = Date.now();
       if (this.currentIntervalMs !== this.pair.pollIntervalMs && !this.backedOff) {
         this.setInterval(this.pair.pollIntervalMs);
@@ -105,7 +105,7 @@ export class RemotePoller extends EventEmitter {
   }
 
   private async poll(): Promise<void> {
-    // A poll requested while one is in flight isn't dropped — record it and
+    // A poll requested while one is in flight isn't dropped - record it and
     // re-run once in finally, so a watcher/user trigger during a long poll
     // still observes the newest remote state.
     if (this.polling) { this.pollRequested = true; return; }
@@ -279,7 +279,7 @@ export class RemotePoller extends EventEmitter {
         return this.cachedSnapshot;
       }
 
-      // Full snapshot — build and cache (authoritative; catches deletions)
+      // Full snapshot - build and cache (authoritative; catches deletions)
       const files = new Map<string, RemoteFileInfo>();
       const folders = new Map<string, RemoteFolderInfo>();
       for (const f of fast.files) files.set(f.id, f);
@@ -290,10 +290,10 @@ export class RemotePoller extends EventEmitter {
       return this.cachedSnapshot;
     }
 
-    // Fast endpoint not available — throw so the caller knows.
+    // Fast endpoint not available - throw so the caller knows.
     // Do NOT fall back to recursive per-folder fetching (30K requests for 30K folders).
     // The /api/sync/snapshot endpoint must be deployed for sync to work efficiently.
-    throw new Error("Snapshot endpoint unavailable — deploy /api/sync/snapshot");
+    throw new Error("Snapshot endpoint unavailable - deploy /api/sync/snapshot");
   }
 
   /**
@@ -308,7 +308,7 @@ export class RemotePoller extends EventEmitter {
   ) {
     this.pollRequestCount++;
     if (this.pollRequestCount > 1 && this.pollRequestCount % PACE_REQUEST_INTERVAL === 0) {
-      // Check client's rate budget — if low, pause longer
+      // Check client's rate budget - if low, pause longer
       const budget = this.client.rateBudget;
       if (budget.remaining < 50 && budget.remaining < Infinity) {
         const waitMs = Math.max(0, budget.resetAt * 1000 - Date.now());
@@ -331,7 +331,7 @@ export class RemotePoller extends EventEmitter {
   ): Promise<void> {
     // Depth limit to prevent infinite recursion from circular folder trees
     if (depth > MAX_FOLDER_DEPTH) {
-      console.warn("[sync] Skipping folder at depth", depth, "— exceeded max depth");
+      console.warn("[sync] Skipping folder at depth", depth, "- exceeded max depth");
       return;
     }
 

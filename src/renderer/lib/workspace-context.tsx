@@ -76,7 +76,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener(SESSION_RESET_EVENT, onReset);
   }, []);
 
-  // Memoize so consumers only re-render when a real input changes — not on every
+  // Memoize so consumers only re-render when a real input changes - not on every
   // provider render (e.g. the window-focus refetch would otherwise churn a fresh
   // value object and re-render the whole tree). `setActive` is stable and
   // react-query's `refetch` is referentially stable across renders.

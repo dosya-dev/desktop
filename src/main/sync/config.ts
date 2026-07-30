@@ -130,7 +130,7 @@ export async function loadPairState(pairId: string): Promise<SyncPairState> {
 export async function savePairState(state: SyncPairState): Promise<void> {
   const dir = join(syncDir(), "sync-state");
   await ensureDir(dir);
-  // Serialize off the main thread — JSON.stringify on 50K entries blocks
+  // Serialize off the main thread - JSON.stringify on 50K entries blocks
   // the event loop for 50-200ms. The worker thread handles it so IPC,
   // watcher events, and UI updates keep flowing.
   const json = await stringifyOffThread(state);

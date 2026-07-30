@@ -83,7 +83,7 @@ export function FileRequestsPage() {
         <div>
           <h1 className="text-2xl font-semibold">File Requests</h1>
           <p className="text-sm text-[var(--color-text-muted)]">
-            Request files from anyone — they don't need an account
+            Request files from anyone - they don't need an account
           </p>
         </div>
         <button

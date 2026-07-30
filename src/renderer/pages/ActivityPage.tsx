@@ -172,7 +172,7 @@ export function ActivityPage() {
                       : "var(--color-bg-tertiary)",
                 }}
               >
-                {/* Avatar — use /api/me/avatar for current user, initials for others */}
+                {/* Avatar - use /api/me/avatar for current user, initials for others */}
                 {a.user_avatar && user && a.user_id === user.id && apiBase ? (
                   <img
                     key={user.id}

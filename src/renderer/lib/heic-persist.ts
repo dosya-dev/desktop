@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/heic-persist.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/heic-persist.ts - keep in sync with the web copy.
 /**
  * Persistent store for decoded HEIC thumbnails, backed by the Cache API.
  *
@@ -9,7 +9,7 @@
  *
  * Everything here degrades gracefully: if the Cache API is unavailable (private
  * mode, disabled storage, quota errors), reads return null and writes are no-ops,
- * so the pipeline simply falls back to decoding — never throws.
+ * so the pipeline simply falls back to decoding - never throws.
  */
 
 const CACHE_NAME = 'heic-thumbs-v1';
@@ -55,14 +55,14 @@ export function persistPut(key: string, blob: Blob): void {
       await cache.put(keyToRequest(key), new Response(blob));
       await pruneToCap(cache);
     } catch {
-      // ignore — persistence is best-effort
+      // ignore - persistence is best-effort
     }
   })();
 }
 
 /**
  * Bounds the cache size. Cache API `keys()` returns entries in insertion order,
- * so the oldest-written are at the front — delete from there until under the cap.
+ * so the oldest-written are at the front - delete from there until under the cap.
  */
 async function pruneToCap(cache: Cache): Promise<void> {
   try {

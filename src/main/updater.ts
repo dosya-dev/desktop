@@ -49,7 +49,7 @@ function checkCrashLoop(): boolean {
     const raw = readFileSync(recordPath, "utf-8");
     record = JSON.parse(raw);
   } catch {
-    // No record yet — first launch
+    // No record yet - first launch
   }
 
   // Reset if version changed (new update installed successfully)
@@ -125,7 +125,7 @@ export async function initAutoUpdater(): Promise<void> {
     // Must be api.dosya.dev, NOT dosya.dev: the apex domain is the Astro
     // marketing site and serves no /api routes. This was previously pointed at
     // https://dosya.dev/api/desktop, which meant every update check fetched a
-    // 404 for latest-*.yml and silently reported "no update available" — so
+    // 404 for latest-*.yml and silently reported "no update available" - so
     // installed clients could never auto-update at all.
     autoUpdater.setFeedURL({
       provider: "generic",
@@ -205,7 +205,7 @@ export async function initAutoUpdater(): Promise<void> {
       autoUpdater.checkForUpdates().catch(() => {});
     }, 5_000);
   } catch {
-    // electron-updater not installed — register no-op handlers
+    // electron-updater not installed - register no-op handlers
     ipcMain.handle("updater:check", () => {});
     ipcMain.handle("updater:install", () => {});
     ipcMain.handle("updater:show-file", () => {});

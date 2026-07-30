@@ -132,7 +132,7 @@ export const useSyncStore = create<SyncStore>((set) => ({
 
 // ── Fine-grained selectors ──────────────────────────────────────────
 // These return primitives, so a subscribing component only re-renders when
-// THAT value flips — not on every status tick (which fires during a transfer).
+// THAT value flips - not on every status tick (which fires during a transfer).
 // This is the fix for the "TitleBar/Sidebar re-render on every sync event" cost.
 const EMPTY_PAIRS: SyncPairRuntimeStatus[] = [];
 

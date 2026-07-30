@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/helpers.ts (subset) — keep in sync with the web copy.
+// Ported from apps/web/src/lib/helpers.ts (subset) - keep in sync with the web copy.
 // File-type detection + small formatting helpers used by the files surfaces.
 
 export function extOf(name: string): string {
@@ -30,7 +30,7 @@ export function isImage(name: string): boolean {
 }
 
 const HEIC_EXTS = new Set(["heic", "heif"]);
-/** True only for HEIC/HEIF — the one image format Chromium can't render natively. */
+/** True only for HEIC/HEIF - the one image format Chromium can't render natively. */
 export function isHeic(name: string): boolean {
   return HEIC_EXTS.has(extOf(name));
 }
@@ -93,7 +93,7 @@ const ORIGIN_LABELS: Record<string, string> = {
 };
 
 export function originLabel(origin: string | null | undefined): string {
-  return (origin && ORIGIN_LABELS[origin]) || "—";
+  return (origin && ORIGIN_LABELS[origin]) || "-";
 }
 
 const REGION_LABELS: Record<string, string> = {

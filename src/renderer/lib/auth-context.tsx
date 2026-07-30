@@ -56,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       reconcileAppearance(data.user);
     } catch (err) {
       // Only a confirmed 401 means "logged out". A transient error (network
-      // blip, 5xx) must NOT force a logout — keep the current user as-is.
+      // blip, 5xx) must NOT force a logout - keep the current user as-is.
       if (err instanceof ApiError && err.status === 401) {
         setUser(null);
       }
@@ -64,7 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Check session on mount. Retry transient failures a few times before
-  // concluding — otherwise a single network blip / 5xx at startup strands a
+  // concluding - otherwise a single network blip / 5xx at startup strands a
   // logged-in user on the onboarding screen with no way to recover but reload.
   useEffect(() => {
     let cancelled = false;
@@ -79,7 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch (err) {
           if (err instanceof ApiError && err.status === 401) {
             if (!cancelled) setUser(null);
-            break; // definitively unauthenticated — no point retrying
+            break; // definitively unauthenticated - no point retrying
           }
           // Transient: back off and retry (1s, 2s) before giving up.
           if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
@@ -154,18 +154,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await api.post("/api/auth/logout");
     } catch {
-      // ignore — best-effort
+      // ignore - best-effort
     }
     // Clear the Electron cookie. This triggers the cookies.on("changed")
-    // listener in the main process which calls syncEngine.stop() —
+    // listener in the main process which calls syncEngine.stop() -
     // stopping all watchers, pollers, and timers automatically.
-    // Don't call pauseAllSync() here — that persists pausedGlobally=true
+    // Don't call pauseAllSync() here - that persists pausedGlobally=true
     // to disk, which would prevent sync from starting on the next login.
     await window.electronAPI.clearSession();
     setUser(null);
     resetSessionState();
     // Hard guarantee: reload the renderer so NOTHING from this session survives
-    // in memory — Chromium's in-process image cache (the stale-avatar culprit),
+    // in memory - Chromium's in-process image cache (the stale-avatar culprit),
     // module-level state, and any stray promise chains all die here. The app
     // boots onto onboarding because the session cookie is already cleared.
     window.location.hash = "#/onboarding";

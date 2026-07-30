@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/file-viewer.tsx (read-only) — keep in sync with the web copy.
+// Ported from apps/web/src/components/file-viewer.tsx (read-only) - keep in sync with the web copy.
 // The desktop viewer is read-only: the Edit button, Pintura image/video editor,
 // and CodeMirror text editor from the web version are intentionally absent.
 // Downloads go through the file:download IPC (save dialog) instead of an <a download>.
@@ -20,7 +20,7 @@ import { fileIconSrc } from "@/components/files/FileIcon";
 
 // ── Types ─────────────────────────────────────────────────
 
-/** The file shape the viewer needs — matches the Files page's API rows. */
+/** The file shape the viewer needs - matches the Files page's API rows. */
 export interface ViewerFile {
   id: string;
   name: string;
@@ -132,7 +132,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
     return () => { cancelled = true; };
   }, [file.id]);
 
-  // The version actually being shown — `undefined` means current/latest.
+  // The version actually being shown - `undefined` means current/latest.
   const previewVersion =
     activeVersion > 0 && versions.length > 0 && activeVersion !== versions[0].version_number
       ? activeVersion
@@ -140,7 +140,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
 
   // Build the raw URL for the active version. The viewer is read-only, so there
   // is no cache-buster: a stable URL keeps video/audio/PDF from restarting and
-  // text from re-downloading on every unrelated re-render — it only changes
+  // text from re-downloading on every unrelated re-render - it only changes
   // when the file or the shown version changes.
   const rawUrl = useMemo(
     () => fileRawUrl({ fileId: file.id, version: previewVersion }),

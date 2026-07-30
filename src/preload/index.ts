@@ -59,7 +59,7 @@ const electronAPI = {
   showInFolder: (path: string): Promise<void> =>
     ipcRenderer.invoke("file:show-in-folder", path),
 
-  // 2FA — generate the authenticator QR locally so the secret never leaves the device
+  // 2FA - generate the authenticator QR locally so the secret never leaves the device
   generateTotpQr: (uri: string): Promise<string> =>
     ipcRenderer.invoke("totp:generate-qr", uri),
 
@@ -87,7 +87,7 @@ const electronAPI = {
     return () => ipcRenderer.removeListener("navigate", handler);
   },
 
-  // OAuth complete event — fired when dosya://auth/callback is handled
+  // OAuth complete event - fired when dosya://auth/callback is handled
   onOAuthComplete: (callback: () => void): (() => void) => {
     const handler = () => callback();
     ipcRenderer.on("auth:oauth-complete", handler);

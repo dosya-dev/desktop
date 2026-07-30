@@ -61,7 +61,7 @@ test.describe("Login Page", () => {
     await expect(
       appPage.getByRole("button", { name: /signing in/i }),
     ).toBeVisible({ timeout: 3_000 }).catch(() => {
-      // Button may have already transitioned — that's fine
+      // Button may have already transitioned - that's fine
     });
   });
 

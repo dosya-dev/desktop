@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/text-find-bar.tsx — keep in sync with the web copy.
+// Ported from apps/web/src/components/text-find-bar.tsx - keep in sync with the web copy.
 import { useEffect, useRef } from "react";
 import { X, ChevronUp, ChevronDown } from "lucide-react";
 import type { useInFileFind } from "@/lib/use-in-file-find";

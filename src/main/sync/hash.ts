@@ -2,11 +2,11 @@
  * Fast content hashing for sync dedup.
  *
  * Uses Node.js crypto MD5 (~500 MB/s). Only called on files whose mtime
- * changed — for a typical re-sync that's ~1-2% of files, not all 150K.
+ * changed - for a typical re-sync that's ~1-2% of files, not all 150K.
  *
  * MD5 is used for speed, not security. We're comparing content identity,
  * not protecting against collision attacks. A hash match means "same content
- * with 99.9999999% probability" — good enough for sync dedup.
+ * with 99.9999999% probability" - good enough for sync dedup.
  */
 
 import { createHash } from "crypto";
@@ -48,7 +48,7 @@ export async function hashFiles(
         const hash = await hashFile(file);
         results.set(file, hash);
       } catch {
-        // File unreadable — skip, will be caught as "changed" later
+        // File unreadable - skip, will be caught as "changed" later
       }
     }
   };

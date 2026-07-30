@@ -16,7 +16,7 @@ const IGNORED_DIRS = new Set([
   "__pycache__", ".venv", ".svn", ".hg",
   // Linux snap mounts contain FUSE entries that misreport types/sizes
   "snap",
-  // Linux virtual/pseudo filesystems — stat() returns bogus sizes (TB+)
+  // Linux virtual/pseudo filesystems - stat() returns bogus sizes (TB+)
   "proc", "sys", "dev", "run", "tmp",
   // Linux system directories that should never be synced
   "boot", "sbin", "bin", "lib", "lib32", "lib64", "libx32",
@@ -120,7 +120,7 @@ function userPatternsToGlobs(patterns: string[]): string[] {
   return globs;
 }
 
-/** Chokidar glob patterns — must match shouldIgnoreEntry semantics. */
+/** Chokidar glob patterns - must match shouldIgnoreEntry semantics. */
 const CHOKIDAR_IGNORED = [
   // OS metadata
   "**/.DS_Store",
@@ -199,7 +199,7 @@ export class LocalWatcher extends EventEmitter {
 
   start(): void {
     if (this.watcher) return;
-    // Once degraded (tree too large to watch), never re-arm — a later scan
+    // Once degraded (tree too large to watch), never re-arm - a later scan
     // calling start() must not trigger another EMFILE storm.
     if (this.degraded) return;
     this.emfileWarned = false;
@@ -224,7 +224,7 @@ export class LocalWatcher extends EventEmitter {
       // We do NOT fall back to chokidar polling: that stat()s every watched
       // path each tick (~27k paths / 2s = thousands of syscalls per second),
       // which is far worse than the problem. See the EMFILE handler below.
-      // awaitWriteFinish DISABLED — it allocates a stat-polling interval for
+      // awaitWriteFinish DISABLED - it allocates a stat-polling interval for
       // every file event (100K files = 100K timers + cached Stats = GBs of RAM).
       // Instead we rely on our debounce + maxWait batching in scheduleBatch().
       // The stabilityThreshold was 2s anyway which our 1-2s debounce already covers.
@@ -256,7 +256,7 @@ export class LocalWatcher extends EventEmitter {
           this.emfileWarned = true;
           this.degraded = true;
           // Abandon live watching for this tree. Polling would stat() every
-          // path on every tick — on a 15k-directory tree that's thousands of
+          // path on every tick - on a 15k-directory tree that's thousands of
           // syscalls per second and murders CPU/battery. Periodic full
           // rescans (driven by the engine) are the right trade-off here:
           // a backup doesn't need sub-second change detection.
@@ -307,7 +307,7 @@ export class LocalWatcher extends EventEmitter {
     this.debounceTimer = setTimeout(() => this.flush(), this.debounceMs);
 
     // Max-wait timer: flush after maxWaitMs regardless of new events.
-    // Only set once per batch — don't reset on every event.
+    // Only set once per batch - don't reset on every event.
     if (!this.maxWaitTimer) {
       this.maxWaitTimer = setTimeout(() => this.flush(), this.maxWaitMs);
     }

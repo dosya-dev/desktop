@@ -10,11 +10,11 @@ import { WorkspaceProvider, useWorkspace } from "./lib/workspace-context";
 import { LoginPage } from "./pages/LoginPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
 
-// Layout (needed by every protected page — keep eager)
+// Layout (needed by every protected page - keep eager)
 import { AppShell } from "./components/layout/AppShell";
 
 // Everything else is code-split into its own chunk and loaded on demand.
-// This keeps the initial bundle small — the heavy pages (FileBrowser, Sync,
+// This keeps the initial bundle small - the heavy pages (FileBrowser, Sync,
 // Profile, Upload, Settings) only download when the user navigates to them.
 // Pages use named exports, so map them to a default for React.lazy().
 const lazyPage = <T extends Record<string, React.ComponentType<any>>>(
@@ -66,7 +66,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/onboarding" replace />;
   }
 
-  // Workspace query failed (e.g. 401) — show retry instead of create-workspace
+  // Workspace query failed (e.g. 401) - show retry instead of create-workspace
   if (isError && workspaces.length === 0) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4">
@@ -84,7 +84,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // No workspaces — force the user to create one first
+  // No workspaces - force the user to create one first
   if (workspaces.length === 0) {
     return <CreateWorkspacePage />;
   }
@@ -103,7 +103,7 @@ function ProtectedPage({ children }: { children: React.ReactNode }) {
 function AppRoutes() {
   return (
     <Routes>
-      {/* Onboarding — always shown before login */}
+      {/* Onboarding - always shown before login */}
       <Route path="/onboarding" element={<OnboardingPage />} />
 
       {/* Public routes */}

@@ -1,4 +1,4 @@
-// Ported from apps/web/src/components/share-modal.tsx — keep in sync with the web copy.
+// Ported from apps/web/src/components/share-modal.tsx - keep in sync with the web copy.
 import { useState, useRef, useCallback } from "react";
 import { Mail, Link2, X, Loader2, Copy, ChevronDown } from "lucide-react";
 import { toast } from "sonner";

@@ -1,4 +1,4 @@
-// Ported from apps/web/src/lib/text-highlight.ts — keep in sync with the web copy.
+// Ported from apps/web/src/lib/text-highlight.ts - keep in sync with the web copy.
 import type { HighlighterCore } from 'shiki/core';
 
 const THEME = 'github-dark-default';
