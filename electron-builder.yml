@@ -20,9 +20,17 @@ files:
 publish: []
 
 # ── macOS ───────────────────────────────────────────────────────────
+# Two targets: the .dmg is the human download (drag-to-Applications), the
+# .zip is what electron-updater installs in place (it cannot update from a
+# .dmg). Both are built from the same signed .app in one pass, so notarizing
+# the .dmg registers the identical .app the .zip carries. See the update feed
+# wiring in apps/api (renderLatestYaml points mac at the .zip).
 mac:
   target:
     - target: dmg
+      arch:
+        - universal
+    - target: zip
       arch:
         - universal
   icon: build/icon.png
