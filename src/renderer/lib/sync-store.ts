@@ -7,9 +7,7 @@ export interface SyncPairRuntimeStatus {
   remoteFolderName: string;
   localPath: string;
   syncMode: string;
-  // Mirrors SyncPairStatus in src/main/sync/types.ts. "needs-permission" is
-  // sandboxed (Mac App Store) builds only: macOS dropped the folder grant.
-  status: "idle" | "syncing" | "paused" | "error" | "offline" | "rate-limited" | "needs-permission";
+  status: "idle" | "syncing" | "paused" | "error" | "offline" | "rate-limited";
   lastSyncedAt: number | null;
   errorMessage: string | null;
   filesInQueue: number;

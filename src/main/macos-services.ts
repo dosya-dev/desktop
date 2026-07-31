@@ -11,7 +11,6 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { execFile } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
-import { isMasBuild } from "./mas";
 
 const WORKFLOW_NAME = "Sync with Dosya.workflow";
 // v2: added the required Contents/Info.plist (NSServices). v1 installs shipped
@@ -21,10 +20,6 @@ const WORKFLOW_VERSION = "2";
 
 export function installQuickAction(): void {
   if (process.platform !== "darwin") return;
-  // App Sandbox forbids writing to ~/Library/Services and forbids the
-  // child_process call that registers the workflow. Store builds ship
-  // without the Finder Quick Action.
-  if (isMasBuild()) return;
 
   const servicesDir = join(homedir(), "Library", "Services");
   const workflowDir = join(servicesDir, WORKFLOW_NAME);
@@ -97,7 +92,6 @@ function buildInfoPlist(): string {
 
 export function uninstallQuickAction(): void {
   if (process.platform !== "darwin") return;
-  if (isMasBuild()) return; // never installed one, nothing to remove
 
   const workflowDir = join(homedir(), "Library", "Services", WORKFLOW_NAME);
   if (existsSync(workflowDir)) {

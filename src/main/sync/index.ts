@@ -22,7 +22,6 @@ import type {
   SyncMode,
   RemoteFileInfo,
 } from "./types";
-import { acquireFolderAccess } from "./bookmarks";
 
 // ── Concurrency semaphore ───��───────────────────────────────────────
 
@@ -91,8 +90,6 @@ interface PairRuntime {
   state: SyncPairState;
   watcher: LocalWatcher | null;
   poller: RemotePoller | null;
-  /** Releases the sandbox grant for this pair's folder. Null outside MAS builds. */
-  releaseFolderAccess: (() => void) | null;
   status: SyncPairStatus;
   errorMessage: string | null;
   syncing: boolean;
@@ -401,10 +398,6 @@ export class SyncEngine extends EventEmitter {
       new Promise<void>((r) => setTimeout(r, SAVE_TIMEOUT_MS)),
     ]);
 
-    for (const rt of this.runtimes.values()) {
-      rt.releaseFolderAccess?.();
-      rt.releaseFolderAccess = null;
-    }
     this.runtimes.clear();
     this.activeTransfers.clear();
     this.conflicts = [];
@@ -593,48 +586,6 @@ export class SyncEngine extends EventEmitter {
     if (this.runtimes.has(pair.id)) return;
     console.log("[sync] startPair:", pair.id, "mode:", pair.syncMode, "path:", pair.localPath);
 
-    // Take the sandbox grant BEFORE touching the folder. Outside a Mac App
-    // Store build this always succeeds with a no-op release. Inside one, the
-    // filesystem calls just below would otherwise fail and be misreported as
-    // "sync folder not found" when the real cause is a missing grant.
-    const access_ = acquireFolderAccess(pair.bookmark);
-    if (!access_.ok) {
-      console.log("[sync] startPair denied - no macOS grant for", pair.localPath, `(${access_.reason})`);
-      const rt: PairRuntime = {
-        pair,
-        state: await loadPairState(pair.id),
-        watcher: null,
-        poller: null,
-        releaseFolderAccess: null,
-        status: "needs-permission",
-        errorMessage: "macOS needs permission to this folder again. Reselect it to restore sync.",
-        syncing: false,
-        queuedSync: false,
-        queuedEvents: new Map(),
-        queuedOverflow: false,
-        pathIndex: new PathIndex(),
-        rateLimitResumeTimer: null,
-        rescanTimer: null,
-        totalFilesInBatch: 0,
-        completedFilesInBatch: 0,
-        totalBytesInBatch: 0,
-        completedBytesInBatch: 0,
-        batchStartedAt: 0,
-        phase: null,
-        scannedFiles: 0,
-        scannedFolders: 0,
-        statusText: "",
-        localDirty: true,
-        lastFullLocalScanAt: 0,
-        syncStartedAt: 0,
-        lastProgressAt: 0,
-        lastProgressLogAt: 0,
-      };
-      this.runtimes.set(pair.id, rt);
-      this.emitStatus();
-      return;
-    }
-
     // Clean up orphaned .dosya-sync-tmp files from crashed downloads
     try {
       await this.cleanupTempFiles(pair.localPath);
@@ -648,7 +599,6 @@ export class SyncEngine extends EventEmitter {
         state: await loadPairState(pair.id),
         watcher: null,
         poller: null,
-        releaseFolderAccess: access_.release,
         status: "error",
         errorMessage: `Sync folder not found: ${pair.localPath}`,
         syncing: false,
@@ -755,7 +705,6 @@ export class SyncEngine extends EventEmitter {
 
     const rt: PairRuntime = {
       pair, state, watcher, poller,
-      releaseFolderAccess: access_.release,
       status: "idle",
       errorMessage: null,
       syncing: false,
@@ -903,8 +852,6 @@ export class SyncEngine extends EventEmitter {
     // Let workers see the paused status and bail out
     await new Promise<void>(r => setTimeout(r, 100));
     try { await this.safeSaveState(rt.state); } catch {}
-    rt.releaseFolderAccess?.();
-    rt.releaseFolderAccess = null;
     this.runtimes.delete(pairId);
   }
 

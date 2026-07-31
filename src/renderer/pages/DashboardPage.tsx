@@ -367,7 +367,6 @@ function SyncCard() {
             const icon =
               p.status === "syncing" ? <Loader2 size={14} className="animate-spin text-blue-500" /> :
               p.status === "error" ? <AlertCircle size={14} className="text-[var(--color-danger)]" /> :
-              p.status === "needs-permission" ? <AlertCircle size={14} style={{ color: "#f59e0b" }} /> :
               p.status === "paused" ? <Pause size={14} className="text-[var(--color-text-muted)]" /> :
               <CheckCircle2 size={14} className="text-[var(--color-primary)]" />;
 

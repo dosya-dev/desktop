@@ -40,36 +40,6 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
 
-# ── Mac App Store ───────────────────────────────────────────────────
-# Sandboxed sibling of the `mac` target above, built from the same source.
-# hardenedRuntime is a Developer ID concept and must stay OFF here - MAS uses
-# the App Sandbox instead. The app disables its Quick Action, its updater and
-# its billing link at runtime via process.mas (see src/main/mas.ts).
-mas:
-  target:
-    - target: pkg
-      arch:
-        - universal
-  category: public.app-category.productivity
-  hardenedRuntime: false
-  entitlements: build/entitlements.mas.plist
-  entitlementsInherit: build/entitlements.mas.inherit.plist
-  provisioningProfile: build/dosya-mas.provisionprofile
-  extendInfo:
-    # Only HTTPS, which is exempt. Declaring it here avoids answering the
-    # export-compliance question on every upload.
-    ITSAppUsesNonExemptEncryption: false
-
-# ── Mac App Store, local test build ────────────────────────────────
-# A store-signed .pkg CANNOT be installed and launched locally: its
-# distribution provisioning profile is only valid for App Store delivery, so
-# the app crashes on launch. Sandbox behaviour has to be verified either
-# through macOS TestFlight or with this development-signed build, which
-# inherits every mas setting except the profile and signing type.
-masDev:
-  type: development
-  provisioningProfile: build/dosya-mas-dev.provisionprofile
-
 # ── Windows ─────────────────────────────────────────────────────────
 win:
   target:

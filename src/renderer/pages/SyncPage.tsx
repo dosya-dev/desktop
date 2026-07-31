@@ -70,19 +70,6 @@ export function SyncPage() {
     return cleanup;
   }, [init]);
 
-  // Sandboxed builds: reopening the picker is the only way to get a fresh
-  // macOS grant, so the new bookmark is saved alongside whatever folder the
-  // user points at - which may legitimately be a moved or renamed one.
-  const reselectFolder = async (pairId: string) => {
-    const picked = await window.electronAPI.pickLocalFolder();
-    if (!picked) return;
-    await window.electronAPI.updateSyncPair(pairId, {
-      localPath: picked.path,
-      bookmark: picked.bookmark,
-    });
-    await refresh();
-  };
-
   // Tick every second while anything is syncing so the elapsed-time readouts
   // advance even when the engine emits no status updates (a slow or stuck
   // phase) - that ticking clock is what tells the user it's alive, not frozen.
@@ -448,10 +435,7 @@ export function SyncPage() {
 
       {tab === "conflicts" && (() => {
         const errorPairs = pairs.filter((p) => p.status === "error" && p.errorMessage);
-        // Sandboxed builds: macOS dropped the grant for this folder. Not an
-        // error - the fix is a reselect, not a retry, so it gets its own list.
-        const permissionPairs = pairs.filter((p) => p.status === "needs-permission");
-        const hasIssues = wsConflicts.length > 0 || errorPairs.length > 0 || permissionPairs.length > 0;
+        const hasIssues = wsConflicts.length > 0 || errorPairs.length > 0;
 
         return (
           <div className="space-y-3">
@@ -463,29 +447,6 @@ export function SyncPage() {
             ) : (
               <>
                 {/* Pair errors */}
-                {permissionPairs.map((p) => (
-                  <div
-                    key={p.pairId}
-                    className="flex items-start gap-3 rounded-xl border p-4"
-                    style={{ borderColor: "var(--color-border)" }}
-                  >
-                    <AlertCircle size={16} className="mt-0.5 shrink-0" style={{ color: "#f59e0b" }} />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium">{p.remoteFolderName}</p>
-                      <p className="mt-0.5 text-xs" style={{ color: "#f59e0b" }}>
-                        macOS needs permission to this folder again.
-                      </p>
-                      <p className="mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
-                    </div>
-                    <button
-                      onClick={() => void reselectFolder(p.pairId)}
-                      className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
-                      style={{ borderColor: "var(--color-border)" }}
-                    >
-                      Reselect folder
-                    </button>
-                  </div>
-                ))}
                 {errorPairs.map((p) => (
                   <div
                     key={p.pairId}
@@ -654,7 +615,6 @@ function SyncPairRow({
     error: { icon: <AlertCircle size={12} />, color: "var(--color-danger)", label: "Error", dot: "bg-red-500" },
     offline: { icon: <AlertCircle size={12} />, color: "#f59e0b", label: "Offline", dot: "bg-yellow-500" },
     "rate-limited": { icon: <Clock size={12} />, color: "#f59e0b", label: "Waiting", dot: "bg-yellow-500" },
-    "needs-permission": { icon: <AlertCircle size={12} />, color: "#f59e0b", label: "Needs permission", dot: "bg-yellow-500" },
   };
 
   // Unknown/transient status falls back to a neutral state, NOT "Error" - a
@@ -760,11 +720,6 @@ function SyncPairRow({
             <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: s.color }}>
               {s.icon} {s.label}
             </span>
-          )}
-          {pair.errorMessage && pair.status === "needs-permission" && (
-            <p className="mt-0.5 max-w-[140px] truncate text-[10px]" style={{ color: "#f59e0b" }} title={pair.errorMessage}>
-              {pair.errorMessage}
-            </p>
           )}
           {pair.errorMessage && pair.status === "error" && (
             <p className="mt-0.5 max-w-[140px] truncate text-[10px] text-[var(--color-danger)]" title={pair.errorMessage}>
@@ -1131,9 +1086,6 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
   const [remoteFolderId, setRemoteFolderId] = useState<string | null>(null);
   const [remoteFolderName, setRemoteFolderName] = useState("Root");
   const [localPath, setLocalPath] = useState("");
-  // Sandboxed builds only: the token macOS returns alongside the picked
-  // folder. Undefined everywhere else, and undefined is a valid pair.
-  const [localBookmark, setLocalBookmark] = useState<string | undefined>(undefined);
   const [stdPaths, setStdPaths] = useState<{ desktop: string | null; documents: string | null; pictures: string | null; downloads: string | null; home: string | null } | null>(null);
 
   useEffect(() => {
@@ -1181,10 +1133,8 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
   }, [foldersData]);
 
   const pickFolder = async () => {
-    const picked = await window.electronAPI.pickLocalFolder();
-    if (!picked) return;
-    setLocalPath(picked.path);
-    setLocalBookmark(picked.bookmark);
+    const path = await window.electronAPI.pickLocalFolder();
+    if (path) setLocalPath(path);
   };
 
   const addPattern = () => {
@@ -1213,7 +1163,6 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
         remoteFolderId,
         remoteFolderName,
         localPath,
-        bookmark: localBookmark,
         selectiveFolders: [],
         region,
         pollIntervalMs: 30000,
@@ -1360,10 +1309,8 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                   </button>
                 </div>
 
-                {/* Known-folder quick backup presets. Hidden in store builds:
-                    they set a path without opening the picker, so macOS never
-                    grants access and the pair would start unusable. */}
-                {stdPaths && !window.electronAPI.isMasBuild && (
+                {/* Known-folder quick backup presets */}
+                {stdPaths && (
                   <div className="mt-2">
                     <p className="mb-1.5 text-xs text-[var(--color-text-muted)]">Quick backup:</p>
                     <div className="flex flex-wrap gap-2">
@@ -1378,7 +1325,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                           <button
                             key={label}
                             type="button"
-                            onClick={() => { setLocalPath(p!); setLocalBookmark(undefined); }}
+                            onClick={() => setLocalPath(p!)}
                             className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                             style={{ borderColor: localPath === p ? "var(--color-primary)" : "var(--color-border)", color: localPath === p ? "var(--color-primary)" : undefined }}
                           >

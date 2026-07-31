@@ -2,9 +2,6 @@ import { contextBridge, ipcRenderer } from "electron";
 
 /** Typed API exposed to the renderer via window.electronAPI */
 const electronAPI = {
-  /** True only in Mac App Store builds. Gates the surfaces the sandbox or
-   *  App Store Review rules forbid (self-update, links out to billing). */
-  isMasBuild: (process as unknown as { mas?: boolean }).mas === true,
   // Platform
   getPlatform: (): Promise<NodeJS.Platform> =>
     ipcRenderer.invoke("app:get-platform"),
@@ -104,8 +101,7 @@ const electronAPI = {
   addSyncPair: (opts: any) => ipcRenderer.invoke("sync:add-pair", opts),
   removeSyncPair: (pairId: string) => ipcRenderer.invoke("sync:remove-pair", { pairId }),
   updateSyncPair: (pairId: string, updates: any) => ipcRenderer.invoke("sync:update-pair", { pairId, updates }),
-  pickLocalFolder: (): Promise<{ path: string; bookmark?: string } | null> =>
-    ipcRenderer.invoke("sync:pick-local-folder"),
+  pickLocalFolder: (): Promise<string | null> => ipcRenderer.invoke("sync:pick-local-folder"),
   getSyncFolderTree: (workspaceId: string) => ipcRenderer.invoke("sync:get-folder-tree", { workspaceId }),
   pauseSyncPair: (pairId: string) => ipcRenderer.invoke("sync:pause-pair", { pairId }),
   resumeSyncPair: (pairId: string) => ipcRenderer.invoke("sync:resume-pair", { pairId }),

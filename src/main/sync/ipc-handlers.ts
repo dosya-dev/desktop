@@ -2,7 +2,6 @@ import { ipcMain, dialog, shell, BrowserWindow } from "electron";
 import { isAbsolute } from "path";
 import type { SyncEngine } from "./index";
 import type { SyncPair, SyncMode } from "./types";
-import { isMasBuild } from "../mas";
 
 const VALID_SYNC_MODES: SyncMode[] = ["two-way", "push", "push-safe", "pull", "pull-safe"];
 const VALID_CONFLICT_STRATEGIES = ["last-write-wins", "keep-both"];
@@ -104,14 +103,8 @@ export function registerSyncIpcHandlers(engine: SyncEngine): void {
     const result = await dialog.showOpenDialog(win, {
       properties: ["openDirectory", "createDirectory"],
       title: "Select sync folder",
-      // Sandboxed builds only. macOS hands back a token that reopens this exact
-      // grant after a relaunch; a saved path alone is inert in the sandbox.
-      securityScopedBookmarks: isMasBuild(),
     });
-    if (result.canceled) return null;
-    const path = result.filePaths[0];
-    if (!path) return null;
-    return { path, bookmark: result.bookmarks?.[0] };
+    return result.canceled ? null : result.filePaths[0] ?? null;
   });
 
   ipcMain.handle("sync:get-folder-tree", async (_e, { workspaceId }) => {

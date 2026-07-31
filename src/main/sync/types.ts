@@ -14,12 +14,6 @@ export interface SyncPair {
   remoteFolderId: string | null;
   remoteFolderName: string;
   localPath: string;
-  /**
-   * Security-scoped bookmark for `localPath`, Mac App Store builds only.
-   * Absent on every pair created by a Developer ID build, and on pairs
-   * saved before this field existed - both are handled as "no-bookmark".
-   */
-  bookmark?: string;
   selectiveFolders: SelectiveFolder[];
   /** User-configured patterns to exclude from sync (e.g. "node_modules", ".env", "*.log"). */
   excludedPatterns: string[];
@@ -122,10 +116,7 @@ export type SyncPairStatus =
   | "paused"
   | "error"
   | "offline"
-  | "rate-limited"
-  // Sandboxed (Mac App Store) builds only: macOS will not reopen this folder.
-  // Sync for this pair is halted until the user reselects it.
-  | "needs-permission";
+  | "rate-limited";
 
 export type TransferDirection = "upload" | "download";
 

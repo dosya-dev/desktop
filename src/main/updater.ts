@@ -1,7 +1,6 @@
 import { app, Notification, BrowserWindow, ipcMain, shell } from "electron";
 import { join } from "path";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
-import { isMasBuild } from "./mas";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -99,16 +98,6 @@ export async function initAutoUpdater(): Promise<void> {
   // Always register IPC so the renderer doesn't error in dev mode
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("updater:get-status", () => updateStatus);
-
-  // Apple rejects self-updating apps; the App Store delivers updates instead.
-  // The action handlers still have to exist - the renderer invokes them, and an
-  // unregistered channel rejects rather than resolving.
-  if (isMasBuild()) {
-    ipcMain.handle("updater:check", () => {});
-    ipcMain.handle("updater:install", () => {});
-    ipcMain.handle("updater:show-file", () => {});
-    return;
-  }
 
   if (!app.isPackaged) {
     // In dev, simulate check so the UI gives feedback
