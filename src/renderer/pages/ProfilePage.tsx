@@ -68,7 +68,9 @@ export function ProfilePage() {
     <div className="flex h-full gap-6">
       {/* Sidebar */}
       <div className="w-48 space-y-1">
-        {TABS.map((t) => (
+        {/* Store builds have no Billing tab: App Store Review Guideline 3.1.1
+            forbids linking out to an external purchase mechanism. */}
+        {TABS.filter((t) => !(t.id === "billing" && window.electronAPI.isMasBuild)).map((t) => (
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
@@ -96,7 +98,7 @@ export function ProfilePage() {
         {tab === "api-keys" && <ApiKeysSection />}
         {tab === "sessions" && <SessionsSection />}
         {tab === "notifications" && <NotificationsSection />}
-        {tab === "billing" && <BillingSection />}
+        {tab === "billing" && !window.electronAPI.isMasBuild && <BillingSection />}
         {tab === "about" && <AboutSection />}
         {tab === "help" && <HelpSection />}
         {tab === "delete" && <DeleteSection />}
@@ -1016,7 +1018,9 @@ function AboutSection() {
             </p>
           </div>
 
-          {status.state === "ready" ? (
+          {/* Store builds are updated by the App Store, so every update
+              control is hidden. The version line above stays. */}
+          {!window.electronAPI.isMasBuild && (status.state === "ready" ? (
             isLinux ? (
               <button
                 onClick={() => window.electronAPI.showUpdateFile()}
@@ -1055,7 +1059,7 @@ function AboutSection() {
               <RefreshCw size={14} />
               Check for updates
             </button>
-          )}
+          ))}
         </div>
 
         {/* Status message */}

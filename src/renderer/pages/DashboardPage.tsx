@@ -28,6 +28,7 @@ interface DashboardData {
     files_this_week: number;
     shared_externally: number;
     total_bytes: number;
+    trash_bytes: number;
     storage_cap_bytes: number;
   };
   storage_breakdown: { name: string; bytes: number; color: string }[];
@@ -158,6 +159,7 @@ export function DashboardPage() {
                   </p>
                   <p className="text-xs text-[var(--color-text-muted)]">
                     of {formatBytes(stats.storage_cap_bytes)} total
+                    {stats.trash_bytes > 0 ? `, ${formatBytes(stats.trash_bytes)} in trash` : ""}
                   </p>
                 </div>
                 <div className="text-right">
@@ -365,6 +367,7 @@ function SyncCard() {
             const icon =
               p.status === "syncing" ? <Loader2 size={14} className="animate-spin text-blue-500" /> :
               p.status === "error" ? <AlertCircle size={14} className="text-[var(--color-danger)]" /> :
+              p.status === "needs-permission" ? <AlertCircle size={14} style={{ color: "#f59e0b" }} /> :
               p.status === "paused" ? <Pause size={14} className="text-[var(--color-text-muted)]" /> :
               <CheckCircle2 size={14} className="text-[var(--color-primary)]" />;
 

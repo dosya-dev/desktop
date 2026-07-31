@@ -1,6 +1,6 @@
 {
   "name": "@dosya-dev/desktop",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "description": "dosya.dev desktop client - sync, upload, and manage your files",
@@ -20,10 +20,13 @@
     "preview": "electron-vite preview",
     "package": "electron-vite build && electron-builder --config electron-builder.yml",
     "package:mac": "electron-vite build && electron-builder --mac --config electron-builder.yml",
+    "package:mas": "electron-vite build && electron-builder --mac mas --universal --config electron-builder.yml",
+    "package:mas-dev": "electron-vite build && electron-builder --mac mas-dev --config electron-builder.yml",
     "package:win": "electron-vite build && electron-builder --win --config electron-builder.yml",
     "package:linux": "electron-vite build && electron-builder --linux --config electron-builder.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "electron-vite build && npx playwright test",
+    "test:unit": "vitest run",
     "test:only": "npx playwright test",
     "test:headed": "electron-vite build && npx playwright test --headed",
     "test:ui": "electron-vite build && npx playwright test --ui"
@@ -64,6 +67,7 @@
     "electron-builder": "^25.1.8",
     "electron-vite": "^3.0.0",
     "tailwindcss": "^4.1.14",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7"
   }
 }

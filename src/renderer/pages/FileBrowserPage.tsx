@@ -203,7 +203,10 @@ export function FileBrowserPage() {
   const [bulkMoveFolderIds, setBulkMoveFolderIds] = useState<string[] | null>(null);
   const [copyTarget, setCopyTarget] = useState<{ id: string; name: string } | null>(null);
   const [pickerFolder, setPickerFolder] = useState<string | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; names: string[]; kinds: ("file" | "folder")[]; bulk?: boolean; folderIds?: string[] } | null>(null);
+  // `permanent`/`fileCount` are only set by the trash view's row-level
+  // "Delete permanently" (context menu), which reuses this same dialog with
+  // different, unmistakably-irreversible copy instead of a second dialog.
+  const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; names: string[]; kinds: ("file" | "folder")[]; bulk?: boolean; folderIds?: string[]; permanent?: boolean; fileCount?: number } | null>(null);
 
   // Viewer + detail panel + modals (web parity)
   const [viewerFile, setViewerFile] = useState<FileRow | null>(null);
@@ -269,10 +272,13 @@ export function FileBrowserPage() {
 
   const navigateToFolder = useCallback(
     (id: string) => {
+      // Trashed folders aren't browsable - the API only lists trash roots flat,
+      // so browsing into one would land on a view the app can't populate.
+      if (showDeleted) return;
       clearSelection();
       setSearchParams({ folder: id });
     },
-    [setSearchParams],
+    [setSearchParams, showDeleted],
   );
 
   const setFilter = (f: string) => {
@@ -362,6 +368,15 @@ export function FileBrowserPage() {
   // ── Open with lock gate (web parity) ───────────────────────
 
   const openFileWithLockCheck = useCallback((file: FileRow, action: "detail" | "view") => {
+    if (showDeleted && action === "detail") {
+      // Trash view is read-only for row activation: no detail panel means no
+      // reachable "Delete file" button and no live Delete/Backspace shortcut
+      // (both gated on `panel`, which now never gets set here). A plain
+      // click just selects the row; Restore/Delete permanently only happen
+      // through the trash context menu built for this view.
+      toggleSelect(file.id);
+      return;
+    }
     if (file.lock_mode === "full_lock" && !unlockedFiles.has(file.id)) {
       setUnlockPrompt({ file, action });
       setUnlockPassword("");
@@ -370,7 +385,7 @@ export function FileBrowserPage() {
     }
     if (action === "detail") setPanel({ file, tab: "info" });
     else setViewerFile(file);
-  }, [unlockedFiles]);
+  }, [unlockedFiles, showDeleted]);
 
   const handleUnlockSubmit = async () => {
     if (!unlockPrompt || !unlockPassword.trim()) return;
@@ -431,6 +446,7 @@ export function FileBrowserPage() {
       setRenameItem(null);
       toast.success("Renamed");
     },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Rename failed"),
   });
 
   const moveMut = useMutation({
@@ -638,7 +654,11 @@ export function FileBrowserPage() {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (viewerFile) return; // the viewer has its own shortcuts
-      if ((e.key === "Delete" || e.key === "Backspace") && panel) {
+      // `panel` can no longer be set while showDeleted (openFileWithLockCheck
+      // and the card's onComments both gate on it), so this is already inert
+      // in the trash view - the explicit check just makes that guarantee
+      // visible here too, rather than relying on tracing every setPanel call.
+      if ((e.key === "Delete" || e.key === "Backspace") && panel && !showDeleted) {
         setDeleteConfirm({ ids: [panel.file.id], names: [panel.file.name], kinds: ["file"] });
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "a") {
@@ -653,26 +673,50 @@ export function FileBrowserPage() {
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [panel, viewerFile, selectAll]);
+  }, [panel, viewerFile, selectAll, showDeleted]);
 
   // ── Bulk actions ───────────────────────────────────────────
 
   const bulkRestore = async () => {
+    let ok = 0, fail = 0;
     for (const id of selected) {
-      try { await api.put(`/api/files/${id}`); } catch {}
+      try { await api.put(`/api/files/${id}`); ok++; } catch { fail++; }
     }
-    toast.success("Restored", { description: `${selected.size} files restored` });
+    for (const id of selectedFolders) {
+      try { await api.put(`/api/folders/${id}`); ok++; } catch { fail++; }
+    }
+    if (fail === 0) toast.success("Restored", { description: `${ok} item${ok === 1 ? "" : "s"} restored` });
+    else toast.error("Some items could not be restored", { description: `${ok} restored, ${fail} failed` });
     clearSelection();
     refresh();
   };
 
   const bulkPermanentDelete = async () => {
+    let ok = 0, fail = 0;
+    // A second DELETE on an already-trashed item purges it. There is no /permanent
+    // sub-route - the call this replaces 404'd silently and still reported success.
     for (const id of selected) {
-      try { await api.delete(`/api/files/${id}/permanent`); } catch {}
+      try { await api.delete(`/api/files/${id}`); ok++; } catch { fail++; }
     }
-    toast.success("Deleted", { description: `${selected.size} files permanently deleted` });
+    for (const id of selectedFolders) {
+      try { await api.delete(`/api/folders/${id}`); ok++; } catch { fail++; }
+    }
+    if (fail === 0) toast.success("Deleted", { description: `${ok} item${ok === 1 ? "" : "s"} permanently deleted` });
+    else toast.error("Some items could not be deleted", { description: `${ok} deleted, ${fail} failed` });
     clearSelection();
     refresh();
+  };
+
+  // Row-level restore from the trash context menu (Restore/Delete permanently
+  // are the only two actions offered there - see the context menu below).
+  const restoreItem = async (id: string, kind: "file" | "folder") => {
+    try {
+      await api.put(kind === "folder" ? `/api/folders/${id}` : `/api/files/${id}`);
+      toast.success("Restored");
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "Restore failed");
+    }
   };
 
   const visibleCols = ALL_COLUMNS.filter((c) => visibleColumns.has(c.key));
@@ -866,6 +910,18 @@ export function FileBrowserPage() {
         ))}
       </div>
 
+      {/* Trash notice - items here still count against storage; only a
+          permanent delete reclaims it. Static text, not a dismissible
+          banner. */}
+      {showDeleted && (
+        <div
+          className="mb-3 rounded-lg px-4 py-2 text-xs"
+          style={{ background: "var(--color-bg-tertiary)", color: "var(--color-text-secondary)" }}
+        >
+          Items in the trash still count against your storage. Delete them permanently to free up space.
+        </div>
+      )}
+
       {/* Bulk Actions */}
       {totalSelected > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg bg-[var(--color-bg-tertiary)] px-4 py-2 text-sm">
@@ -880,7 +936,19 @@ export function FileBrowserPage() {
               </button>
               <button
                 className="flex items-center gap-1 text-[var(--color-danger)] hover:text-[var(--color-danger-hover)]"
-                onClick={bulkPermanentDelete}
+                onClick={() => {
+                  // Route through the shared confirm dialog instead of firing
+                  // bulkPermanentDelete() straight from the toolbar - this is
+                  // a second DELETE on already-trashed items, which purges
+                  // rows and R2 objects for good with no way back.
+                  const fileIds = Array.from(selected);
+                  const folderIds = Array.from(selectedFolders);
+                  const names = [
+                    ...fileIds.map((id) => allFiles.find((f) => f.id === id)?.name ?? id),
+                    ...folderIds.map((id) => allFolders.find((f) => f.id === id)?.name ?? id),
+                  ];
+                  setDeleteConfirm({ ids: fileIds, folderIds, names, kinds: fileIds.map(() => "file" as const), bulk: true, permanent: true });
+                }}
               >
                 <Trash2 size={14} /> Delete permanently
               </button>
@@ -1181,7 +1249,11 @@ export function FileBrowserPage() {
                       setContextMenu({ x: e.clientX, y: e.clientY, item: { id: file.id, name: file.name, kind: "file" } });
                     }}
                     onFavourite={() => toggleFavourite(file.id)}
-                    onComments={() => setPanel({ file, tab: "comments" })}
+                    // A second, independent path to the same detail panel (and
+                    // its live Delete button) - gate it the same way as the
+                    // card's own onClick above, or the trash view stays only
+                    // half read-only.
+                    onComments={() => { if (showDeleted) toggleSelect(file.id); else setPanel({ file, tab: "comments" }); }}
                     onShare={() => setShareTarget({ id: file.id, name: file.name })}
                     onMore={(e) => {
                       e.stopPropagation();
@@ -1251,7 +1323,33 @@ export function FileBrowserPage() {
               borderColor: "var(--color-border)",
             }}
           >
-            {contextMenu.item.kind === "folder" ? (
+            {showDeleted ? (
+              // Trash view: a soft-deleted row can only come back or be purged
+              // for good. Rename/Move/Lock/Hide/Share/Open either 404 against
+              // the is_deleted=0 predicate those routes filter on, or - for
+              // "Open" on a folder - navigate somewhere the app can't browse.
+              // "Delete" here is a second DELETE, which is a permanent purge
+              // (subtree, files and R2 objects included for a folder), so it
+              // gets its own unmistakable copy via the shared confirm dialog
+              // instead of the routine "Delete" wording below.
+              <>
+                <CtxItem icon={<RotateCcw size={14} />} label="Restore" onClick={() => {
+                  restoreItem(contextMenu.item.id, contextMenu.item.kind);
+                  setContextMenu(null);
+                }} />
+                <Divider />
+                <CtxItem icon={<Trash2 size={14} />} label="Delete permanently" danger onClick={() => {
+                  setDeleteConfirm({
+                    ids: [contextMenu.item.id],
+                    names: [contextMenu.item.name],
+                    kinds: [contextMenu.item.kind],
+                    permanent: true,
+                    fileCount: contextMenu.item.kind === "folder" ? ctxFolder?.file_count : undefined,
+                  });
+                  setContextMenu(null);
+                }} />
+              </>
+            ) : contextMenu.item.kind === "folder" ? (
               <>
                 <CtxItem icon={<FolderOpen size={14} />} label="Open" onClick={() => { navigateToFolder(contextMenu.item.id); setContextMenu(null); }} />
                 <CtxItem icon={<Info size={14} />} label="Get info" onClick={() => {
@@ -1480,24 +1578,46 @@ export function FileBrowserPage() {
               <Trash2 size={20} className="text-[var(--color-danger)]" />
             </div>
             <div>
-              <h3 className="text-lg font-semibold">Delete {deleteConfirm.names.length === 1 ? "item" : `${deleteConfirm.names.length} items`}?</h3>
-              <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                {deleteConfirm.names.length === 1 ? (
+              <h3 className="text-lg font-semibold">
+                {deleteConfirm.permanent
+                  ? deleteConfirm.bulk
+                    ? `Delete ${deleteConfirm.names.length} item${deleteConfirm.names.length === 1 ? "" : "s"} permanently?`
+                    : "Delete permanently?"
+                  : `Delete ${deleteConfirm.names.length === 1 ? "item" : `${deleteConfirm.names.length} items`}?`}
+              </h3>
+              <p className={`mt-1 text-sm ${deleteConfirm.permanent ? "text-[var(--color-danger)]" : "text-[var(--color-text-secondary)]"}`}>
+                {deleteConfirm.permanent ? (
+                  deleteConfirm.bulk ? (
+                    <>
+                      Permanently delete <strong>{deleteConfirm.names.length}</strong> item{deleteConfirm.names.length === 1 ? "" : "s"}?
+                      This cannot be undone.
+                    </>
+                  ) : (
+                    <>
+                      Permanently delete <strong>{deleteConfirm.names[0]}</strong>
+                      {deleteConfirm.kinds[0] === "folder" && !!deleteConfirm.fileCount &&
+                        ` and its ${deleteConfirm.fileCount} file${deleteConfirm.fileCount === 1 ? "" : "s"}`}
+                      ? This cannot be undone.
+                    </>
+                  )
+                ) : deleteConfirm.names.length === 1 ? (
                   <>Are you sure you want to delete <strong>{deleteConfirm.names[0]}</strong>?</>
                 ) : (
                   <>Are you sure you want to delete these {deleteConfirm.names.length} items?</>
                 )}
               </p>
-              {deleteConfirm.names.length > 1 && deleteConfirm.names.length <= 5 && (
+              {(!deleteConfirm.permanent || deleteConfirm.bulk) && deleteConfirm.names.length > 1 && deleteConfirm.names.length <= 5 && (
                 <ul className="mt-2 space-y-0.5 text-xs text-[var(--color-text-muted)]">
                   {deleteConfirm.names.map((n, i) => (
                     <li key={i} className="truncate">· {n}</li>
                   ))}
                 </ul>
               )}
-              <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                This action can be undone from the Deleted filter.
-              </p>
+              {!deleteConfirm.permanent && (
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  This action can be undone from the Deleted filter. It keeps using storage until permanently deleted.
+                </p>
+              )}
             </div>
           </div>
           <div className="mt-5 flex justify-end gap-2">
@@ -1510,7 +1630,12 @@ export function FileBrowserPage() {
             </button>
             <button
               onClick={async () => {
-                if (deleteConfirm.bulk) {
+                if (deleteConfirm.bulk && deleteConfirm.permanent) {
+                  // Row-by-row permanent DELETE (there's no bulk-purge route) -
+                  // reuses the same runner as the bulk-bar button so both
+                  // paths land here after this confirmation.
+                  await bulkPermanentDelete();
+                } else if (deleteConfirm.bulk) {
                   try {
                     await api.post("/api/files/batch-delete", {
                       workspace_id: active!.id,
@@ -1526,7 +1651,7 @@ export function FileBrowserPage() {
                   }
                 } else {
                   deleteConfirm.ids.forEach((id, i) => deleteMut.mutate({ id, kind: deleteConfirm.kinds[i] }));
-                  toast.success("Deleted");
+                  toast.success(deleteConfirm.permanent ? "Permanently deleted" : "Deleted");
                   clearSelection();
                 }
                 setPanel((p) => (p && deleteConfirm.ids.includes(p.file.id) ? null : p));
@@ -1534,7 +1659,7 @@ export function FileBrowserPage() {
               }}
               className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
             >
-              Delete
+              {deleteConfirm.permanent ? "Delete permanently" : "Delete"}
             </button>
           </div>
         </Modal>

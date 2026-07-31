@@ -170,7 +170,9 @@ export function SettingsPage() {
     <div className="flex h-full gap-6">
       {/* Sidebar Tabs */}
       <div className="w-48 space-y-1">
-        {TABS.map((t) => (
+        {/* Store builds hide Updates: it lists installer downloads, which a
+            sandboxed App Store build must not offer. */}
+        {TABS.filter((t) => !(t.id === "updates" && window.electronAPI.isMasBuild)).map((t) => (
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
@@ -327,7 +329,7 @@ export function SettingsPage() {
           </Section>
         )}
 
-        {tab === "updates" && (
+        {tab === "updates" && !window.electronAPI.isMasBuild && (
           <Section title="App updates">
             <UpdatesSection />
           </Section>
