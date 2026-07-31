@@ -288,7 +288,7 @@ if (!gotTheLock) {
     // the provider URL carrying it. The dosya:// callback is only honored if it
     // echoes this exact nonce back (see handleDosyaUrl).
     ipcMain.handle("auth:begin-oauth", (_e, provider: string) => {
-      if (provider !== "google" && provider !== "github") {
+      if (provider !== "google" && provider !== "github" && provider !== "apple") {
         throw new Error("Unknown OAuth provider");
       }
       pendingOAuthNonce = randomUUID();

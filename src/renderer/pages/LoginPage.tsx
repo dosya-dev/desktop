@@ -219,6 +219,19 @@ export function LoginPage() {
             </svg>
             Continue with GitHub
           </button>
+          <button
+            onClick={() => handleOAuth("apple")}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)] transition-colors"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            {/* currentColor so the mark inverts with the active theme, the way
+                the GitHub mark above does. Apple's button guidelines allow this
+                white-outline variant with "Continue with Apple". */}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M17.05 12.536c-.02-2.29 1.87-3.39 1.955-3.443-1.065-1.558-2.72-1.771-3.31-1.795-1.41-.142-2.75.83-3.465.83-.714 0-1.816-.81-2.986-.788-1.536.023-2.953.893-3.743 2.267-1.596 2.766-.408 6.86 1.146 9.105.76 1.099 1.667 2.334 2.856 2.29 1.145-.046 1.577-.741 2.962-.741 1.385 0 1.774.741 2.986.718 1.233-.02 2.014-1.12 2.768-2.223.873-1.275 1.232-2.51 1.253-2.573-.027-.012-2.404-.922-2.428-3.657zM14.79 5.518c.632-.766 1.058-1.832.942-2.894-.91.037-2.013.606-2.665 1.371-.586.679-1.099 1.764-.96 2.805 1.015.079 2.05-.516 2.683-1.282z" />
+            </svg>
+            Continue with Apple
+          </button>
         </div>
 
         <p className="mt-6 text-center text-sm text-[var(--color-text-secondary)]">
