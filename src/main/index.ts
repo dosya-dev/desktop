@@ -1,6 +1,6 @@
 // Patch fs to handle EMFILE (too many open files) gracefully - must run before anything touches fs.
 import { gracefulify } from "graceful-fs";
-import fs from "fs";
+import fs, { statSync } from "fs";
 gracefulify(fs);
 
 import { app, BrowserWindow, shell, powerMonitor, session, crashReporter, ipcMain, protocol, net } from "electron";
@@ -17,6 +17,8 @@ crashReporter.start({
   compress: true,
 });
 import { registerIpcHandlers } from "./ipc";
+import { isQuitting, markQuitting } from "./quit-state";
+import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { setupSession } from "./session";
 import { createMenu } from "./menu";
 import { createTray } from "./tray";
@@ -88,6 +90,8 @@ let mainWindow: BrowserWindow | null = null;
 // Handles URLs like dosya://sync?path=/Users/john/Documents
 // Triggered by the macOS Quick Action or protocol links.
 let pendingSyncPath: string | null = null;
+/** Backstop if the renderer never reports did-finish-load (blank/failed load). */
+const SYNC_START_FALLBACK_MS = 8000;
 
 // Single-use nonce for the OAuth login flow. We generate it when the user
 // starts login (auth:begin-oauth), send it as OAuth `state`, and only accept a
@@ -139,14 +143,19 @@ function handleDosyaUrl(url: string): void {
 
     // dosya://sync?path=/Users/john/Documents - sync folder request
     if (parsed.hostname === "sync" || parsed.pathname === "//sync") {
-      const folderPath = parsed.searchParams.get("path");
-      if (!folderPath) return;
+      const rawPath = parsed.searchParams.get("path");
+      if (!rawPath) return;
 
-      // Validate path: must be absolute, no traversal, reasonable length
-      if (folderPath.length > 1000) return;
-      if (folderPath.includes("..")) return;
-      const { isAbsolute } = require("path");
-      if (!isAbsolute(folderPath)) return;
+      // Anyone can navigate a browser to a custom scheme, so this value is
+      // untrusted - see deep-link-path.ts for what the old two-line check let
+      // through. Only the resolved, existence-checked path is forwarded.
+      const folderPath = validateSyncDeepLinkPath(rawPath, (p) => {
+        try { return statSync(p).isDirectory(); } catch { return false; }
+      });
+      if (!folderPath) {
+        console.warn("[deep-link] rejected dosya://sync path");
+        return;
+      }
 
       if (mainWindow) {
         mainWindow.show();
@@ -207,7 +216,7 @@ function createWindow(): void {
 
   // Hide window instead of closing - app keeps running in tray
   mainWindow.on("close", (e) => {
-    if (!(app as any).isQuitting) {
+    if (!isQuitting()) {
       e.preventDefault();
       mainWindow?.hide();
     }
@@ -265,6 +274,9 @@ if (!gotTheLock) {
   });
 
   let syncEngine: SyncEngine | undefined;
+  /** Guard so the did-finish-load signal and its fallback timer can't both start sync. */
+  let syncStarted = false;
+  let startSyncOnce: (() => void) | undefined;
 
   app.whenReady().then(async () => {
     // Serve the packaged renderer from app://bundle (must be registered before
@@ -317,14 +329,25 @@ if (!gotTheLock) {
       syncEngine = new SyncEngine(API_BASE);
       registerSyncIpcHandlers(syncEngine);
       createTray(mainWindow!, syncEngine);
-      // Delay sync start by 3s so the renderer loads and paints first.
-      // Without this, heavy sync operations (state loading, snapshot fetch,
-      // reconcile) block the main thread IPC and the window stays blank.
-      setTimeout(() => {
+      // Sync must not start before the renderer has painted: state loading,
+      // snapshot fetch and reconcile all block the main thread's IPC and the
+      // window would sit blank. This waited a flat 3s for that, which both
+      // idled fast machines and could still fire too early on slow ones.
+      // did-finish-load is the actual signal; the timer is now only a backstop
+      // for a renderer that never finishes loading.
+      startSyncOnce = () => {
+        if (syncStarted) return;
+        syncStarted = true;
         syncEngine?.start().catch((err) => {
           console.error("[sync] Failed to start:", err);
         });
-      }, 3000);
+        // Battery state is reconciled as part of the same signal rather than
+        // on a separate 4s timer, which used to let sync start and then
+        // immediately stop again on a laptop with "pause on battery".
+        try { void applyBatteryState(powerMonitor.isOnBatteryPower()); } catch {}
+      };
+      mainWindow!.webContents.once("did-finish-load", () => startSyncOnce?.());
+      setTimeout(() => startSyncOnce?.(), SYNC_START_FALLBACK_MS);
     } catch (err) {
       console.error("[sync] Failed to initialize:", err);
       createTray(mainWindow!);
@@ -395,12 +418,19 @@ if (!gotTheLock) {
       // woke on AC. Without this, waking on battery leaves sync running against
       // the user's preference.
       applyBatteryState(powerMonitor.isOnBatteryPower()).catch(() => {});
+      // A machine that slept through a network change comes back with pairs
+      // parked on stale connection errors - retry them now rather than after
+      // the next 30s recovery tick.
+      syncEngine?.notifyNetworkOnline();
     });
 
-    // Handle the initial battery state too (events only fire on transitions).
-    setTimeout(() => {
-      try { applyBatteryState(powerMonitor.isOnBatteryPower()); } catch {}
-    }, 4000);
+    // The renderer forwards the browser's `online` event (Electron's main
+    // process has no equivalent), which is the earliest reliable signal that
+    // connectivity is back after an outage.
+    ipcMain.on("net:online", () => syncEngine?.notifyNetworkOnline());
+
+    // Initial battery state is handled by startSyncOnce (events only fire on
+    // transitions), so sync and the battery rule are decided by one signal.
 
     app.on("activate", () => {
       if (mainWindow) {
@@ -418,7 +448,7 @@ if (!gotTheLock) {
   app.on("window-all-closed", () => {
     if (process.platform === "linux") {
       // On Linux, quit if there's no tray icon to reopen from
-      (app as any).isQuitting = true;
+      markQuitting();
       app.quit();
     }
     // macOS/Windows: do nothing - app stays alive in tray
@@ -427,7 +457,7 @@ if (!gotTheLock) {
   // Clean shutdown: prevent quit until sync state is persisted.
   let isShuttingDown = false;
   app.on("before-quit", (e) => {
-    (app as any).isQuitting = true;
+    markQuitting();
 
     if (!syncEngine || isShuttingDown) return;
 

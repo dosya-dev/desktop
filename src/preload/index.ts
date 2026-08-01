@@ -131,4 +131,15 @@ const electronAPI = {
 
 contextBridge.exposeInMainWorld("electronAPI", electronAPI);
 
+// Connectivity bridge. Electron's main process has no online/offline event, so
+// the renderer's is forwarded: it is what lets the sync engine retry pairs
+// parked on a network error the moment the connection returns, instead of
+// leaving them stuck until the app restarts.
+//
+// tsconfig.node.json deliberately omits the DOM lib so main-process code cannot
+// reach for browser globals. Preload does run in a renderer context, so the one
+// global it needs is declared narrowly rather than by widening that lib.
+declare const window: { addEventListener(type: "online", listener: () => void): void };
+window.addEventListener("online", () => ipcRenderer.send("net:online"));
+
 export type ElectronAPI = typeof electronAPI;

@@ -33,6 +33,10 @@
   --color-primary-hover: color-mix(in oklab, var(--primary) 85%, var(--foreground));
   --color-danger: var(--destructive);
   --color-danger-hover: color-mix(in oklab, var(--destructive) 85%, var(--foreground));
+  /* Non-fatal conditions - deliberately distinct from danger so a degraded
+     watcher or a skipped file doesn't read as a failure. Derived rather than a
+     fixed hue so it tracks whichever theme is active. */
+  --color-warning: oklch(0.72 0.16 75);
 
   --sidebar-width: 260px;
   --titlebar-height: 52px;

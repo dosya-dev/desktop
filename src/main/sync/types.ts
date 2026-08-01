@@ -157,6 +157,12 @@ export interface SyncStatus {
   recentLogs: SyncLogEntry[];
 }
 
+/** A non-fatal, user-visible condition attached to a pair. */
+export interface SyncNotice {
+  kind: "degraded-watch" | "files-skipped";
+  message: string;
+}
+
 export interface SyncPairRuntimeStatus {
   pairId: string;
   workspaceId: string;
@@ -167,6 +173,13 @@ export interface SyncPairRuntimeStatus {
   status: SyncPairStatus;
   lastSyncedAt: number | null;
   errorMessage: string | null;
+  /**
+   * Non-fatal conditions the user needs to know about while the pair keeps
+   * working - live watching downgraded to periodic rescans, files skipped for
+   * being too large. These are not errors (`status` stays idle/syncing), so
+   * they had nowhere to surface and only ever reached a console warning.
+   */
+  notices: SyncNotice[];
   filesInQueue: number;
   /** Total files in the current batch operation (scan/reconcile). 0 when idle. */
   totalFilesInBatch: number;

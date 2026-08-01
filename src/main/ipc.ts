@@ -13,6 +13,7 @@ import { mkdir, rm } from "fs/promises";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import QRCode from "qrcode";
+import { longPath } from "./sync/paths";
 import { clearSessionCookie } from "./session";
 
 /** Allowed OAuth providers (prevents open redirect via arbitrary provider strings). */
@@ -83,33 +84,61 @@ export function registerIpcHandlers(apiBase: string): void {
   // This handler polls until the fix is applied, and applies it directly
   // if the cookies.on("changed") listener hasn't done so yet.
   ipcMain.handle("auth:wait-for-session", async () => {
-    for (let i = 0; i < 30; i++) {
+    const WAIT_TIMEOUT_MS = 10_000;
+
+    /** Returns true when the cookie is present and usable (fixing it if not). */
+    const tryResolve = async (): Promise<boolean> => {
       const cookies = await session.defaultSession.cookies.get({ name: "dosya_session" });
-      const ready = cookies.some((c) => c.sameSite === "no_restriction");
-      if (ready) return;
+      if (cookies.some((c) => c.sameSite === "no_restriction")) return true;
 
-      // Cookie exists but hasn't been fixed yet - apply the fix directly
-      // instead of waiting for the cookies.on("changed") listener.
       const unfixed = cookies.find((c) => c.sameSite !== "no_restriction");
-      if (unfixed) {
-        try {
-          await session.defaultSession.cookies.set({
-            url: apiBase,
-            name: unfixed.name,
-            value: unfixed.value,
-            httpOnly: unfixed.httpOnly,
-            secure: true,
-            expirationDate: unfixed.expirationDate || Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
-            sameSite: "no_restriction",
-          });
-          return;
-        } catch {
-          // set() failed - fall through and retry on next iteration
-        }
+      if (!unfixed) return false; // not logged in yet - nothing to fix
+      try {
+        await session.defaultSession.cookies.set({
+          url: apiBase,
+          name: unfixed.name,
+          value: unfixed.value,
+          httpOnly: unfixed.httpOnly,
+          secure: true,
+          expirationDate: unfixed.expirationDate || Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+          sameSite: "no_restriction",
+        });
+        return true;
+      } catch {
+        return false; // a "changed" event will bring us back here
       }
+    };
 
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    if (await tryResolve()) return;
+
+    // Wait on the cookie store's own event rather than re-querying 30 times at
+    // 100ms. The old loop cost up to 3s of latency purely in polling
+    // granularity and gave up while a slow login was still in flight; this
+    // reacts the moment the cookie lands and can afford a longer ceiling.
+    await new Promise<void>((resolveWait) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        session.defaultSession.cookies.removeListener("changed", onChanged);
+        resolveWait();
+      };
+      const onChanged = (
+        _e: Electron.Event,
+        cookie: Electron.Cookie,
+        _cause: string,
+        removed: boolean,
+      ): void => {
+        if (cookie.name !== "dosya_session" || removed) return;
+        void tryResolve().then((ok) => { if (ok) finish(); });
+      };
+      const timer = setTimeout(finish, WAIT_TIMEOUT_MS);
+      session.defaultSession.cookies.on("changed", onChanged);
+      // Re-check once after subscribing: the cookie may have landed in the gap
+      // between the first check and the listener being attached.
+      void tryResolve().then((ok) => { if (ok) finish(); });
+    });
   });
 
   // OAuth via popup BrowserWindow
@@ -283,10 +312,17 @@ export function registerIpcHandlers(apiBase: string): void {
         throw new Error(`Download failed: ${res.status}`);
       }
 
-      const fileStream = createWriteStream(filePath);
+      const fileStream = createWriteStream(longPath(filePath));
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
 
-      await shell.openPath(filePath);
+      // shell.openPath resolves to an error STRING ("" on success), so ignoring
+      // it made every failure look like a successful open. Note the `\\?\`
+      // long-path prefix is deliberately NOT applied here: it is understood by
+      // the Win32 file APIs (hence longPath on the write above) but not by
+      // ShellExecute, which backs openPath - prefixing would turn a
+      // path-too-long failure into an unconditional one.
+      const openErr = await shell.openPath(filePath);
+      if (openErr) throw new Error(`Could not open the file: ${openErr}`);
       return { ok: true };
     },
   );
@@ -334,7 +370,7 @@ export function registerIpcHandlers(apiBase: string): void {
         throw new Error(`Download failed: ${res.status}`);
       }
 
-      const fileStream = createWriteStream(filePath);
+      const fileStream = createWriteStream(longPath(filePath));
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
       return { ok: true, path: filePath };
     },
@@ -363,7 +399,7 @@ export function registerIpcHandlers(apiBase: string): void {
       });
       if (!res.ok) throw new Error(`Download failed: ${res.status}`);
 
-      const fileStream = createWriteStream(filePath);
+      const fileStream = createWriteStream(longPath(filePath));
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
       return { ok: true, path: filePath };
     },

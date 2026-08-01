@@ -1,5 +1,11 @@
 import { create } from "zustand";
 
+/** Mirrors SyncNotice in src/main/sync/types.ts. */
+export interface SyncNotice {
+  kind: "degraded-watch" | "files-skipped";
+  message: string;
+}
+
 export interface SyncPairRuntimeStatus {
   pairId: string;
   workspaceId: string;
@@ -10,6 +16,8 @@ export interface SyncPairRuntimeStatus {
   status: "idle" | "syncing" | "paused" | "error" | "offline" | "rate-limited";
   lastSyncedAt: number | null;
   errorMessage: string | null;
+  /** Non-fatal conditions worth showing while the pair keeps working. */
+  notices: SyncNotice[];
   filesInQueue: number;
   totalFilesInBatch: number;
   completedFilesInBatch: number;

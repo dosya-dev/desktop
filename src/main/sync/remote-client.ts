@@ -2,6 +2,7 @@ import { app, session } from "electron";
 import { createReadStream, createWriteStream, readFileSync } from "fs";
 import { stat, readFile, writeFile as fsWriteFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
 import { basename, extname } from "path";
+import { randomBytes } from "crypto";
 import { Transform, type Readable } from "stream";
 import { longPath } from "./paths";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
@@ -164,7 +165,11 @@ const RETRY_DELAYS = [1000, 3000, 8000]; // exponential-ish backoff
 // stopping a misbehaving cursor from looping forever.
 const MAX_SNAPSHOT_PAGES = 50_000;
 const NON_RETRYABLE = new Set(["SESSION_EXPIRED", "RATE_LIMITED"]);
-const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+// R2 (like S3) allows at most 10,000 parts in one multipart upload. That, times
+// whatever part size the server picks at init time, IS the real size ceiling -
+// so it is derived per-upload rather than hardcoded. The old fixed 2 GB cap was
+// an artificial floor far below what the resumable path already handled.
+const MAX_MULTIPART_PARTS = 10_000;
 
 const MIME_MAP: Record<string, string> = {
   pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
@@ -786,12 +791,6 @@ export class RemoteClient {
     const ext = extname(fileName).slice(1).toLowerCase();
     const mimeType = MIME_MAP[ext] || "application/octet-stream";
 
-    if (fileStat.size > MAX_FILE_SIZE) {
-      throw new Error(
-        `File too large (${Math.round(fileStat.size / 1024 / 1024)} MB). Maximum supported size is ${MAX_FILE_SIZE / 1024 / 1024 / 1024} GB.`,
-      );
-    }
-
     const initBody: Record<string, unknown> = {
       workspace_id: workspaceId,
       file_name: fileName,
@@ -818,6 +817,16 @@ export class RemoteClient {
       // ── Resumable multipart: per-part retry, survives network drops ──
       const partSize = initData.resumable.part_size as number;
       const totalParts = initData.resumable.total_parts as number;
+
+      // Fail here with a real number rather than somewhere around part 10,001
+      // with an opaque R2 error.
+      if (totalParts > MAX_MULTIPART_PARTS) {
+        const ceilingGb = Math.floor((MAX_MULTIPART_PARTS * partSize) / 1024 / 1024 / 1024);
+        throw new Error(
+          `File too large (${Math.round(fileStat.size / 1024 / 1024 / 1024)} GB). ` +
+          `The maximum supported size is ${ceilingGb} GB.`,
+        );
+      }
 
       // Check which parts are already uploaded (for resume after crash)
       let uploadedParts = new Set<number>();
@@ -1081,7 +1090,10 @@ export class RemoteClient {
 
     // Build multipart/form-data manually using Node.js Buffers.
     // We can't use FormData (it's a browser API) in the main process.
-    const boundary = `----DosyaBatch${Date.now()}${Math.random().toString(36).slice(2)}`;
+    // Cryptographically random rather than time+Math.random(): a boundary that
+    // happens to occur inside a file's bytes silently corrupts the request, and
+    // the file contents here are arbitrary user data.
+    const boundary = `----DosyaBatch${randomBytes(16).toString("hex")}`;
     const parts: Buffer[] = [];
 
     const manifest = {
@@ -1452,9 +1464,34 @@ export class RemoteClient {
       req.on("timeout", () => { req.destroy(); reject(new Error("Upload timed out")); });
       req.on("error", reject);
 
+      // Content-Length was declared from an earlier stat(), but the stream
+      // reads whatever is on disk NOW. A file truncated or appended to between
+      // the two (an app rewriting its save file, a partial download) would send
+      // a body that disagrees with the declared length - short bodies hang the
+      // request until timeout, long ones get truncated, and either way R2 could
+      // store a corrupt object. Count what actually goes out and refuse to
+      // finish the request unless it matches.
+      let sentBytes = 0;
+      const counter = new Transform({
+        transform(chunk, _enc, cb) {
+          sentBytes += chunk.length;
+          cb(null, chunk);
+        },
+        flush(cb) {
+          if (sentBytes !== fileSize) {
+            cb(new Error(
+              `File changed while uploading (expected ${fileSize} bytes, read ${sentBytes})`,
+            ));
+            return;
+          }
+          cb();
+        },
+      });
+      counter.on("error", (err) => { req.destroy(); reject(err); });
+
       const stream = createReadStream(filePath);
       stream.on("error", (err) => { req.destroy(); reject(err); });
-      this.throttle(stream, this.uploadBucket).pipe(req);
+      this.throttle(stream, this.uploadBucket).pipe(counter).pipe(req);
       }).catch(reject);
     });
   }

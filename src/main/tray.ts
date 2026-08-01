@@ -1,5 +1,6 @@
 import { app, Tray, Menu, nativeImage, shell, type BrowserWindow } from "electron";
 import { join } from "path";
+import { markQuitting } from "./quit-state";
 import type { SyncEngine } from "./sync";
 import type { SyncStatus } from "./sync/types";
 
@@ -136,7 +137,7 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
       {
         label: "Quit dosya",
         click: () => {
-          (app as any).isQuitting = true;
+          markQuitting();
           app.quit();
         },
       },
@@ -154,21 +155,42 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
   // Initial menu
   buildMenu();
 
-  // Rebuild on sync status changes (debounced to avoid excessive menu rebuilds
-  // during large syncs where status fires many times per minute)
+  // Rebuild on sync status changes, throttled rather than debounced. A trailing
+  // debounce reset its timer on every event, so during a large sync - exactly
+  // when status changes most and the user is most likely to look - the menu
+  // could go indefinitely without a rebuild. A throttle rebuilds at most once
+  // per window but is guaranteed to land.
   if (syncEngine) {
-    let menuDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const MENU_THROTTLE_MS = 1000;
+    let lastBuild = 0;
+    let trailingTimer: ReturnType<typeof setTimeout> | null = null;
+    let latestStatus: SyncStatus | undefined;
+
     syncEngine.on("status-changed", (status: SyncStatus) => {
-      if (menuDebounceTimer) clearTimeout(menuDebounceTimer);
-      menuDebounceTimer = setTimeout(() => {
-        menuDebounceTimer = null;
-        buildMenu(status);
-      }, 2000);
+      latestStatus = status;
+      const since = Date.now() - lastBuild;
+      if (since >= MENU_THROTTLE_MS) {
+        lastBuild = Date.now();
+        buildMenu(latestStatus);
+        return;
+      }
+      if (trailingTimer) return; // one already scheduled; it will use latestStatus
+      trailingTimer = setTimeout(() => {
+        trailingTimer = null;
+        lastBuild = Date.now();
+        buildMenu(latestStatus);
+      }, MENU_THROTTLE_MS - since);
     });
   }
 
-  tray.on("click", () => {
+  const showWindow = () => {
     mainWindow.show();
     mainWindow.focus();
-  });
+  };
+
+  tray.on("click", showWindow);
+  // Windows users expect double-click on a tray icon to open the app; without
+  // this the gesture did nothing there. Harmless elsewhere - macOS and Linux
+  // fire "click" and this simply never arrives.
+  tray.on("double-click", showWindow);
 }

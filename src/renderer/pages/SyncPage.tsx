@@ -11,6 +11,7 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Clock,
   Upload,
   Download,
@@ -435,7 +436,12 @@ export function SyncPage() {
 
       {tab === "conflicts" && (() => {
         const errorPairs = pairs.filter((p) => p.status === "error" && p.errorMessage);
-        const hasIssues = wsConflicts.length > 0 || errorPairs.length > 0;
+        // Pairs that are working but in a degraded state, or silently leaving
+        // files out. These aren't errors, so they never appeared anywhere -
+        // a folder could sit on 10-minute polling, or skip a 200 GB disk
+        // image, with nothing but a console line to say so.
+        const noticePairs = pairs.filter((p) => p.notices?.length > 0);
+        const hasIssues = wsConflicts.length > 0 || errorPairs.length > 0 || noticePairs.length > 0;
 
         return (
           <div className="space-y-3">
@@ -468,6 +474,26 @@ export function SyncPage() {
                     </button>
                   </div>
                 ))}
+
+                {/* Non-fatal notices: the pair is still syncing, but not the
+                    way the user would assume. Warning-toned, no Retry - there
+                    is nothing to retry, the condition is informational. */}
+                {noticePairs.map((p) =>
+                  p.notices.map((n) => (
+                    <div
+                      key={`${p.pairId}:${n.kind}`}
+                      className="flex items-start gap-3 rounded-xl border p-4"
+                      style={{ borderColor: "var(--color-border)" }}
+                    >
+                      <AlertTriangle size={16} className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium">{p.remoteFolderName}</p>
+                        <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">{n.message}</p>
+                        <p className="mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
+                      </div>
+                    </div>
+                  )),
+                )}
 
                 {/* File conflicts */}
                 {wsConflicts.map((c) => (

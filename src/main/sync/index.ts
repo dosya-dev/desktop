@@ -15,6 +15,7 @@ import type {
   SyncPairState,
   SyncStatus,
   SyncPairRuntimeStatus,
+  SyncNotice,
   SyncPairStatus,
   ActiveTransfer,
   SyncConflict,
@@ -83,6 +84,37 @@ const TRANSFER_CONCURRENCY_CAP = 32; // never exceed the client's per-host socke
 /** Rescan interval when live watching was abandoned (tree too big - EMFILE). */
 const DEGRADED_RESCAN_MS = 10 * 60 * 1000;
 
+/**
+ * Whether an upload failure is worth giving up on immediately, or should be
+ * left to the normal MAX_FILE_RETRIES ladder.
+ *
+ * The distinction matters most on Windows: antivirus, Search Indexer and
+ * ordinary applications take brief exclusive locks, which surface as EPERM or
+ * EACCES. Those were being matched by a bare `includes("permission")` - the
+ * same test meant for the server's "You don't have permission..." 403 - so one
+ * unlucky moment marked a file permanently failed and no later cycle would
+ * ever retry it. The OS codes are therefore checked FIRST, because the text of
+ * "EPERM: operation not permitted" contains "permitted", not "permission",
+ * but EACCES messages do read "permission denied".
+ */
+/**
+ * Whether a pair's error message describes a connectivity failure - i.e. one
+ * that resolves by itself once the network is back, so the pair should be
+ * retried rather than left parked until the app restarts.
+ */
+function isNetworkErrorMessage(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return /\b(ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|EPIPE|EAI_AGAIN|UND_ERR|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_NAME_NOT_RESOLVED)\b/i.test(message)
+    || /\b(fetch failed|network error|socket hang up|request timed out)\b/i.test(message);
+}
+
+function isPermanentUploadError(message: string): boolean {
+  if (/\b(EPERM|EACCES|EBUSY|ETXTBSY|EAGAIN|EMFILE|ENFILE)\b/.test(message)) return false;
+  if (message.includes("quota")) return true;
+  if (message.toLowerCase().includes("permission")) return true;
+  return false;
+}
+
 // ── Runtime types ───���───────────────────────────────────────────────
 
 interface PairRuntime {
@@ -106,6 +138,9 @@ interface PairRuntime {
   rateLimitResumeTimer: ReturnType<typeof setTimeout> | null;
   /** Periodic rescan timer used when the watcher degraded (tree too large). */
   rescanTimer: ReturnType<typeof setInterval> | null;
+  /** Non-fatal conditions surfaced to the UI, keyed by kind so a repeating
+   *  condition updates its notice instead of stacking duplicates. */
+  notices: Map<SyncNotice["kind"], SyncNotice>;
   /** Total files in the current batch operation (scan/reconcile). 0 when idle. */
   totalFilesInBatch: number;
   /** Files completed so far in the current batch. */
@@ -421,7 +456,10 @@ export class SyncEngine extends EventEmitter {
       // way, say so in the Activity log instead of showing a silent spinner -
       // this is what turns "it just sat at Starting initial sync" from a
       // mystery into a visible, timestamped signal.
-      const STALL_MS = 90_000;
+      // 90s meant a wedged pair looked frozen for a minute and a half before
+      // anything was said. This check runs on the 30s recovery tick, so a 30s
+      // threshold surfaces it on the first or second tick instead.
+      const STALL_MS = 30_000;
       if (rt.syncing && rt.lastProgressAt && Date.now() - rt.lastProgressAt > STALL_MS) {
         const secs = Math.round((Date.now() - (rt.syncStartedAt || rt.lastProgressAt)) / 1000);
         this.log(pairId, `Still working: ${rt.statusText || "syncing"} - ${secs}s elapsed, no new progress yet`);
@@ -434,22 +472,72 @@ export class SyncEngine extends EventEmitter {
           this.client.clearCookieCache();
           await this.client.getWorkspaceRegion(rt.pair.workspaceId);
           console.log("[sync] Session recovered for pair:", pairId);
-          rt.status = "idle";
-          rt.errorMessage = null;
-          rt.watcher?.start();
-          rt.poller?.start();
-          this.emitStatus();
-          const mode = rt.pair.syncMode || "push-safe";
-          if (["two-way", "push", "push-safe"].includes(mode)) {
-            this.runInitialScan(pairId);
-          }
+          this.resumeAfterRecovery(pairId, rt);
         } catch {
           // Still expired - will retry next interval
+        }
+      }
+      // Recover from a plain network failure. Only SESSION_EXPIRED and
+      // RATE_LIMITED were ever retried, so losing wifi mid-sync parked the pair
+      // in `error` until the user restarted the app - the single most common
+      // failure there is also the one that used to need manual intervention.
+      else if (rt.status === "error" && isNetworkErrorMessage(rt.errorMessage)) {
+        try {
+          await this.client.getWorkspaceRegion(rt.pair.workspaceId);
+          this.log(pairId, "Connection restored - resuming sync");
+          this.resumeAfterRecovery(pairId, rt);
+        } catch {
+          // Still offline - try again next interval
         }
       }
       // Note: rate-limited pairs are recovered via their own setTimeout timers,
       // not via this periodic check. This ensures exact Retry-After timing.
     }
+  }
+
+  /** Tell the user about files the scanner left out for exceeding the size
+   *  ceiling. Named in the Activity log so they know exactly which ones. */
+  private reportSkippedTooLarge(rt: PairRuntime, relPaths: string[]): void {
+    if (relPaths.length === 0) return;
+    const shown = relPaths.slice(0, 5);
+    for (const p of shown) this.log(rt.pair.id, `Skipped "${p}" - too large to sync`);
+    if (relPaths.length > shown.length) {
+      this.log(rt.pair.id, `...and ${relPaths.length - shown.length} more file(s) skipped for size`);
+    }
+    this.addNotice(rt, "files-skipped",
+      `${relPaths.length} file${relPaths.length === 1 ? " is" : "s are"} too large to sync and ${relPaths.length === 1 ? "was" : "were"} skipped. See Activity for the list.`);
+  }
+
+  /** Raise (or update) a non-fatal notice on a pair and push it to the UI. */
+  private addNotice(rt: PairRuntime, kind: SyncNotice["kind"], message: string): void {
+    const existing = rt.notices.get(kind);
+    if (existing?.message === message) return; // nothing changed - don't churn the UI
+    rt.notices.set(kind, { kind, message });
+    this.emitStatus();
+  }
+
+  /** Put a pair that recovered from an error back to work. Distinct from the
+   *  public resumePair(), which un-pauses a user-paused pair. */
+  private resumeAfterRecovery(pairId: string, rt: PairRuntime): void {
+    rt.status = "idle";
+    rt.errorMessage = null;
+    rt.watcher?.start();
+    rt.poller?.start();
+    this.emitStatus();
+    const mode = rt.pair.syncMode || "push-safe";
+    if (["two-way", "push", "push-safe"].includes(mode)) {
+      this.runInitialScan(pairId);
+    }
+  }
+
+  /**
+   * Run a recovery pass immediately instead of waiting out the 30s timer.
+   * Called when the OS tells us connectivity came back or the machine woke -
+   * the moments when a parked pair is most likely to succeed.
+   */
+  notifyNetworkOnline(): void {
+    if (this.stopped) return;
+    void this.checkRecovery();
   }
 
   // ── Rate limit handling helpers ──────────────────────────────────
@@ -608,6 +696,7 @@ export class SyncEngine extends EventEmitter {
         pathIndex: new PathIndex(),
         rateLimitResumeTimer: null,
       rescanTimer: null,
+      notices: new Map(),
         totalFilesInBatch: 0,
         completedFilesInBatch: 0,
         totalBytesInBatch: 0,
@@ -714,6 +803,7 @@ export class SyncEngine extends EventEmitter {
       pathIndex,
       rateLimitResumeTimer: null,
       rescanTimer: null,
+      notices: new Map(),
       totalFilesInBatch: 0,
       completedFilesInBatch: 0,
       totalBytesInBatch: 0,
@@ -761,6 +851,8 @@ export class SyncEngine extends EventEmitter {
         // schedule, so losing the watcher degrades latency, not correctness.
         watcher.on("degraded", () => {
           this.log(pair.id, "Folder too large to watch live - relying on periodic reconcile scans");
+          this.addNotice(rt, "degraded-watch",
+            "This folder has too many subfolders to watch live. Changes are picked up by periodic scans instead, so they may take a few minutes to sync.");
           rt.localDirty = true;
         });
       }
@@ -787,6 +879,8 @@ export class SyncEngine extends EventEmitter {
         // so nothing is missed.
         watcher.on("degraded", () => {
           this.log(pair.id, "Folder too large to watch live - switching to periodic rescans");
+          this.addNotice(rt, "degraded-watch",
+            `This folder has too many subfolders to watch live. It is rescanned every ${Math.round(DEGRADED_RESCAN_MS / 60000)} minutes instead, so changes may take that long to sync.`);
           this.startPeriodicRescan(pair.id);
         });
         // Deferred: watcher starts after initial scan (see runInitialScan)
@@ -883,7 +977,7 @@ export class SyncEngine extends EventEmitter {
           rt.scannedFolders = folders;
           this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
           this.emitStatus();
-        });
+        }, (skipped) => this.reportSkippedTooLarge(rt, skipped));
         rt.localDirty = false;
         rt.lastFullLocalScanAt = Date.now();
       } else {
@@ -1115,7 +1209,7 @@ export class SyncEngine extends EventEmitter {
             error: upErr.message,
             retryCount: (existing?.retryCount ?? 0) + 1,
             lastAttemptAt: Date.now(),
-            permanent: upErr.message.includes("permission") || upErr.message.includes("EPERM") || upErr.message.includes("quota"),
+            permanent: isPermanentUploadError(upErr.message),
           };
         }
         rt.completedFilesInBatch++;
@@ -1627,13 +1721,18 @@ export class SyncEngine extends EventEmitter {
       let uploadIdx = 0;
       let uploadFatalErr: Error | null = null;
 
+      // Built once and reused by the upload workers and the commit loop below.
+      // Both used to `mChunk.find()` per file, so a 5,000-file batch did ~25M
+      // string comparisons twice over.
+      const mChunkByPath = new Map(mChunk.map(f => [f.relPath, f]));
+
       const uploadWorker = async (): Promise<void> => {
         while (uploadIdx < manifest.uploads.length) {
           if (this.stopped || (rt.status as SyncPairStatus) === "paused" || uploadFatalErr) return;
 
           const i = uploadIdx++;
           const upload = manifest.uploads[i];
-          const entry = mChunk.find(f => f.relPath === upload.relPath);
+          const entry = mChunkByPath.get(upload.relPath);
           if (!entry) continue;
 
           try {
@@ -1651,6 +1750,12 @@ export class SyncEngine extends EventEmitter {
             this.markProgress(rt);
             this.emitStatus();
           } catch (err: any) {
+            // Same fatal classes the download loop recognises. Without this the
+            // workers drained the queue recording one per-file error after
+            // another against a session that was already gone, and the caller
+            // was never told to stop and re-auth.
+            if (err.message === "SESSION_EXPIRED") { uploadFatalErr = err; return; }
+            if (isRateLimitError(err)) { uploadFatalErr = err; return; }
             console.error(`[sync] Presigned upload failed for ${upload.relPath}:`, err.message);
             const existing = state.fileErrors[upload.relPath];
             state.fileErrors[upload.relPath] = {
@@ -1665,6 +1770,7 @@ export class SyncEngine extends EventEmitter {
       };
 
       await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, manifest.uploads.length) }, () => uploadWorker()));
+      if (uploadFatalErr) throw uploadFatalErr;
 
       // Commit uploaded files to DB in batches
       if (uploaded.length > 0) {
@@ -1689,7 +1795,7 @@ export class SyncEngine extends EventEmitter {
 
             // Update local state (prefer server-authoritative version/updated_at)
             for (const u of cChunk) {
-              const entry = mChunk.find(f => f.relPath === u.relPath);
+              const entry = mChunkByPath.get(u.relPath);
               const s = entry ? await stat(entry.absPath).catch(() => null) : null;
               const srv = commitRes.results.get(u.fileId);
               state.files[u.fileId] = {
@@ -2579,6 +2685,7 @@ export class SyncEngine extends EventEmitter {
         scannedFiles: rt.scannedFiles,
         scannedFolders: rt.scannedFolders,
         statusText: rt.statusText,
+        notices: [...rt.notices.values()],
       });
     }
     return {
@@ -3003,7 +3110,7 @@ export class SyncEngine extends EventEmitter {
         rt.statusText = `Scanning local files... ${files.toLocaleString()} files, ${folders.toLocaleString()} folders`;
         this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
         this.emitStatus();
-      });
+      }, (skipped) => this.reportSkippedTooLarge(rt, skipped));
 
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 

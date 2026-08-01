@@ -33,13 +33,24 @@ const YIELD_INTERVAL = 20; // yield every 20 batches (1000 files) to keep UI res
 /** Reports scan progress so the two-way path isn't a silent black box. */
 export type ScanProgress = (scannedFiles: number, scannedFolders: number) => void;
 
+/**
+ * Hard ceiling on a single file. Above this the upload cannot be expressed as
+ * a multipart request (R2 caps a multipart upload at 10,000 parts), so the
+ * scanner leaves the file out entirely rather than queueing work that must
+ * fail. Skipped files are reported back to the caller - they used to vanish
+ * from the sync set with no error and no message, so a user could believe a
+ * disk image was backed up when it never was.
+ */
+const MAX_SYNCABLE_BYTES = 100 * 1024 * 1024 * 1024;
+
 async function scanLocal(
   rootPath: string,
   userPatterns?: string[],
   onProgress?: ScanProgress,
-): Promise<{ files: Map<string, LocalFileStat>; dirs: Set<string>; incomplete: boolean }> {
+): Promise<{ files: Map<string, LocalFileStat>; dirs: Set<string>; incomplete: boolean; skippedTooLarge: string[] }> {
   const files = new Map<string, LocalFileStat>();
   const dirs = new Set<string>();
+  const skippedTooLarge: string[] = [];
   let yieldCounter = 0;
   // True if ANY directory failed to read. When set, the reconciler must NOT
   // treat locally-absent files as deletions - they may just be unreadable
@@ -88,7 +99,11 @@ async function scanLocal(
       );
       for (let j = 0; j < batch.length; j++) {
         const s = stats[j];
-        if (!s || !s.isFile() || s.size > 100 * 1024 * 1024 * 1024) continue;
+        if (!s || !s.isFile()) continue;
+        if (s.size > MAX_SYNCABLE_BYTES) {
+          skippedTooLarge.push(batch[j].relPath);
+          continue;
+        }
         files.set(batch[j].relPath, {
           sizeBytes: s.size,
           mtimeMs: s.mtimeMs,
@@ -104,7 +119,7 @@ async function scanLocal(
 
   await walk(rootPath, 0);
   onProgress?.(files.size, dirs.size);
-  return { files, dirs, incomplete };
+  return { files, dirs, incomplete, skippedTooLarge };
 }
 
 /**
@@ -168,9 +183,13 @@ export async function reconcile(
   storedState: SyncPairState,
   remote: RemoteSnapshot,
   onScanProgress?: ScanProgress,
+  /** Relative paths left out because they exceed MAX_SYNCABLE_BYTES. Reported
+   *  so the engine can tell the user, rather than skipping them in silence. */
+  onSkippedTooLarge?: (relPaths: string[]) => void,
 ): Promise<SyncAction[]> {
   const actions: SyncAction[] = [];
-  const { files: localFiles, dirs: localDirs, incomplete: localScanIncomplete } = await scanLocal(pair.localPath, pair.excludedPatterns, onScanProgress);
+  const { files: localFiles, dirs: localDirs, incomplete: localScanIncomplete, skippedTooLarge } = await scanLocal(pair.localPath, pair.excludedPatterns, onScanProgress);
+  if (skippedTooLarge.length > 0) onSkippedTooLarge?.(skippedTooLarge);
   const { filePathMap, folderPathMap } = buildRemotePaths(
     remote.files,
     remote.folders,
