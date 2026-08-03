@@ -221,6 +221,9 @@ export class RemoteClient {
   private cookieCachedAt = 0;
   private static readonly COOKIE_CACHE_TTL = 60_000; // 60s
 
+  /** Latest D1 bookmark. In-memory only - request state, not a credential. */
+  private d1Bookmark: string | null = null;
+
   /** Aggregate up/down bandwidth caps (bytes/sec). 0 = unlimited. */
   private uploadBucket = new TokenBucket(0);
   private downloadBucket = new TokenBucket(0);
@@ -391,6 +394,7 @@ export class RemoteClient {
       "X-Dosya-Client": "desktop",
       ...opts.headers,
     };
+    if (this.d1Bookmark) headers["X-D1-Bookmark"] = this.d1Bookmark;
     if (bodyBuf) {
       headers["Content-Length"] = String(bodyBuf.length);
     }
@@ -500,6 +504,11 @@ export class RemoteClient {
 
         // Update rate budget from every response
         this.updateBudget(res.headers);
+
+        // Capture the D1 bookmark so the next request reads at least as fresh
+        // as this one - beside updateBudget so error paths capture it too.
+        const bookmark = res.headers["x-d1-bookmark"];
+        if (typeof bookmark === "string") this.d1Bookmark = bookmark;
 
         // Handle 429 - throw RateLimitError with Retry-After info
         if (res.status === 429) {
