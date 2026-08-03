@@ -11,7 +11,8 @@ export const queryClient = new QueryClient({
         }
         return failureCount < 2;
       },
-      staleTime: 30_000, // 30 seconds
+      staleTime: 30_000,   // 30 seconds
+      gcTime: 600_000,   // 10 min - a revisited folder should still be cached
       refetchOnWindowFocus: true,
     },
     mutations: {

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ChevronRight,
@@ -268,6 +268,7 @@ export function FileBrowserPage() {
       return api.get<FilesResponse>(`/api/files?${params}`);
     },
     enabled: !!active,
+    placeholderData: keepPreviousData,
   });
 
   const navigateToFolder = useCallback(
