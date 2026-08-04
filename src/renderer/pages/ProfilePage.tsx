@@ -37,7 +37,7 @@ import { formatDate } from "@/lib/format";
 import { validatePassword } from "@dosya-dev/shared";
 import { toast } from "sonner";
 import { THEMES, type Mode } from "@/lib/themes";
-import { readCache, writeCache, applyTheme, subscribeThemeChange, type ThemePref } from "@/lib/theme";
+import { readCache, writeCache, applyTheme, applyThemeAnimated, subscribeThemeChange, type ThemePref } from "@/lib/theme";
 
 type Tab = "identity" | "appearance" | "password" | "api-keys" | "sessions" | "notifications" | "billing" | "about" | "help" | "delete";
 
@@ -119,12 +119,13 @@ function AppearanceSection() {
   const save = async (next: ThemePref) => {
     const prev = pref;
     setPref(next);
-    applyTheme(next);
+    applyThemeAnimated(next);
     writeCache(next);
     try {
       await api.put("/api/me/appearance", next);
     } catch (e) {
-      // Roll back the optimistic change on failure.
+      // Roll back the optimistic change on failure - instantly, since a second
+      // wipe in the other direction reads as a bug rather than a revert.
       setPref(prev);
       applyTheme(prev);
       writeCache(prev);

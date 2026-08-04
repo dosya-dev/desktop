@@ -223,3 +223,24 @@ body {
   background-color: rgba(255, 153, 0, 0.85);
   color: #1a1a1a;
 }
+
+/* Theme change wipe - ported from apps/web/src/index.css. Armed by
+   withThemeSweep() in lib/theme.ts, which sets data-theme-sweep on <html> for
+   the length of the transition, so other view transitions keep their defaults.
+   Killing the default cross-fade (opacity + plus-lighter, which washes the
+   mid-transition colors out) and clipping the new snapshot instead paints the
+   new theme over the old from the left edge, with no dip in between. */
+html[data-theme-sweep]::view-transition-old(root),
+html[data-theme-sweep]::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+html[data-theme-sweep]::view-transition-old(root) { z-index: 0; }
+html[data-theme-sweep]::view-transition-new(root) {
+  z-index: 1;
+  animation: theme-sweep 520ms cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+@keyframes theme-sweep {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}

@@ -45,6 +45,47 @@ export function applyTheme(pref: ThemePref): void {
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: pref }));
 }
 
+/** lib.dom types startViewTransition as always-present; it isn't, so read it
+ *  through a shape that admits `undefined` and check before calling. */
+type StartViewTransition = (cb: () => void) => { finished: Promise<void> };
+
+function viewTransitionStarter(): StartViewTransition | null {
+  if (typeof document === "undefined") return null;
+  const fn = (document as { startViewTransition?: unknown }).startViewTransition;
+  return typeof fn === "function" ? (fn as StartViewTransition).bind(document) : null;
+}
+
+/**
+ * Run a theme mutation behind a left-to-right wipe, via the View Transitions
+ * API. styles/index.css replaces the default cross-fade with a clip-path wipe
+ * while `data-theme-sweep` is set on <html>. Reduced-motion users get the
+ * instant swap. Mirrors apps/web/src/lib/theme.ts.
+ *
+ * Only for user-initiated changes - boot and login reconciliation call
+ * applyTheme() directly, where a wipe would look like a glitch.
+ */
+export function withThemeSweep(mutate: () => void): void {
+  const start = viewTransitionStarter();
+  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!start || reduced) { mutate(); return; }
+
+  const el = document.documentElement;
+  el.setAttribute("data-theme-sweep", "");
+  const done = () => el.removeAttribute("data-theme-sweep");
+  try {
+    // Rejects when a second toggle interrupts this one; either way, disarm.
+    start(mutate).finished.then(done, done);
+  } catch {
+    done();
+    mutate();
+  }
+}
+
+/** applyTheme() with the wipe. Use from toggles and pickers, not from boot. */
+export function applyThemeAnimated(pref: ThemePref): void {
+  withThemeSweep(() => applyTheme(pref));
+}
+
 /** Re-apply on OS scheme change while the user is on 'system'. Returns an unsubscribe fn. */
 export function initSystemListener(getPref: () => ThemePref): () => void {
   if (typeof matchMedia !== "function") return () => {};
