@@ -80,8 +80,16 @@ linux:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  # Registers the dosya:// URL scheme in the Windows registry. `protocols:`
+  # below does NOT do this - electron-builder only feeds that block to the
+  # macOS, Linux and AppX packagers, so the NSIS build shipped with the scheme
+  # unregistered and the desktop OAuth callback had nowhere to land.
+  include: build/installer.nsh
 
 # ── Protocol registration ──────────────────────────────────────────
+# macOS (CFBundleURLTypes), Linux (.desktop MimeType) and AppX (uriSchemes)
+# only. Windows/NSIS is handled by nsis.include above plus the runtime
+# setAsDefaultProtocolClient call in src/main/index.ts.
 protocols:
   - name: dosya
     schemes:

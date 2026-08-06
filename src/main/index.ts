@@ -19,6 +19,7 @@ crashReporter.start({
 import { registerIpcHandlers } from "./ipc";
 import { isQuitting, markQuitting } from "./quit-state";
 import { validateSyncDeepLinkPath } from "./deep-link-path";
+import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { setupSession } from "./session";
 import { createMenu } from "./menu";
 import { createTray } from "./tray";
@@ -168,11 +169,43 @@ function handleDosyaUrl(url: string): void {
   } catch {}
 }
 
-// Register open-url early so cold-start URLs are captured
+// Register open-url early so cold-start URLs are captured.
+// macOS only - Windows and Linux deliver the URL through argv instead, which is
+// what registerProtocolClient/findDeepLinkArg below handle.
 app.on("open-url", (event, url) => {
   event.preventDefault();
   handleDosyaUrl(url);
 });
+
+/**
+ * Claim the dosya:// scheme with the OS.
+ *
+ * macOS gets this for free from CFBundleURLTypes in Info.plist, which
+ * electron-builder generates from the `protocols:` block. The NSIS target
+ * ignores that block, so on Windows the scheme went unregistered and the OAuth
+ * callback redirect died in the browser. build/installer.nsh writes the keys at
+ * install time; this call covers dev builds and repairs the association if
+ * another app has taken it over since.
+ */
+function registerProtocolClient(): void {
+  if (process.platform === "darwin") return;
+  try {
+    const reg = protocolClientRegistration({
+      isPackaged: app.isPackaged,
+      execPath: process.execPath,
+      argv: process.argv,
+      resolvePath: resolve,
+    });
+    const ok = reg.execPath
+      ? app.setAsDefaultProtocolClient(reg.scheme, reg.execPath, reg.args)
+      : app.setAsDefaultProtocolClient(reg.scheme);
+    if (!ok) console.warn(`[deep-link] OS refused to register ${reg.scheme}://`);
+  } catch (err) {
+    // A failed association is not worth blocking startup over - in-app popup
+    // login still works, only the browser hand-back is lost.
+    console.error("[deep-link] Failed to register protocol client:", err);
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -268,8 +301,10 @@ if (!gotTheLock) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
-    // Check if launched with a dosya:// URL (e.g. from Quick Action)
-    const urlArg = argv.find((arg) => arg.startsWith("dosya://"));
+    // Windows/Linux deliver dosya:// links by launching a second instance with
+    // the URL in argv - this is the path the OAuth callback takes while the app
+    // is already running.
+    const urlArg = findDeepLinkArg(argv);
     if (urlArg) handleDosyaUrl(urlArg);
   });
 
@@ -306,6 +341,18 @@ if (!gotTheLock) {
       pendingOAuthNonce = randomUUID();
       return `${API_BASE}/api/auth/${provider}?desktop=1&state=${encodeURIComponent(pendingOAuthNonce)}`;
     });
+
+    registerProtocolClient();
+
+    // Cold start: on Windows/Linux the OS launches the app with the URL in
+    // argv, and neither open-url (macOS only) nor second-instance (needs an
+    // instance already holding the lock) fires. Without this the link is
+    // dropped. Runs before createWindow so a dosya://sync link lands in
+    // pendingSyncPath and gets forwarded once the renderer finishes loading.
+    if (process.platform !== "darwin") {
+      const startupUrl = findDeepLinkArg(process.argv);
+      if (startupUrl) handleDosyaUrl(startupUrl);
+    }
 
     createMenu();
     createWindow();
