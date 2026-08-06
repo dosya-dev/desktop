@@ -5,6 +5,7 @@ import { useAuth } from "@/lib/auth-context";
 import { ipc } from "@/lib/ipc";
 import { isValidEmail, validatePassword } from "@dosya-dev/shared";
 import logoSvg from "@/assets/logo.svg";
+import { LegalLinks, LegalNotice } from "@/components/LegalNotice";
 
 export function SignUpPage() {
   const { refreshUser } = useAuth();
@@ -12,12 +13,18 @@ export function SignUpPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [terms, setTerms] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
+
+    if (!terms) {
+      setError("Please accept the Terms of Service to continue.");
+      return;
+    }
 
     if (!isValidEmail(email)) {
       setError("Please enter a valid email address");
@@ -32,7 +39,9 @@ export function SignUpPage() {
 
     setLoading(true);
     try {
-      await api.post("/api/auth/signup", { name, email, password });
+      // `terms` is required by the endpoint, which records the acceptance
+      // against the new user row. Submission is gated on the checkbox above.
+      await api.post("/api/auth/signup", { name, email, password, terms: true });
       navigate("/verify", { state: { email } });
     } catch (err) {
       if (err instanceof ApiError) {
@@ -107,6 +116,21 @@ export function SignUpPage() {
               Must include uppercase, lowercase, number, and special character
             </p>
           </div>
+
+          {/* The consent point for this client. Both documents are named here:
+              the Terms are the contract, the Privacy Policy is the notice owed
+              at the moment personal data is collected. */}
+          <label className="flex items-start gap-2 text-sm text-[var(--color-text-secondary)]">
+            <input
+              type="checkbox"
+              checked={terms}
+              onChange={(e) => setTerms(e.target.checked)}
+              className="mt-0.5 size-4 shrink-0 accent-[var(--color-primary)]"
+            />
+            <span>
+              I agree to the <LegalLinks />
+            </span>
+          </label>
 
           <button
             type="submit"
@@ -188,7 +212,11 @@ export function SignUpPage() {
           </button>
         </div>
 
-        <p className="mt-6 text-center text-sm text-[var(--color-text-secondary)]">
+        {/* Covers the OAuth buttons, which create a real account without ever
+            touching the consent checkbox inside the form. */}
+        <LegalNotice className="mt-6" />
+
+        <p className="mt-4 text-center text-sm text-[var(--color-text-secondary)]">
           Already have an account?{" "}
           <Link
             to="/login"

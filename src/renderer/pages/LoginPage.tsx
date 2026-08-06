@@ -3,6 +3,7 @@ import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
 import { ipc } from "@/lib/ipc";
 import logoSvg from "@/assets/logo.svg";
+import { LegalNotice } from "@/components/LegalNotice";
 
 export function LoginPage() {
   const { login, refreshUser, isAuthenticated, isLoading: authLoading } = useAuth();
@@ -234,7 +235,9 @@ export function LoginPage() {
           </button>
         </div>
 
-        <p className="mt-6 text-center text-sm text-[var(--color-text-secondary)]">
+        <LegalNotice className="mt-6" />
+
+        <p className="mt-4 text-center text-sm text-[var(--color-text-secondary)]">
           Don't have an account?{" "}
           <Link
             to="/signup"
