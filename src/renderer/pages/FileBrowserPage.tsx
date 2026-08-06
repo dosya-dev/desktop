@@ -30,11 +30,12 @@ import {
   SlidersHorizontal,
   RotateCcw,
   Loader2,
+  SquarePen,
 } from "lucide-react";
 import { api, apiBase, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes, formatDate } from "@/lib/format";
-import { timeAgo, extOf, colorFor, originLabel } from "@/lib/file-type";
+import { timeAgo, extOf, colorFor, originLabel, isOfficeFile } from "@/lib/file-type";
 import { toast } from "sonner";
 import { FileIcon, FolderIcon, fileIconSrc } from "@/components/files/FileIcon";
 import { FileViewer, downloadViaDialog, type ViewerFile } from "@/components/files/FileViewer";
@@ -1384,6 +1385,12 @@ export function FileBrowserPage() {
                   if (ctxFile) openFileWithLockCheck(ctxFile, "view");
                   setContextMenu(null);
                 }} />
+                {isOfficeFile(contextMenu.item.name) && (
+                  <CtxItem icon={<SquarePen size={14} />} label="Open in editor" onClick={() => {
+                    window.open(`https://app.dosya.dev/editor/${contextMenu.item.id}`, "_blank");
+                    setContextMenu(null);
+                  }} />
+                )}
                 <CtxItem icon={<Download size={14} />} label="Download" onClick={() => {
                   if (ctxFile) downloadViaDialog(ctxFile);
                   setContextMenu(null);

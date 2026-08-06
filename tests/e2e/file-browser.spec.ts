@@ -64,4 +64,20 @@ test.describe("File Browser", () => {
       appPage.getByText(/rename|delete|share/i).first(),
     ).toBeVisible();
   });
+
+  test("right-click an office file shows Open in editor", async ({ appPage }) => {
+    await navigateTo(appPage, "/files");
+
+    await appPage.getByText("Budget.docx").click({ button: "right" });
+
+    await expect(appPage.getByText("Open in editor")).toBeVisible();
+  });
+
+  test("right-click a pdf does not show Open in editor", async ({ appPage }) => {
+    await navigateTo(appPage, "/files");
+
+    await appPage.getByText("Project Report.pdf").click({ button: "right" });
+
+    await expect(appPage.getByText("Open in editor")).not.toBeVisible();
+  });
 });

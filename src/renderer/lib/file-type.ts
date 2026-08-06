@@ -64,6 +64,16 @@ export function isVcard(name: string): boolean {
   return e === "vcf" || e === "vcard";
 }
 
+const OFFICE_EXTS = new Set([
+  "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "odp", "rtf", "csv",
+]);
+
+// Files that open in the ONLYOFFICE editor at /editor/:fileId. Keep in sync
+// with apps/web/src/lib/helpers.ts and apps/api/src/lib/onlyoffice/formats.ts.
+export function isOfficeFile(name: string): boolean {
+  return OFFICE_EXTS.has(extOf(name));
+}
+
 export function humanSize(b: number): string {
   if (b < 1024) return b + " B";
   if (b < 1048576) return (b / 1024).toFixed(0) + " KB";
