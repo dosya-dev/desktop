@@ -50,10 +50,20 @@ export function LoginPage() {
     // beginOAuth mints a single-use nonce in the main process and returns the
     // provider URL carrying it; the dosya://auth/callback is only accepted if it
     // echoes that nonce back. The server redirects to dosya://auth/callback?token=…&state=…
-    const oauthUrl = await window.electronAPI.beginOAuth(provider);
-
-    // Open in system browser (Chrome, Firefox, etc.)
-    window.open(oauthUrl, "_blank");
+    //
+    // Both calls can fail (an unknown provider throws in the main process; the
+    // window-open handler can refuse). Unguarded, the failure escaped as an
+    // unhandled rejection and left `loading` stuck true, so the button just span
+    // forever with nothing on screen to explain it.
+    try {
+      const oauthUrl = await window.electronAPI.beginOAuth(provider);
+      // Open in system browser (Chrome, Firefox, etc.)
+      window.open(oauthUrl, "_blank");
+    } catch (err: any) {
+      setLoading(false);
+      setError(err?.message || `Could not start ${provider} sign-in. Please try again.`);
+      return;
+    }
 
     // Tear down any previous in-flight attempt before starting a new one.
     oauthCleanup.current?.();

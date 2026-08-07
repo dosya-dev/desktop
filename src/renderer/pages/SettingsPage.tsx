@@ -12,13 +12,17 @@ import {
   Trash2,
   ImagePlus,
   DownloadCloud,
+  LogOut,
+  Globe,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes } from "@/lib/format";
 import { UpdatesSection } from "@/components/UpdatesSection";
 import { toast } from "sonner";
+import { webAppUrl } from "../lib/web-app-url";
 
+/** Shape of GET /api/workspaces/:id. */
 interface SettingsResponse {
   ok: boolean;
   workspace: {
@@ -40,13 +44,7 @@ interface SettingsResponse {
     disable_share_links: number;
     force_share_password: number;
     share_max_expiry_days: number | null;
-  };
-  roles: {
-    id: string;
-    name: string;
-    is_default: number;
-    permissions: Record<string, boolean>;
-  }[];
+  } | null;
 }
 
 type Tab = "general" | "limits" | "security" | "roles" | "updates" | "danger";
@@ -70,12 +68,14 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("general");
 
+  // GET /api/workspaces/:id - NOT /:id/settings, which is PUT-only on the API.
+  // The old URL 404'd on every load, so `data` was always undefined: the whole
+  // page rendered with blank fields, and the icon uploader's `hasImage` was
+  // permanently false, which is why a successful icon upload still showed the
+  // initials instead of the new image.
   const { data, isLoading } = useQuery({
     queryKey: ["settings", active?.id],
-    queryFn: () =>
-      api.get<SettingsResponse>(
-        `/api/workspaces/${active?.id}/settings`,
-      ),
+    queryFn: () => api.get<SettingsResponse>(`/api/workspaces/${active?.id}`),
     enabled: !!active,
   });
 
@@ -93,7 +93,6 @@ export function SettingsPage() {
   // Populate form when data loads
   const workspace = data?.workspace;
   const settings = data?.settings;
-  const roles = data?.roles ?? [];
 
   if (workspace && !wsName) {
     setWsName(workspace.name);
@@ -317,7 +316,7 @@ export function SettingsPage() {
                 Create custom roles, edit permissions, and manage access controls on the web app.
               </p>
               <button
-                onClick={() => window.open("https://dosya.dev/settings", "_blank")}
+                onClick={() => window.open(webAppUrl("/settings"), "_blank")}
                 className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
                 style={{ background: "var(--color-primary)" }}
               >
@@ -335,23 +334,87 @@ export function SettingsPage() {
 
         {tab === "danger" && (
           <Section title="Danger zone">
-            <div
-              className="rounded-xl border-2 border-dashed p-6"
-              style={{ borderColor: "var(--color-danger)" }}
-            >
-              <h3 className="mb-2 font-semibold text-[var(--color-danger)]">
-                Delete workspace
-              </h3>
-              <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-                Permanently delete this workspace and all its files. This action
-                cannot be undone.
-              </p>
-              <button className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white">
-                Delete workspace
-              </button>
-            </div>
+            <DangerZone workspaceId={active?.id ?? ""} workspaceName={workspace?.name ?? ""} />
           </Section>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Leave / delete workspace.
+ *
+ * Both used to be missing here: "Delete workspace" was a styled button with no
+ * onClick at all (it looked live but did nothing when clicked), and there was no
+ * way to leave a workspace from the desktop app. Both are irreversible, so both
+ * confirm first - matching the web app's danger zone.
+ */
+/**
+ * Leaving and deleting a workspace are both surfaced here, but neither is
+ * performed here - each opens the web app instead.
+ *
+ * Deletion cannot work from the desktop app at all: the server now requires a
+ * 6-digit code mailed to the owner plus the workspace name retyped, and that
+ * ceremony lives in the web dialog. Leaving is technically a single POST, but
+ * shipping one irreversible membership action in-app while its neighbour hands
+ * off to the browser is the kind of inconsistency that gets clicked by
+ * accident. Both hand off, and the panel says so plainly rather than letting
+ * someone discover it from a failed request.
+ */
+function DangerZone({ workspaceId, workspaceName }: { workspaceId: string; workspaceName: string }) {
+  const openInWeb = () => window.open(webAppUrl("/settings#section-danger"), "_blank");
+
+  return (
+    <div
+      className="rounded-xl border-2 border-dashed p-6"
+      style={{ borderColor: "var(--color-danger)" }}
+    >
+      <div
+        className="mb-5 flex items-start gap-2.5 rounded-lg border px-3 py-2.5"
+        style={{ borderColor: "var(--color-border)" }}
+      >
+        <Globe size={15} className="mt-0.5 shrink-0 text-[var(--color-text-secondary)]" />
+        <p className="text-sm text-[var(--color-text-secondary)]">
+          Leaving and deleting a workspace are only available in the web app. Both are
+          irreversible, and deleting requires a confirmation code sent to your email.
+        </p>
+      </div>
+
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="mb-1 font-semibold">Leave workspace</h3>
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            You will lose access to {workspaceName || "this workspace"} and its files immediately.
+          </p>
+        </div>
+        <button
+          onClick={openInWeb}
+          disabled={!workspaceId}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
+          style={{ borderColor: "var(--color-danger)", color: "var(--color-danger)" }}
+        >
+          <LogOut size={14} /> Leave on web
+        </button>
+      </div>
+
+      <div className="my-5 border-t" style={{ borderColor: "var(--color-border)" }} />
+
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="mb-1 font-semibold text-[var(--color-danger)]">Delete workspace</h3>
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Permanently deletes {workspaceName || "this workspace"} and every file in it. This
+            action cannot be undone.
+          </p>
+        </div>
+        <button
+          onClick={openInWeb}
+          disabled={!workspaceId}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        >
+          <Trash2 size={14} /> Delete on web
+        </button>
       </div>
     </div>
   );
@@ -443,7 +506,11 @@ function WorkspaceIconUpload({
   const queryClient = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [apiBase, setApiBase] = useState("");
-  const [imgKey, setImgKey] = useState(0); // force re-render after upload
+  // Cache-buster for the icon URL, which is a fixed path. A counter starting at
+  // 0 collided with the previously cached `?t=0` whenever this component
+  // remounted (tab switch), so a freshly uploaded icon could still paint the
+  // old image. A timestamp is always new.
+  const [imgKey, setImgKey] = useState(() => Date.now());
 
   useEffect(() => {
     window.electronAPI.getApiBase().then(setApiBase);
@@ -458,7 +525,7 @@ function WorkspaceIconUpload({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      setImgKey((k) => k + 1);
+      setImgKey(Date.now());
       toast.success("Workspace icon updated");
     },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed to upload"),
@@ -469,7 +536,7 @@ function WorkspaceIconUpload({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      setImgKey((k) => k + 1);
+      setImgKey(Date.now());
       toast.success("Icon removed");
     },
   });

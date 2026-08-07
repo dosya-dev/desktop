@@ -38,6 +38,7 @@ import { validatePassword } from "@dosya-dev/shared";
 import { toast } from "sonner";
 import { THEMES, type Mode } from "@/lib/themes";
 import { readCache, writeCache, applyTheme, applyThemeAnimated, subscribeThemeChange, type ThemePref } from "@/lib/theme";
+import { webAppUrl } from "../lib/web-app-url";
 
 type Tab = "identity" | "appearance" | "password" | "api-keys" | "sessions" | "notifications" | "billing" | "about" | "help" | "delete";
 
@@ -717,7 +718,7 @@ function ApiKeysSection() {
           Generate and manage API keys on the web app.
         </p>
         <button
-          onClick={() => window.open("https://dosya.dev/profile", "_blank")}
+          onClick={() => window.open(webAppUrl("/profile"), "_blank")}
           className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
           style={{ background: "var(--color-primary)" }}
         >
@@ -903,7 +904,7 @@ function NotificationsSection() {
 
 function BillingSection() {
   const openBilling = () => {
-    window.open("https://dosya.dev/billing", "_blank");
+    window.open(webAppUrl("/billing"), "_blank");
   };
 
   return (
