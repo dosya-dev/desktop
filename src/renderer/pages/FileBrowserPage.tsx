@@ -35,13 +35,13 @@ import {
 import { api, apiBase, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes, formatDate } from "@/lib/format";
-import { timeAgo, extOf, colorFor, originLabel, isOfficeFile } from "@/lib/file-type";
+import { timeAgo, extOf, colorFor, originLabel, isOfficeFile, hiddenTitle } from "@/lib/file-type";
 import { toast } from "sonner";
 import { FileIcon, FolderIcon, fileIconSrc } from "@/components/files/FileIcon";
 import { FileViewer, downloadViaDialog, type ViewerFile } from "@/components/files/FileViewer";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { FileDetailPanel } from "@/components/files/FileDetailPanel";
-import { ShareModal } from "@/components/files/ShareModal";
+import { ShareModal, type ShareTarget } from "@/components/files/ShareModal";
 import { LockModal } from "@/components/files/LockModal";
 import { HideModal } from "@/components/files/HideModal";
 import { FileInfoDialog, type InfoTarget } from "@/components/files/FileInfoDialog";
@@ -56,6 +56,8 @@ interface FolderRow {
   file_count: number;
   lock_mode: string;
   is_hidden: number;
+  /** Who `is_hidden` hides this from - "none" | "everyone" | "users" | "roles". */
+  hidden_mode: string;
   is_synced: number;
   total_size_bytes: number;
   content_updated_at: number;
@@ -212,7 +214,7 @@ export function FileBrowserPage() {
   // Viewer + detail panel + modals (web parity)
   const [viewerFile, setViewerFile] = useState<FileRow | null>(null);
   const [panel, setPanel] = useState<{ file: FileRow; tab: "info" | "comments" } | null>(null);
-  const [shareTarget, setShareTarget] = useState<{ id: string; name: string } | null>(null);
+  const [shareTarget, setShareTarget] = useState<{ target: ShareTarget; name: string } | null>(null);
   const [lockTarget, setLockTarget] = useState<{ id: string; name: string; type: "file" | "folder" } | null>(null);
   const [hideTarget, setHideTarget] = useState<{ id: string; name: string; type: "file" | "folder" } | null>(null);
   const [infoTarget, setInfoTarget] = useState<InfoTarget | null>(null);
@@ -972,7 +974,15 @@ export function FileBrowserPage() {
                 <FileArchive size={14} /> Download ZIP
               </button>
               <button
-                className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[var(--color-text-secondary)]"
+                // A bundle link is one set of files - it has no room for a folder
+                // alongside them, and desktop has no separate single-folder share
+                // path the way web does (see files.tsx's canShare). So ANY folder
+                // in the selection disables this button, not just a mixed one -
+                // a folders-only selection would otherwise stay enabled and post
+                // file_ids: [], which the API rejects.
+                disabled={selectedFolders.size > 0}
+                title={selectedFolders.size > 0 ? "A link covers one folder, or a set of files - not both." : undefined}
                 onClick={async () => {
                   try {
                     const ids = Array.from(selected);
@@ -1082,6 +1092,9 @@ export function FileBrowserPage() {
                             {folder.lock_mode !== "none" && (
                               <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />
                             )}
+                            {!!folder.is_hidden && (
+                              <EyeOff size={12} className="shrink-0 text-[var(--color-text-muted)]" title={hiddenTitle(folder.hidden_mode)} />
+                            )}
                           </div>
                         </td>
                       );
@@ -1148,6 +1161,9 @@ export function FileBrowserPage() {
                               )}
                               {file.lock_mode !== "none" && (
                                 <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />
+                              )}
+                              {!!file.is_hidden && (
+                                <EyeOff size={12} className="shrink-0 text-[var(--color-text-muted)]" title={hiddenTitle(file.hidden_mode)} />
                               )}
                               {file.share_count > 0 && (
                                 <Share2 size={12} className="shrink-0 text-[var(--color-primary)]" />
@@ -1256,7 +1272,7 @@ export function FileBrowserPage() {
                     // card's own onClick above, or the trash view stays only
                     // half read-only.
                     onComments={() => { if (showDeleted) toggleSelect(file.id); else setPanel({ file, tab: "comments" }); }}
-                    onShare={() => setShareTarget({ id: file.id, name: file.name })}
+                    onShare={() => setShareTarget({ target: { kind: "file", fileIds: [file.id] }, name: file.name })}
                     onMore={(e) => {
                       e.stopPropagation();
                       setContextMenu({ x: e.clientX, y: e.clientY, item: { id: file.id, name: file.name, kind: "file" } });
@@ -1354,6 +1370,10 @@ export function FileBrowserPage() {
             ) : contextMenu.item.kind === "folder" ? (
               <>
                 <CtxItem icon={<FolderOpen size={14} />} label="Open" onClick={() => { navigateToFolder(contextMenu.item.id); setContextMenu(null); }} />
+                <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
+                  setShareTarget({ target: { kind: "folder", folderId: contextMenu.item.id }, name: contextMenu.item.name });
+                  setContextMenu(null);
+                }} />
                 <CtxItem icon={<Info size={14} />} label="Get info" onClick={() => {
                   if (ctxFolder) setInfoTarget({ type: "folder", item: ctxFolder });
                   setContextMenu(null);
@@ -1396,7 +1416,7 @@ export function FileBrowserPage() {
                   setContextMenu(null);
                 }} />
                 <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
-                  setShareTarget({ id: contextMenu.item.id, name: contextMenu.item.name }); setContextMenu(null);
+                  setShareTarget({ target: { kind: "file", fileIds: [contextMenu.item.id] }, name: contextMenu.item.name }); setContextMenu(null);
                 }} />
                 <CtxItem icon={<MessageCircle size={14} />} label="Comments" onClick={() => {
                   if (ctxFile) setPanel({ file: ctxFile, tab: "comments" });
@@ -1572,7 +1592,7 @@ export function FileBrowserPage() {
           onClose={() => setPanel(null)}
           onCopy={(id) => { setCopyTarget({ id, name: panel.file.name }); setPickerFolder(null); }}
           onDelete={(id, name) => setDeleteConfirm({ ids: [id], names: [name], kinds: ["file"] })}
-          onShare={(id, name) => setShareTarget({ id, name })}
+          onShare={(id, name) => setShareTarget({ target: { kind: "file", fileIds: [id] }, name })}
           onView={(f) => { setPanel(null); setViewerFile(f as FileRow); }}
           onRefresh={refresh}
         />
@@ -1723,8 +1743,8 @@ export function FileBrowserPage() {
       {/* Share / Lock / Hide / Info */}
       <ShareModal
         open={!!shareTarget}
-        fileId={shareTarget?.id ?? null}
-        fileName={shareTarget?.name ?? ""}
+        target={shareTarget?.target ?? null}
+        name={shareTarget?.name ?? ""}
         onClose={() => { setShareTarget(null); refresh(); }}
       />
       <LockModal
@@ -1882,11 +1902,16 @@ function FileCard({
         />
       )}
 
-      {/* Top-right: lock (if any) + file-format pill */}
+      {/* Top-right: lock (if any) + hidden (if any) + file-format pill */}
       <div className="absolute right-2 top-2 z-10 flex items-center gap-1">
         {file.lock_mode !== "none" && (
           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-black/45 backdrop-blur-sm">
             <Lock size={12} className="text-white" />
+          </span>
+        )}
+        {!!file.is_hidden && (
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-black/45 backdrop-blur-sm">
+            <EyeOff size={12} className="text-white" title={hiddenTitle(file.hidden_mode)} />
           </span>
         )}
         <span className="rounded-full bg-black/45 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-white backdrop-blur-sm">{ext}</span>

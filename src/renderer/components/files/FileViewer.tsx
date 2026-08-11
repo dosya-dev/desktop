@@ -34,6 +34,12 @@ export interface ViewerFile {
   current_version?: number;
   lock_mode: string;
   is_hidden: number;
+  /**
+   * Who `is_hidden` hides this from - "none" | "everyone" | "users" | "roles".
+   * Optional for the same reason `origin` is: not every producer of a
+   * ViewerFile-shaped row selects it.
+   */
+  hidden_mode?: string;
   uploader_name: string | null;
   share_count: number;
   comment_count: number;

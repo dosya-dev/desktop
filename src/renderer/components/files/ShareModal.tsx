@@ -1,14 +1,26 @@
 // Ported from apps/web/src/components/share-modal.tsx - keep in sync with the web copy.
-import { useState, useRef, useCallback } from "react";
-import { Mail, Link2, X, Loader2, Copy, ChevronDown } from "lucide-react";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { Mail, Link2, X, Loader2, Copy, ChevronDown, Files, Folder } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api-client";
 import { Modal } from "@/components/files/Modal";
 
+/**
+ * What is being shared. A share link is one file, one bundle of files, or one
+ * folder - the API has no shape for "this folder plus these files", which is
+ * why the caller must resolve the selection into exactly one of these before
+ * opening the modal.
+ */
+export type ShareTarget =
+  | { kind: "file"; fileIds: [string] }
+  | { kind: "bundle"; fileIds: string[] }
+  | { kind: "folder"; folderId: string };
+
 interface ShareModalProps {
   open: boolean;
-  fileId: string | null;
-  fileName: string;
+  target: ShareTarget | null;
+  /** Display name: the file name, "N files", or the folder name. */
+  name: string;
   onClose: () => void;
 }
 
@@ -24,7 +36,10 @@ const EXPIRY_OPTIONS = [
   { value: "90", label: "90 days" },
 ];
 
-export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps) {
+export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
+  const isFolder = target?.kind === "folder";
+  const isBundle = target?.kind === "bundle";
+  const [excludedCount, setExcludedCount] = useState(0);
   const [tab, setTab] = useState<Tab>("email");
   const [emails, setEmails] = useState<string[]>([]);
   const [emailInput, setEmailInput] = useState("");
@@ -37,6 +52,18 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
   const [error, setError] = useState("");
   const [resultUrl, setResultUrl] = useState("");
   const emailRef = useRef<HTMLInputElement>(null);
+
+  // What a link for this folder will NOT include, shown before the sharer
+  // commits rather than discovered later from a confused recipient.
+  useEffect(() => {
+    if (!open || target?.kind !== "folder") { setExcludedCount(0); return; }
+    let cancelled = false;
+    api
+      .get<{ ok: true; excluded_count: number }>(`/api/folders/${target.folderId}/share`)
+      .then((r) => { if (!cancelled) setExcludedCount(r.excluded_count ?? 0); })
+      .catch(() => { /* advisory only - a failed count must not block sharing */ });
+    return () => { cancelled = true; };
+  }, [open, target]);
 
   const reset = useCallback(() => {
     setTab("email");
@@ -92,7 +119,7 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
   };
 
   const handleSubmit = async () => {
-    if (!fileId) return;
+    if (!target) return;
     setError("");
 
     if (tab === "email" && emails.length === 0) {
@@ -112,6 +139,16 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
 
     try {
       if (tab === "email") {
+        // "bundle" exists only for type parity with web's ShareTarget - no
+        // desktop caller builds one yet, and the body below is still shaped
+        // for a single recipient per call with no file_ids, so this branch
+        // would 400 if a bundle target were ever actually submitted here.
+        const endpoint = target.kind === "folder"
+          ? `/api/folders/${target.folderId}/share-email`
+          : target.kind === "bundle"
+            ? "/api/files/share-bundle"
+            : `/api/files/${target.fileIds[0]}/share-email`;
+
         const body: Record<string, unknown> = {
           email: emails[0],
           message: message.trim(),
@@ -119,11 +156,11 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
         if (pw) body.password = pw;
         if (expiryDays > 0) body.expires_in_days = expiryDays;
 
-        const res = await api.post<{ ok: boolean; error?: string }>(`/api/files/${fileId}/share-email`, body);
+        const res = await api.post<{ ok: boolean; error?: string }>(endpoint, body);
 
         // Send to remaining emails
         for (let i = 1; i < emails.length; i++) {
-          await api.post(`/api/files/${fileId}/share-email`, { ...body, email: emails[i] }).catch(() => {});
+          await api.post(endpoint, { ...body, email: emails[i] }).catch(() => {});
         }
 
         if (res.ok) {
@@ -134,11 +171,20 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
           setSubmitting(false);
         }
       } else {
+        // Same bundle caveat as the email endpoint above: no desktop caller
+        // builds a "bundle" target yet, and linkBody below has no file_ids,
+        // so this branch would 400 if one were ever submitted here.
+        const endpoint = target.kind === "folder"
+          ? `/api/folders/${target.folderId}/share`
+          : target.kind === "bundle"
+            ? "/api/files/share-bundle"
+            : `/api/files/${target.fileIds[0]}/share`;
+
         const linkBody: Record<string, unknown> = {};
         if (expiryDays > 0) linkBody.expires_in_days = expiryDays;
         if (pw) linkBody.password = pw;
 
-        const data = await api.post<{ ok: boolean; link?: { url: string }; error?: string }>(`/api/files/${fileId}/share`, linkBody);
+        const data = await api.post<{ ok: boolean; link?: { url: string }; error?: string }>(endpoint, linkBody);
 
         if (data.ok && data.link) {
           setResultUrl(data.link.url);
@@ -197,11 +243,17 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
 
       {/* File info */}
       <div className="mb-3 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
-        <svg viewBox="0 0 14 14" fill="none" width="15" height="15" className="shrink-0">
-          <path d="M3.5 1h5l3.5 3.5V12a1 1 0 01-1 1H3.5a1 1 0 01-1-1V2a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.1" />
-          <path d="M8.5 1v3.5h3.5" stroke="currentColor" strokeWidth="1.1" />
-        </svg>
-        <span className="truncate font-medium text-[var(--color-text)]">{fileName}</span>
+        {isFolder ? (
+          <Folder size={15} className="shrink-0" />
+        ) : isBundle ? (
+          <Files size={15} className="shrink-0" />
+        ) : (
+          <svg viewBox="0 0 14 14" fill="none" width="15" height="15" className="shrink-0">
+            <path d="M3.5 1h5l3.5 3.5V12a1 1 0 01-1 1H3.5a1 1 0 01-1-1V2a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.1" />
+            <path d="M8.5 1v3.5h3.5" stroke="currentColor" strokeWidth="1.1" />
+          </svg>
+        )}
+        <span className="truncate font-medium text-[var(--color-text)]">{name}</span>
       </div>
 
       <div className="space-y-3">
@@ -240,7 +292,9 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
 
         {/* Link tab */}
         {tab === "link" && !resultUrl && (
-          <p className="text-xs text-[var(--color-text-muted)]">Anyone with the link can access this file.</p>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Anyone with the link can access {isFolder ? "this folder" : isBundle ? "these files" : "this file"}.
+          </p>
         )}
 
         {/* Expiry */}
@@ -337,6 +391,13 @@ export function ShareModal({ open, fileId, fileName, onClose }: ShareModalProps)
           </div>
         )}
       </div>
+
+      {isFolder && excludedCount > 0 && (
+        <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+          {excludedCount} hidden or locked {excludedCount === 1 ? "item" : "items"} in this
+          folder or its subfolders will not be shared.
+        </p>
+      )}
 
       <div className="mt-5 flex justify-end gap-2">
         <button onClick={close} className="rounded-lg border px-4 py-2 text-sm" style={borderStyle}>
