@@ -22,6 +22,25 @@ function genId(): string {
 const MAX_FOLDER_DEPTH = 50;
 
 /**
+ * The single definition of "the bytes on disk are no longer the bytes we last
+ * synced". Every path that can destroy a local file routes through this, so
+ * there is exactly one notion of "locally changed" in the engine: reconcile()
+ * case 4 (remote gone, file on disk), reconcile() case 5 (present on both
+ * sides) and reconcileRemoteOnly()'s delete guard.
+ *
+ * Note what it does NOT do: adopt the localMtimeMs === 0 pre-population
+ * sentinel. That adoption is case 5's, and it stays there - it needs the
+ * remote record to prove the local copy is the synced one, which is exactly
+ * what the delete paths do not have.
+ */
+function isLocallyChanged(stored: SyncFileRecord, localStat: LocalFileStat): boolean {
+  return (
+    localStat.mtimeMs !== stored.localMtimeMs ||
+    localStat.sizeBytes !== stored.localSizeBytes
+  );
+}
+
+/**
  * Build a map of local files: relative path → stat.
  * Always uses forward slashes in paths regardless of OS.
  * Uses the shared shouldIgnoreEntry() filter so the scanner and watcher
@@ -333,20 +352,47 @@ export async function reconcile(
 
     // Case 4: NOT remote, In stored, In local → remotely deleted
     if (!remoteFile && stored && localStat && relPath) {
-      const localChanged =
-        localStat.mtimeMs !== stored.localMtimeMs ||
-        localStat.sizeBytes !== stored.localSizeBytes;
+      const localChanged = isLocallyChanged(stored, localStat);
       if (localChanged) {
         const parts = relPath.split("/");
         const dirPath = parts.slice(0, -1).join("/");
-        const remoteFolderId = dirPath ? (pathToRemoteFolder.get(dirPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
-        actions.push({
-          type: "upload-new",
-          localPath: join(pair.localPath, relPath),
-          remoteFolderId,
-          stat: localStat,
-          fileName: parts[parts.length - 1],
-        });
+        // undefined here means exactly one thing: the file sat in a subfolder,
+        // and that subfolder is no longer in the snapshot either.
+        const remoteFolderId = dirPath ? pathToRemoteFolder.get(dirPath) : pair.remoteFolderId;
+        if (remoteFolderId === undefined) {
+          // The file AND its folder both vanished from the snapshot. That is
+          // what the server does when access is withdrawn - a hidden,
+          // permission-restricted or locked subtree simply stops being listed -
+          // and it is indistinguishable from a real remote deletion. Uploading
+          // would re-create the file at the sync root as a brand-new, unhidden,
+          // unlocked object: the protections that removed it, stripped off.
+          // Raise a conflict instead. Nothing is written on either side, the
+          // local edit is left untouched, and the user picks: keep-remote drops
+          // the local copy, keep-local/keep-both re-uploads it deliberately.
+          actions.push({
+            type: "conflict",
+            conflict: {
+              id: genId(),
+              pairId: pair.id,
+              localPath: join(pair.localPath, relPath),
+              remoteName: stored.remoteName,
+              remoteId: stored.remoteId,
+              localMtimeMs: localStat.mtimeMs,
+              remoteUpdatedAt: stored.remoteUpdatedAt,
+              localSizeBytes: localStat.sizeBytes,
+              remoteSizeBytes: stored.remoteSizeBytes,
+              detectedAt: Date.now(),
+            },
+          });
+        } else {
+          actions.push({
+            type: "upload-new",
+            localPath: join(pair.localPath, relPath),
+            remoteFolderId,
+            stat: localStat,
+            fileName: parts[parts.length - 1],
+          });
+        }
       } else {
         actions.push({
           type: "delete-local",
@@ -390,9 +436,7 @@ export async function reconcile(
         stored.localMtimeMs = localStat.mtimeMs;
       }
 
-      const localChanged =
-        localStat.mtimeMs !== stored.localMtimeMs ||
-        localStat.sizeBytes !== stored.localSizeBytes;
+      const localChanged = isLocallyChanged(stored, localStat);
 
       if (!remoteChanged && !localChanged) continue;
 
@@ -529,8 +573,11 @@ export async function reconcile(
  * no local changes since the last full reconcile.
  *
  * This saves 15+ seconds of I/O per poll cycle on large file trees (150K files).
+ *
+ * "No local scan" means no WALK. It does still stat the handful of files it is
+ * about to delete - see the deletion block below for why that is not optional.
  */
-export function reconcileRemoteOnly(
+export async function reconcileRemoteOnly(
   pair: SyncPair,
   storedState: SyncPairState,
   remote: RemoteSnapshot,
@@ -583,26 +630,105 @@ export function reconcileRemoteOnly(
     }
   }
 
-  // Check for remote deletions
-  let deleteCount = 0;
+  // ── Remote deletions ───────────────────────────────────────────────
+  // A stored id missing from the snapshot means the remote copy is gone. That
+  // is one observation with two causes we cannot tell apart: the file really
+  // was deleted, or access to it was withdrawn (hidden, permission-restricted
+  // or locked subtrees simply stop being listed).
+  //
+  // This block used to emit delete-local for every one of them and the
+  // executor unlinks unconditionally, so a file the user had edited since the
+  // last sync was destroyed without a single comparison - and the edit existed
+  // nowhere else, because the upload that would have preserved it is exactly
+  // what the missing remote record suppresses. So stat the delete candidates
+  // (ONLY those - the walk is still skipped, which is what makes this the fast
+  // path) and apply reconcile()'s case-4 rule: same situation, same rule. A
+  // file that still matches its record is safe to remove; one that does not
+  // stays on disk and becomes a conflict for the user to resolve.
+  const deleteCandidates: SyncFileRecord[] = [];
   for (const [id, stored] of Object.entries(storedState.files)) {
-    if (!remote.files.has(id)) {
-      // File deleted remotely → delete locally
-      actions.push({ type: "delete-local", localPath: join(pair.localPath, stored.localPath), record: stored });
+    if (!remote.files.has(id)) deleteCandidates.push(stored);
+  }
+
+  let deleteCount = 0;
+  const guardConflictIds = new Set<string>();
+  for (let i = 0; i < deleteCandidates.length; i += STAT_BATCH_SIZE) {
+    const batch = deleteCandidates.slice(i, i + STAT_BATCH_SIZE);
+    const stats = await Promise.all(
+      batch.map((stored) =>
+        stat(longPath(join(pair.localPath, stored.localPath))).then(
+          (s) => ({ stat: s, err: null as NodeJS.ErrnoException | null }),
+          (err: NodeJS.ErrnoException) => ({ stat: null, err }),
+        ),
+      ),
+    );
+
+    for (let j = 0; j < batch.length; j++) {
+      const stored = batch[j];
+      const absPath = join(pair.localPath, stored.localPath);
+      const { stat: s, err } = stats[j];
+
+      if (!s) {
+        if (err?.code === "ENOENT") {
+          // Already gone from disk. The delete unlinks nothing and only drops
+          // the tracking record, which is what we want.
+          actions.push({ type: "delete-local", localPath: absPath, record: stored });
+          deleteCount++;
+        } else {
+          // Unreadable is NOT absent (drive spun down, permission flip, AV
+          // lock). Same fail-safe the full scan takes with an unreadable
+          // directory: change nothing, retry on a healthy pass.
+          console.warn(`[sync] Skipping local delete of ${stored.localPath} - cannot stat it (${err?.code ?? "unknown error"}). Will retry.`);
+        }
+        continue;
+      }
+
+      if (!s.isFile()) {
+        console.warn(`[sync] Skipping local delete of ${stored.localPath} - it is no longer a regular file.`);
+        continue;
+      }
+
+      const localStat: LocalFileStat = { sizeBytes: s.size, mtimeMs: s.mtimeMs, isDirectory: false };
+      if (isLocallyChanged(stored, localStat)) {
+        const conflict: SyncConflict = {
+          id: genId(),
+          pairId: pair.id,
+          localPath: absPath,
+          remoteName: stored.remoteName,
+          remoteId: stored.remoteId,
+          localMtimeMs: localStat.mtimeMs,
+          remoteUpdatedAt: stored.remoteUpdatedAt,
+          localSizeBytes: localStat.sizeBytes,
+          remoteSizeBytes: stored.remoteSizeBytes,
+          detectedAt: Date.now(),
+        };
+        guardConflictIds.add(conflict.id);
+        actions.push({ type: "conflict", conflict });
+        continue;
+      }
+
+      actions.push({ type: "delete-local", localPath: absPath, record: stored });
       deleteCount++;
     }
   }
 
   // Deletion safety valve (same rationale as reconcile): if an implausibly
   // large share of tracked files appear deleted, the remote snapshot is
-  // likely incomplete - suppress deletions until a healthy pass.
-  if (deleteCount > 0) {
+  // likely incomplete - suppress deletions until a healthy pass. The threshold
+  // counts every CANDIDATE, not just the ones that survived the guard above,
+  // so routing some of them to conflicts cannot talk the valve out of firing.
+  // When it fires, the guard's conflicts go with the deletions: they rest on
+  // the same "missing from the snapshot" reading, which is the thing being
+  // distrusted.
+  if (deleteCandidates.length > 0) {
     const storedCount = Object.keys(storedState.files).length;
-    if (storedCount > 10 && deleteCount > 5 && deleteCount > storedCount * 0.5) {
-      console.warn(`[sync] Suppressing ${deleteCount} local deletion(s) - ${deleteCount}/${storedCount} exceeds safety threshold (snapshot likely incomplete).`);
-      return Promise.resolve(actions.filter((a) => a.type !== "delete-local"));
+    if (storedCount > 10 && deleteCandidates.length > 5 && deleteCandidates.length > storedCount * 0.5) {
+      console.warn(`[sync] Suppressing ${deleteCount} local deletion(s) and ${guardConflictIds.size} withheld-file conflict(s) - ${deleteCandidates.length}/${storedCount} tracked files are missing from the snapshot, which exceeds the safety threshold (snapshot likely incomplete).`);
+      return actions.filter(
+        (a) => a.type !== "delete-local" && !(a.type === "conflict" && guardConflictIds.has(a.conflict.id)),
+      );
     }
   }
 
-  return Promise.resolve(actions);
+  return actions;
 }

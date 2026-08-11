@@ -1256,6 +1256,15 @@ export class SyncEngine extends EventEmitter {
             break;
           }
           case "conflict": {
+            // A conflict is raised by the reconciler, which re-runs every poll
+            // cycle and re-reaches the same conclusion until the user resolves
+            // it. Re-adding the same file would stack an identical card every
+            // 30 seconds. Keep the first one - it holds the earliest
+            // detectedAt, and resolution acts on the path, not on the card.
+            const already = this.conflicts.some(
+              (c) => c.pairId === action.conflict.pairId && c.localPath === action.conflict.localPath,
+            );
+            if (already) break;
             this.conflicts.push(action.conflict);
             this.emit("conflict-detected", action.conflict);
             console.log(`[sync] Conflict detected: ${action.conflict.remoteName}`);

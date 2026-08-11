@@ -1276,11 +1276,28 @@ export class RemoteClient {
     rootFolderId: string | null,
     since?: number,
     onProgress?: (filesSoFar: number, page: number) => void,
-  ): Promise<{ files: RemoteFileInfo[]; folders: RemoteFolderInfo[]; deleted: string[] } | null> {
+  ): Promise<{
+    files: RemoteFileInfo[];
+    folders: RemoteFolderInfo[];
+    deleted: { files: string[]; folders: string[] };
+    /**
+     * True when the server withheld tombstones because a delta poll's
+     * deletion query overflowed its page cap. Per the server contract
+     * (pages/api/sync/snapshot.ts docblock), a truncated response's
+     * `deleted.files`/`deleted.folders` are ALWAYS EMPTY - truncation is the
+     * entire signal, not advisory alongside a partial list, because a capped
+     * fetch can cut a locked/hidden ancestor's own row out while a
+     * descendant's id survives the cut. A caller that sees `truncated` must
+     * discard this delta and take a full snapshot instead.
+     */
+    truncated: boolean;
+  } | null> {
     try {
       const files: RemoteFileInfo[] = [];
       let folders: RemoteFolderInfo[] = [];
-      const deleted: string[] = [];
+      const deletedFiles: string[] = [];
+      const deletedFolders: string[] = [];
+      let truncated = false;
       let cursor: string | null = null;
       let page = 0;
 
@@ -1305,9 +1322,37 @@ export class RemoteClient {
         for (const f of data.files ?? []) {
           files.push(f);
         }
-        // Delta responses may carry tombstones for files deleted since `since`.
-        for (const id of data.deleted ?? data.deleted_ids ?? []) {
-          if (typeof id === "string") deleted.push(id);
+        // Delta responses carry tombstones for items deleted since `since`.
+        // The server sends `deleted` as { files, folders, truncated? } - an
+        // OBJECT, not a flat array. A bare `for...of data.deleted` would
+        // throw TypeError on that object (it isn't iterable), which the
+        // caller's try/catch would swallow into a `null` return, aborting
+        // the ENTIRE sync on every delta poll that carries a deletion. Read
+        // the object shape, but still tolerate a legacy array (an older
+        // server) and the older `deleted_ids` field name.
+        const tomb = data.deleted;
+        if (Array.isArray(tomb)) {
+          for (const id of tomb) {
+            if (typeof id === "string") deletedFiles.push(id);
+          }
+        } else if (tomb && typeof tomb === "object") {
+          // Array.isArray, not `?? []`: absence is not the only way a field can
+          // be non-iterable. `?? []` guards a missing key but hands a present
+          // non-array straight to for...of, which throws the same TypeError
+          // into the same swallowing catch, aborting the whole sync one field
+          // deeper. The server is the sole producer and emits arrays today, so
+          // this is insurance against a future shape change, not a live bug.
+          for (const id of Array.isArray(tomb.files) ? tomb.files : []) {
+            if (typeof id === "string") deletedFiles.push(id);
+          }
+          for (const id of Array.isArray(tomb.folders) ? tomb.folders : []) {
+            if (typeof id === "string") deletedFolders.push(id);
+          }
+          if (tomb.truncated === true) truncated = true;
+        } else {
+          for (const id of data.deleted_ids ?? []) {
+            if (typeof id === "string") deletedFiles.push(id);
+          }
         }
 
         onProgress?.(files.length, page);
@@ -1332,7 +1377,7 @@ export class RemoteClient {
         }
       }
 
-      return { files, folders, deleted };
+      return { files, folders, deleted: { files: deletedFiles, folders: deletedFolders }, truncated };
     } catch (err: any) {
       if (err.message === "SESSION_EXPIRED") throw err;
       return null;

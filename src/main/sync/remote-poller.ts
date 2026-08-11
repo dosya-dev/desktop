@@ -250,21 +250,51 @@ export class RemotePoller extends EventEmitter {
     const since = useDelta ? Math.max(0, this.lastPollTimestamp - DELTA_OVERLAP_SEC) : undefined;
     const beforePoll = Math.floor(Date.now() / 1000);
 
-    const fast = await this.client.fetchSnapshotFast(
+    let fast = await this.client.fetchSnapshotFast(
       this.pair.workspaceId,
       this.pair.remoteFolderId,
       since,
     );
 
+    // A delta poll whose tombstone query overflowed its page cap withholds
+    // ALL deletion ids, not a partial list of them (see the docblock on
+    // GET /api/sync/snapshot). Merging this delta as-is would silently stall
+    // those deletions until the next periodic full snapshot, up to
+    // FULL_SNAPSHOT_INTERVAL_MS later. Discard the delta and take a full
+    // snapshot now instead - the contract already requires this authority
+    // for hard-purged rows, so this just applies it promptly instead of on
+    // the next timer tick.
+    let useDeltaThisPoll = !!useDelta;
+    if (fast?.truncated && useDeltaThisPoll) {
+      fast = await this.client.fetchSnapshotFast(this.pair.workspaceId, this.pair.remoteFolderId);
+      useDeltaThisPoll = false;
+    }
+
     if (fast) {
-      if (useDelta && this.cachedSnapshot) {
+      if (useDeltaThisPoll && this.cachedSnapshot) {
         // Merge delta into cached snapshot
         for (const f of fast.files) {
           this.cachedSnapshot.files.set(f.id, f);
         }
         // Apply tombstones so deletions propagate without waiting for a full snapshot
-        for (const id of fast.deleted) {
+        for (const id of fast.deleted.files) {
           this.cachedSnapshot.files.delete(id);
+        }
+        // Folder tombstones: an explicit id-based delete is safe to apply
+        // immediately, unlike `fast.folders` below (a first-page-only
+        // ADDITIVE set, not the authoritative full list - see the comment
+        // there). Note where that safety ends: there is no folder-DELETION
+        // consumer today (handleRemoteChanges/reconcile only ever CREATE
+        // local folders from a remote snapshot, never remove one), but that
+        // is not the same as having no on-disk effect. The map is still read
+        // for path building, and the reconciler resolves an unknown folder id
+        // to "" - so a file entry left pointing at a folder dropped here
+        // reroutes to the sync root, where it can surface as a spurious
+        // delete-remote or a download written to the wrong path. What keeps
+        // that from happening is that the same delta carries the matching
+        // file tombstones; anything that weakens that pairing breaks this.
+        for (const id of fast.deleted.folders) {
+          this.cachedSnapshot.folders.delete(id);
         }
         // A delta response's `data.folders` is NOT the authoritative full set
         // (fetchSnapshotFast returns first-page folders even for delta polls),
