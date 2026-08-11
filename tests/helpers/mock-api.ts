@@ -1,5 +1,10 @@
 import http from "http";
+import { readFileSync } from "fs";
+import { join } from "path";
 import * as data from "./mock-data";
+
+/** The real tagged MP3 the audio-viewer spec plays. Read once per process. */
+const SAMPLE_MP3 = readFileSync(join(__dirname, "../fixtures/sample-track.mp3"));
 
 export interface MockApiOptions {
   authenticated?: boolean;
@@ -63,7 +68,7 @@ export async function startMockServer(
       "Access-Control-Allow-Origin": req.headers.origin || "*",
       "Access-Control-Allow-Credentials": "true",
       "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Cookie",
+      "Access-Control-Allow-Headers": "Content-Type, Cookie, Range",
       "Vary": "Origin",
     };
 
@@ -153,6 +158,41 @@ export async function startMockServer(
     }
 
     // ── Files ─────────────────────────────────────────────
+
+    // Serve the sample MP3 the way the real /raw does, RANGE INCLUDED - the
+    // audio viewer reads its tags with a 256KB ranged request, so a mock that
+    // ignored Range would exercise a path production does not have.
+    if (/^\/api\/files\/[^/]+\/raw$/.test(path) && (method === "GET" || method === "HEAD")) {
+      const size = SAMPLE_MP3.length;
+      const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? "");
+      if (m && (m[1] !== "" || m[2] !== "")) {
+        const start = m[1] === "" ? Math.max(0, size - Number(m[2])) : Number(m[1]);
+        const end = m[1] === "" || m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1);
+        if (start >= size || start > end) {
+          res.writeHead(416, { ...corsHeaders, "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" });
+          res.end();
+          return;
+        }
+        res.writeHead(206, {
+          ...corsHeaders,
+          "Content-Type": "audio/mpeg",
+          "Content-Length": String(end - start + 1),
+          "Content-Range": `bytes ${start}-${end}/${size}`,
+          "Accept-Ranges": "bytes",
+        });
+        res.end(method === "HEAD" ? undefined : SAMPLE_MP3.subarray(start, end + 1));
+        return;
+      }
+      res.writeHead(200, {
+        ...corsHeaders,
+        "Content-Type": "audio/mpeg",
+        "Content-Length": String(size),
+        "Accept-Ranges": "bytes",
+      });
+      res.end(method === "HEAD" ? undefined : SAMPLE_MP3);
+      return;
+    }
+
     if (path === "/api/files" && method === "GET") {
       return json({ ok: true, files: data.mockFiles, total: data.mockFiles.length, page: 1, per_page: 50, total_pages: 1 });
     }

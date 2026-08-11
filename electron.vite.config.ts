@@ -55,6 +55,10 @@ export default defineConfig({
     resolve: {
       alias: {
         "@": resolve(__dirname, "src/renderer"),
+        // Vendored into apps/desktop (scripts/vendor-audio-player.mjs) rather
+        // than aliased at ../../packages: CI syncs only apps/desktop/ to the
+        // public repo, where that sibling does not exist.
+        "@dosya-dev/audio-player": resolve(__dirname, "vendor/audio-player/index.ts"),
       },
     },
   },

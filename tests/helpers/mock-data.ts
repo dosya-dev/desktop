@@ -31,6 +31,46 @@ export const mockWorkspaceB = {
 
 export const mockFiles = [
   {
+    // Real MP3 (tests/fixtures/sample-track.mp3) with ID3v2.3 title/artist/
+    // album, embedded cover art and timestamped USLT lyrics, so the audio
+    // viewer's tag read, artwork decode and waveform all run against genuine
+    // bytes rather than a stub.
+    id: "file_audio",
+    name: "03 Midnight Ferry.mp3",
+    kind: "file",
+    size_bytes: 532_672,
+    mime_type: "audio/mpeg",
+    extension: "mp3",
+    region: "eu-west",
+    uploaded_by: "user_test_1",
+    uploader_name: "Test User",
+    folder_id: null,
+    workspace_id: "ws_test_1",
+    is_favourite: 0,
+    is_locked: 0,
+    is_hidden: 0,
+    created_at: "2025-03-01T12:00:00Z",
+    updated_at: "2025-03-01T12:00:00Z",
+  },
+  {
+    id: "file_audio_2",
+    name: "04 Harbour Static.mp3",
+    kind: "file",
+    size_bytes: 532_672,
+    mime_type: "audio/mpeg",
+    extension: "mp3",
+    region: "eu-west",
+    uploaded_by: "user_test_1",
+    uploader_name: "Test User",
+    folder_id: null,
+    workspace_id: "ws_test_1",
+    is_favourite: 0,
+    is_locked: 0,
+    is_hidden: 0,
+    created_at: "2025-03-01T12:00:00Z",
+    updated_at: "2025-03-01T12:00:00Z",
+  },
+  {
     id: "file_1",
     name: "Project Report.pdf",
     kind: "file",
