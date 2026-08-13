@@ -68,6 +68,13 @@ const ROLE_LABELS: Record<string, string> = {
   role_owner: 'Owner', role_admin: 'Admin', role_member: 'Member', role_viewer: 'Viewer',
 };
 
+/**
+ * Human label for a workspace role id.
+ *
+ * The fallback is "Custom role", not "Member": a workspace-defined role has an
+ * id like `role_a1b2c3` that is not in the map above, and calling it "Member"
+ * asserted a builtin role the person does not hold.
+ */
 export function roleLabel(roleId: string): string {
-  return ROLE_LABELS[roleId] ?? 'Member';
+  return ROLE_LABELS[roleId] ?? 'Custom role';
 }

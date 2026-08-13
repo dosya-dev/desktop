@@ -223,3 +223,20 @@ export const mockSessions = [
     is_current: true,
   },
 ];
+
+/** Two rows, one unread and one read, so the badge and the dot are both testable. */
+export const mockNotifications = [
+  {
+    id: "ntf_unread", kind: "personal", type: "files_uploaded", category: "files",
+    priority: "normal", title: "report.pdf was uploaded", body: "Added to Invoices",
+    icon: null, link_path: "/files/file_1", actions: null, actor_name: "Ada",
+    created_at: Math.floor(Date.now() / 1000) - 120, read_at: null, dismissed_at: null,
+  },
+  {
+    id: "ntf_read", kind: "personal", type: "files_share_expiring", category: "files",
+    priority: "normal", title: "A share link expires tomorrow", body: null,
+    icon: null, link_path: "/vault", actions: null, actor_name: null,
+    created_at: Math.floor(Date.now() / 1000) - 7200, read_at: Math.floor(Date.now() / 1000) - 60,
+    dismissed_at: null,
+  },
+];

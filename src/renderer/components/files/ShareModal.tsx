@@ -4,6 +4,7 @@ import { Mail, Link2, X, Loader2, Copy, ChevronDown, Files, Folder } from "lucid
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api-client";
 import { Modal } from "@/components/files/Modal";
+import { buildShareEmailBody, buildShareLinkBody, shareEndpoint } from "@dosya-dev/shared";
 
 /**
  * What is being shared. A share link is one file, one bundle of files, or one
@@ -51,6 +52,7 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [resultUrl, setResultUrl] = useState("");
+  const [restrictToRecipients, setRestrictToRecipients] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
 
   // What a link for this folder will NOT include, shown before the sharer
@@ -135,7 +137,11 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
     }
 
     setSubmitting(true);
-    const expiryDays = Number(expiry);
+    // The builder normalises on absolute expires_at; the picker is still in days.
+    const expiresAt = (): number | null => {
+      const days = Number(expiry);
+      return days > 0 ? Math.floor(Date.now() / 1000) + days * 86400 : null;
+    };
 
     try {
       if (tab === "email") {
@@ -143,28 +149,30 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
         // desktop caller builds one yet, and the body below is still shaped
         // for a single recipient per call with no file_ids, so this branch
         // would 400 if a bundle target were ever actually submitted here.
-        const endpoint = target.kind === "folder"
-          ? `/api/folders/${target.folderId}/share-email`
-          : target.kind === "bundle"
-            ? "/api/files/share-bundle"
-            : `/api/files/${target.fileIds[0]}/share-email`;
+        // One request carrying every recipient, not one request per address.
+        // A restricted link has to be a single link bound to the whole list; N
+        // separate calls would mint N links and make "only these people" a
+        // claim the data does not support.
+        const endpoint = shareEndpoint(target, "email");
+        const body = buildShareEmailBody({
+          target,
+          emails,
+          message,
+          restrictToRecipients,
+          password: pw || null,
+          expiresAt: expiresAt(),
+        });
 
-        const body: Record<string, unknown> = {
-          email: emails[0],
-          message: message.trim(),
-        };
-        if (pw) body.password = pw;
-        if (expiryDays > 0) body.expires_in_days = expiryDays;
-
-        const res = await api.post<{ ok: boolean; error?: string }>(endpoint, body);
-
-        // Send to remaining emails
-        for (let i = 1; i < emails.length; i++) {
-          await api.post(endpoint, { ...body, email: emails[i] }).catch(() => {});
-        }
+        const res = await api.post<{ ok: boolean; error?: string; failed?: string[] }>(endpoint, body);
 
         if (res.ok) {
-          toast.success("Share sent", { description: `Shared with ${emails.length} recipient${emails.length === 1 ? "" : "s"}.` });
+          const failedCount = res.failed?.length ?? 0;
+          const sent = emails.length - failedCount;
+          toast.success(restrictToRecipients ? "Private share sent" : "Share sent", {
+            description: failedCount
+              ? `Sent to ${sent} of ${emails.length}. Could not reach: ${res.failed!.join(", ")}.`
+              : `Shared with ${sent} recipient${sent === 1 ? "" : "s"}.`,
+          });
           close();
         } else {
           setError(res.error ?? "Could not send.");
@@ -174,15 +182,12 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
         // Same bundle caveat as the email endpoint above: no desktop caller
         // builds a "bundle" target yet, and linkBody below has no file_ids,
         // so this branch would 400 if one were ever submitted here.
-        const endpoint = target.kind === "folder"
-          ? `/api/folders/${target.folderId}/share`
-          : target.kind === "bundle"
-            ? "/api/files/share-bundle"
-            : `/api/files/${target.fileIds[0]}/share`;
-
-        const linkBody: Record<string, unknown> = {};
-        if (expiryDays > 0) linkBody.expires_in_days = expiryDays;
-        if (pw) linkBody.password = pw;
+        const endpoint = shareEndpoint(target, "link");
+        const linkBody = buildShareLinkBody({
+          target,
+          password: pw || null,
+          expiresAt: expiresAt(),
+        });
 
         const data = await api.post<{ ok: boolean; link?: { url: string }; error?: string }>(endpoint, linkBody);
 
@@ -287,6 +292,26 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
                 autoComplete="off"
               />
             </div>
+
+            {/* The one control here that changes who can open the link, so it
+                states the consequence rather than just naming a setting. */}
+            <label className="mt-2.5 flex cursor-pointer items-start gap-2">
+              <input
+                type="checkbox"
+                checked={restrictToRecipients}
+                onChange={(e) => setRestrictToRecipients(e.target.checked)}
+                className="mt-0.5 size-3.5 accent-[var(--color-primary)]"
+                data-testid="restrict-to-recipients"
+              />
+              <span className="text-xs leading-snug">
+                Only these recipients can open it
+                <span className="block text-[11px] text-[var(--color-text-muted)]">
+                  {restrictToRecipients
+                    ? "They will each have to sign in to the address you entered."
+                    : "Off means anyone with the link can open it, including people it gets forwarded to."}
+                </span>
+              </span>
+            </label>
           </div>
         )}
 

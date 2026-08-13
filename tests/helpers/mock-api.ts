@@ -235,6 +235,17 @@ export async function startMockServer(
     if (/^\/api\/files\/[^/]+\/share$/.test(path) && method === "POST") return json({ ok: true, share: data.mockShareLinks[0] });
 
     // ── Activity ──────────────────────────────────────────
+    // ── Notifications ──────────────────────────────────────────
+    if (path === "/api/notifications/summary" && method === "GET") {
+      return json({ ok: true, unread: data.mockNotifications.filter((n) => n.read_at == null).length, latest: data.mockNotifications[0] ?? null });
+    }
+    if (path === "/api/notifications" && method === "GET") {
+      return json({ ok: true, items: data.mockNotifications, nextBefore: null });
+    }
+    if (path === "/api/notifications/read-all" && method === "POST") return json({ ok: true });
+    if (path.startsWith("/api/notifications/") && path.endsWith("/read") && method === "POST") return json({ ok: true });
+    if (path.startsWith("/api/notifications/") && path.endsWith("/dismiss") && method === "POST") return json({ ok: true });
+
     if (path === "/api/activity" && method === "GET") {
       return json({ ok: true, activities: data.mockActivity, total: data.mockActivity.length, page: 1, per_page: 50, total_pages: 1 });
     }

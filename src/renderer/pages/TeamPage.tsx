@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
+import { usePermissions } from "@/lib/use-permissions";
 import { formatDate, formatRelative } from "@/lib/format";
 import { toast } from "sonner";
 import { isValidEmail } from "@dosya-dev/shared";
@@ -64,6 +65,9 @@ export function TeamPage() {
   const [inviteRole, setInviteRole] = useState("role_member");
   const [removeTarget, setRemoveTarget] = useState<{ id: string; name: string } | null>(null);
 
+  const { can } = usePermissions();
+  const canManageRoles = can("manage_roles");
+
   const { data, isLoading } = useQuery({
     queryKey: ["team", active?.id],
     queryFn: () =>
@@ -71,12 +75,31 @@ export function TeamPage() {
     enabled: !!active,
   });
 
+  // The workspace's roles, so both the invite dropdown and the per-member role
+  // select can offer CUSTOM roles. This app only ever listed the three builtin
+  // ones, so a workspace could define a role in the web app and never assign
+  // it from here.
+  const { data: rolesData } = useQuery({
+    queryKey: ["roles", active?.id],
+    queryFn: () => api.get<{ ok: boolean; roles: { id: string; name: string }[] }>(`/api/roles?workspace_id=${active!.id}`),
+    enabled: !!active?.id,
+    staleTime: 60_000,
+  });
+  // role_owner is excluded: ownership is transferred, never assigned.
+  const assignableRoles = (rolesData?.roles ?? []).filter((r) => r.id !== "role_owner");
+
   const inviteMut = useMutation({
     mutationFn: () =>
       api.post("/api/team/invite", {
         workspace_id: active!.id,
         email: inviteEmail,
-        role_id: inviteRole,
+        // `role`, not `role_id`. The endpoint reads `payload.role` and falls
+        // back to role_member when it is absent, so every invite this app has
+        // ever sent arrived as a Member - picking Admin or Viewer in the
+        // dropdown below changed nothing, and the request still returned 200
+        // so there was no error to notice. The server now also accepts
+        // `role_id` for copies of this app that predate this fix.
+        role: inviteRole,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
@@ -96,6 +119,27 @@ export function TeamPage() {
       queryClient.invalidateQueries({ queryKey: ["team"] });
       setRemoveTarget(null);
       toast.success("Member removed");
+    },
+  });
+
+  /**
+   * Move a member to another role.
+   *
+   * There was no way to do this from any client: PUT /api/team/members/:id
+   * only wrote root_folder_id, so a role was fixed at invite time and the only
+   * way to change one was to remove the person and invite them again. Combined
+   * with the `role_id`/`role` bug above, that meant this app could produce
+   * nothing but Members, permanently.
+   */
+  const roleMut = useMutation({
+    mutationFn: ({ membershipId, roleId }: { membershipId: string; roleId: string }) =>
+      api.put(`/api/team/members/${membershipId}`, { role_id: roleId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["team"] });
+      toast.success("Role updated");
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to change role");
     },
   });
 
@@ -181,19 +225,42 @@ export function TeamPage() {
                           </div>
                         </td>
                         <td className="px-4 py-3">
-                          <span
-                            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium"
-                            style={{ color: role.color, background: role.color + "15" }}
-                          >
-                            {role.icon}
-                            {role.label}
-                          </span>
+                          {/* A control, not a label, for anyone who may manage
+                              roles. The owner's row stays a badge (ownership
+                              moves by transfer) and so does your own (the
+                              endpoint refuses self-changes). */}
+                          {canManageRoles && !m.is_you && m.role_id !== "role_owner" ? (
+                            <select
+                              value={m.role_id}
+                              disabled={roleMut.isPending}
+                              aria-label={`Role for ${m.name}`}
+                              onChange={(e) => roleMut.mutate({ membershipId: m.membership_id, roleId: e.target.value })}
+                              className="rounded-md border px-2 py-1 text-xs"
+                              style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
+                            >
+                              {assignableRoles.map((r) => (
+                                <option key={r.id} value={r.id}>{r.name}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium"
+                              style={{ color: role.color, background: role.color + "15" }}
+                            >
+                              {role.icon}
+                              {role.label}
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-xs text-[var(--color-text-muted)]">
                           {formatDate(m.joined_at)}
                         </td>
                         <td className="px-4 py-3">
-                          {!m.is_you && m.role_id !== "role_owner" && (
+                          {/* Removal needs manage_roles - the endpoint checks
+                              that permission now instead of comparing role
+                              ids. This button used to be shown to every
+                              member, viewers included. */}
+                          {!m.is_you && m.role_id !== "role_owner" && canManageRoles && (
                             <button
                               onClick={() =>
                                 setRemoveTarget({ id: m.membership_id, name: m.name })
@@ -321,9 +388,13 @@ export function TeamPage() {
                   className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
                   style={{ borderColor: "var(--color-border)" }}
                 >
-                  <option value="role_admin">Admin</option>
-                  <option value="role_member">Member</option>
-                  <option value="role_viewer">Viewer</option>
+                  {/* From /api/roles, so this workspace's CUSTOM roles are
+                      offered too. The three hardcoded options that used to be
+                      here could never invite anyone into a role the workspace
+                      had defined for itself. */}
+                  {assignableRoles.map((r) => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
                 </select>
               </div>
             </div>

@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { api, apiBase, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
+import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes, formatDate } from "@/lib/format";
 import { timeAgo, extOf, colorFor, originLabel, isOfficeFile, hiddenTitle } from "@/lib/file-type";
 import { toast } from "sonner";
@@ -159,6 +160,8 @@ export function FileBrowserPage() {
       })
       .catch(() => {});
   }, [active?.id]);
+
+  const { can, userId: currentUserId } = usePermissions();
 
   const folderId = searchParams.get("folder") || "";
   const filter = searchParams.get("filter") || "all";
@@ -497,6 +500,23 @@ export function FileBrowserPage() {
   const allFiles = data?.files ?? [];
   const breadcrumbs = data?.breadcrumbs ?? [];
   const pagination = data?.pagination;
+
+  // can_lock / can_hide have been in this response type since the file was
+  // written and were never read, so Lock and Hide were offered to every role
+  // while only an owner's clicks worked. Default false, not true: the endpoint
+  // refuses anyway, and offering a locked door is the defect being fixed.
+  const canLock = data?.can_lock ?? false;
+  const canHide = data?.can_hide ?? false;
+
+  /**
+   * Whether Delete should be offered for one file, mirroring what
+   * files/[id]/index.ts checks: delete_any_file covers everything, otherwise
+   * delete_own_files covers only this member's own uploads.
+   */
+  const canDeleteFile = (f: { uploaded_by?: string } | null | undefined): boolean => {
+    if (can("delete_any_file")) return true;
+    return can("delete_own_files") && !!f && f.uploaded_by === currentUserId;
+  };
 
   // Client-side chips - "shared" shows only files with share links, "favourites"
   // only starred files (both hide folders, like the web sidebar's views).
@@ -959,7 +979,7 @@ export function FileBrowserPage() {
             </>
           ) : (
             <>
-              <button
+              {can("download_files") && <button
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
                 onClick={async () => {
                   try {
@@ -972,8 +992,8 @@ export function FileBrowserPage() {
                 }}
               >
                 <FileArchive size={14} /> Download ZIP
-              </button>
-              <button
+              </button>}
+              {can("create_share_links") && <button
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[var(--color-text-secondary)]"
                 // A bundle link is one set of files - it has no room for a folder
                 // alongside them, and desktop has no separate single-folder share
@@ -997,14 +1017,14 @@ export function FileBrowserPage() {
                 }}
               >
                 <Link2 size={14} /> Share bundle
-              </button>
-              <button
+              </button>}
+              {(can("upload_files") || can("rename_folders")) && <button
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
                 onClick={() => { setBulkMoveIds(Array.from(selected)); setBulkMoveFolderIds(Array.from(selectedFolders)); setPickerFolder(null); }}
               >
                 <Move size={14} /> Move
-              </button>
-              <button
+              </button>}
+              {(can("delete_any_file") || can("delete_own_files")) && <button
                 className="flex items-center gap-1 text-[var(--color-danger)] hover:text-[var(--color-danger-hover)]"
                 onClick={() => {
                   const fileIds = Array.from(selected);
@@ -1017,7 +1037,7 @@ export function FileBrowserPage() {
                 }}
               >
                 <Trash2 size={14} /> Delete
-              </button>
+              </button>}
             </>
           )}
           <div className="ml-auto flex items-center gap-3">
@@ -1093,7 +1113,7 @@ export function FileBrowserPage() {
                               <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />
                             )}
                             {!!folder.is_hidden && (
-                              <EyeOff size={12} className="shrink-0 text-[var(--color-text-muted)]" title={hiddenTitle(folder.hidden_mode)} />
+                              <span title={hiddenTitle(folder.hidden_mode)} className="inline-flex shrink-0"><EyeOff size={12} className="text-[var(--color-text-muted)]" /></span>
                             )}
                           </div>
                         </td>
@@ -1163,7 +1183,7 @@ export function FileBrowserPage() {
                                 <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />
                               )}
                               {!!file.is_hidden && (
-                                <EyeOff size={12} className="shrink-0 text-[var(--color-text-muted)]" title={hiddenTitle(file.hidden_mode)} />
+                                <span title={hiddenTitle(file.hidden_mode)} className="inline-flex shrink-0"><EyeOff size={12} className="text-[var(--color-text-muted)]" /></span>
                               )}
                               {file.share_count > 0 && (
                                 <Share2 size={12} className="shrink-0 text-[var(--color-primary)]" />
@@ -1369,35 +1389,42 @@ export function FileBrowserPage() {
               </>
             ) : contextMenu.item.kind === "folder" ? (
               <>
+                {/* Each entry below is gated on the permission its endpoint
+                    actually checks. The menu used to offer all of it to every
+                    role, so a viewer got Rename, Move, Lock, Hide and Delete
+                    and learned their role from a row of 403 toasts. Lock and
+                    Hide use canLock/canHide from the listing payload - fields
+                    this file has always DECLARED (can_lock, can_hide) and
+                    never read. */}
                 <CtxItem icon={<FolderOpen size={14} />} label="Open" onClick={() => { navigateToFolder(contextMenu.item.id); setContextMenu(null); }} />
-                <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
+                {can("create_share_links") && <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
                   setShareTarget({ target: { kind: "folder", folderId: contextMenu.item.id }, name: contextMenu.item.name });
                   setContextMenu(null);
-                }} />
+                }} />}
                 <CtxItem icon={<Info size={14} />} label="Get info" onClick={() => {
                   if (ctxFolder) setInfoTarget({ type: "folder", item: ctxFolder });
                   setContextMenu(null);
                 }} />
                 <Divider />
-                <CtxItem icon={<Pencil size={14} />} label="Rename" onClick={() => {
+                {can("rename_folders") && <CtxItem icon={<Pencil size={14} />} label="Rename" onClick={() => {
                   setRenameItem(contextMenu.item); setRenameName(contextMenu.item.name); setContextMenu(null);
-                }} />
-                <CtxItem icon={<Move size={14} />} label="Move to..." onClick={() => {
+                }} />}
+                {can("rename_folders") && <CtxItem icon={<Move size={14} />} label="Move to..." onClick={() => {
                   setMoveTarget({ id: contextMenu.item.id, name: contextMenu.item.name, kind: "folder" });
                   setPickerFolder(null); setContextMenu(null);
-                }} />
+                }} />}
                 <Divider />
-                <CtxItem icon={<Lock size={14} />} label={ctxFolder && ctxFolder.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
+                {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFolder && ctxFolder.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
                   setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "folder" }); setContextMenu(null);
-                }} />
-                <CtxItem icon={ctxFolder?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFolder?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
+                }} />}
+                {canHide && <CtxItem icon={ctxFolder?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFolder?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
                   setHideTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "folder" }); setContextMenu(null);
-                }} />
+                }} />}
                 <Divider />
-                <CtxItem icon={<Trash2 size={14} />} label="Delete" danger onClick={() => {
+                {(can("delete_any_file") || can("delete_own_files")) && <CtxItem icon={<Trash2 size={14} />} label="Delete" danger onClick={() => {
                   setDeleteConfirm({ ids: [contextMenu.item.id], names: [contextMenu.item.name], kinds: ["folder"] });
                   setContextMenu(null);
-                }} />
+                }} />}
               </>
             ) : (
               <>
@@ -1411,13 +1438,13 @@ export function FileBrowserPage() {
                     setContextMenu(null);
                   }} />
                 )}
-                <CtxItem icon={<Download size={14} />} label="Download" onClick={() => {
+                {can("download_files") && <CtxItem icon={<Download size={14} />} label="Download" onClick={() => {
                   if (ctxFile) downloadViaDialog(ctxFile);
                   setContextMenu(null);
-                }} />
-                <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
+                }} />}
+                {can("create_share_links") && <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
                   setShareTarget({ target: { kind: "file", fileIds: [contextMenu.item.id] }, name: contextMenu.item.name }); setContextMenu(null);
-                }} />
+                }} />}
                 <CtxItem icon={<MessageCircle size={14} />} label="Comments" onClick={() => {
                   if (ctxFile) setPanel({ file: ctxFile, tab: "comments" });
                   setContextMenu(null);
@@ -1430,39 +1457,39 @@ export function FileBrowserPage() {
                   setContextMenu(null);
                 }} />
                 <Divider />
-                <CtxItem icon={<Pencil size={14} />} label="Rename" onClick={() => {
+                {can("rename_files") && <CtxItem icon={<Pencil size={14} />} label="Rename" onClick={() => {
                   setRenameItem(contextMenu.item); setRenameName(contextMenu.item.name); setContextMenu(null);
-                }} />
-                <CtxItem icon={<Copy size={14} />} label="Copy to..." onClick={() => {
+                }} />}
+                {can("upload_files") && <CtxItem icon={<Copy size={14} />} label="Copy to..." onClick={() => {
                   setCopyTarget({ id: contextMenu.item.id, name: contextMenu.item.name });
                   setPickerFolder(null); setContextMenu(null);
-                }} />
-                <CtxItem icon={<Move size={14} />} label="Move to..." onClick={() => {
+                }} />}
+                {can("upload_files") && <CtxItem icon={<Move size={14} />} label="Move to..." onClick={() => {
                   setMoveTarget({ id: contextMenu.item.id, name: contextMenu.item.name, kind: "file" });
                   setPickerFolder(null); setContextMenu(null);
-                }} />
+                }} />}
                 <Divider />
                 <CtxItem icon={<ExternalLink size={14} />} label="Open in system app" onClick={() => {
                   openFileInSystemApp(contextMenu.item.id, contextMenu.item.name); setContextMenu(null);
                 }} />
-                <CtxItem icon={<Upload size={14} />} label="Upload new version" onClick={() => {
+                {can("upload_files") && <CtxItem icon={<Upload size={14} />} label="Upload new version" onClick={() => {
                   setVersionUploadTarget(contextMenu.item.id); setContextMenu(null);
-                }} />
+                }} />}
                 <CtxItem icon={<History size={14} />} label="Version history" onClick={() => {
                   if (ctxFile) openFileWithLockCheck(ctxFile, "view");
                   setContextMenu(null);
                 }} />
-                <CtxItem icon={<Lock size={14} />} label={ctxFile && ctxFile.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
+                {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFile && ctxFile.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
                   setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "file" }); setContextMenu(null);
-                }} />
-                <CtxItem icon={ctxFile?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFile?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
+                }} />}
+                {canHide && <CtxItem icon={ctxFile?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFile?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
                   setHideTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "file" }); setContextMenu(null);
-                }} />
+                }} />}
                 <Divider />
-                <CtxItem icon={<Trash2 size={14} />} label="Delete" danger onClick={() => {
+                {canDeleteFile(ctxFile) && <CtxItem icon={<Trash2 size={14} />} label="Delete" danger onClick={() => {
                   setDeleteConfirm({ ids: [contextMenu.item.id], names: [contextMenu.item.name], kinds: ["file"] });
                   setContextMenu(null);
-                }} />
+                }} />}
               </>
             )}
           </div>
@@ -1911,7 +1938,7 @@ function FileCard({
         )}
         {!!file.is_hidden && (
           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-black/45 backdrop-blur-sm">
-            <EyeOff size={12} className="text-white" title={hiddenTitle(file.hidden_mode)} />
+            <span title={hiddenTitle(file.hidden_mode)} className="inline-flex"><EyeOff size={12} className="text-white" /></span>
           </span>
         )}
         <span className="rounded-full bg-black/45 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-white backdrop-blur-sm">{ext}</span>

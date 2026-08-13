@@ -4,6 +4,7 @@ import { Minus, Square, X, Pause, Play, RefreshCw, ArrowUpDown } from "lucide-re
 import { ipc } from "@/lib/ipc";
 import { useSyncPaused, useSyncSyncing, useSyncHasPairs } from "@/lib/sync-store";
 import logoSvg from "@/assets/logo.svg";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 
 export function TitleBar() {
   const [platform, setPlatform] = useState<string>("darwin");
@@ -87,7 +88,7 @@ export function TitleBar() {
       >
         <div className="flex-1" />
         {Logo}
-        <div className="flex flex-1 items-center justify-end gap-1">{LanButton}{SyncButton}</div>
+        <div className="flex flex-1 items-center justify-end gap-1">{LanButton}{SyncButton}<NotificationBell /></div>
       </div>
     );
   }
@@ -99,7 +100,7 @@ export function TitleBar() {
         className="titlebar-drag flex h-[var(--titlebar-height)] items-center px-4"
         style={{ background: "var(--color-bg-secondary)", borderBottom: "1px solid var(--color-border)" }}
       >
-        <div className="flex flex-1 items-center gap-1">{LanButton}{SyncButton}</div>
+        <div className="flex flex-1 items-center gap-1">{LanButton}{SyncButton}<NotificationBell /></div>
         <div className="flex-1 flex justify-center">{Logo}</div>
         <div className="flex-1" />
       </div>
@@ -112,7 +113,7 @@ export function TitleBar() {
       className="titlebar-drag flex h-[var(--titlebar-height)] items-center px-4"
       style={{ background: "var(--color-bg-secondary)" }}
     >
-      <div className="flex flex-1 items-center gap-1">{LanButton}{SyncButton}</div>
+      <div className="flex flex-1 items-center gap-1">{LanButton}{SyncButton}<NotificationBell /></div>
       <div className="flex-1 flex justify-center">{Logo}</div>
       <div className="titlebar-no-drag flex flex-1 items-center justify-end gap-1">
         <button

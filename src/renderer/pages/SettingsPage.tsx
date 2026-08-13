@@ -160,10 +160,14 @@ export function SettingsPage() {
     );
   }
 
-  const PERMISSIONS = [
-    "upload_files", "download_files", "create_share_links",
-    "delete_any_file", "invite_members", "manage_roles", "manage_settings",
-  ];
+  // A dead `PERMISSIONS` array lived here: seven hand-picked keys out of the
+  // registry's thirty-four, declared inside the render body and referenced by
+  // nothing. This page does not draw a role matrix at all - the Roles section
+  // below links out to the web app - so the list was only ever a trap waiting
+  // for someone to wire it up and ship a permission table that silently
+  // omitted twenty-seven keys, which is precisely the defect the web page's
+  // own matrix had (it listed two permissions that do not exist and missed
+  // twenty-three that do).
 
   return (
     <div className="flex h-full gap-6">

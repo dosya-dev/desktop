@@ -27,25 +27,32 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { useSyncPaused, useSyncPairs } from "@/lib/sync-store";
 import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { api, ApiError } from "@/lib/api-client";
+import { usePermissions } from "@/lib/use-permissions";
 import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
 import { toast } from "sonner";
 
+// `perm` is the page-access permission that reveals the entry. Those six
+// access_* keys shipped in migration 0008 and were read by nothing anywhere -
+// so a viewer with "Access Upload" off still saw Upload here and got a 403 on
+// arrival. Entries with no `perm` (Requests, Sync) are not workspace pages
+// governed by a page permission.
 const navItems = [
-  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/files", icon: FolderOpen, label: "Files" },
-  { to: "/upload", icon: Upload, label: "Upload" },
-  { to: "/shared", icon: Share2, label: "Shared" },
+  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", perm: "access_dashboard" },
+  { to: "/files", icon: FolderOpen, label: "Files", perm: "access_files" },
+  { to: "/upload", icon: Upload, label: "Upload", perm: "access_upload" },
+  { to: "/shared", icon: Share2, label: "Shared", perm: "access_shared" },
   { to: "/file-requests", icon: Inbox, label: "Requests" },
-  { to: "/team", icon: Users, label: "Team" },
+  { to: "/team", icon: Users, label: "Team", perm: "access_team" },
   { to: "/sync", icon: RefreshCw, label: "Sync" },
-  { to: "/settings", icon: Settings, label: "Settings" },
+  { to: "/settings", icon: Settings, label: "Settings", perm: "access_settings" },
 ];
 
 export function Sidebar() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { workspaces, active, setActive } = useWorkspace();
+  const { can } = usePermissions();
   const queryClient = useQueryClient();
   const [wsOpen, setWsOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -300,7 +307,7 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 space-y-1 px-3">
-        {navItems.map(({ to, icon: Icon, label }) => {
+        {navItems.filter(({ perm }) => !perm || can(perm)).map(({ to, icon: Icon, label }) => {
           const isSyncNav = to === "/sync";
           // Use per-workspace sync status for the active workspace
           const activeWsSync = active ? wsSyncMap[active.id] : undefined;
