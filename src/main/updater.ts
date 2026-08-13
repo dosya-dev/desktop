@@ -189,7 +189,16 @@ export async function initAutoUpdater(): Promise<void> {
         }
         return;
       }
-      autoUpdater.quitAndInstall();
+      // isForceRunAfter MUST be true. quitAndInstall() defaults it to false,
+      // which tells Squirrel `launchAfterInstallation: false` - the app quits,
+      // ShipIt swaps the bundle, and nothing comes back. The user, who just
+      // clicked "Restart to update", is left staring at a closed app and goes
+      // and double-clicks the icon while ShipIt still has the bundle open.
+      // macOS answers that with "dosya is damaged and can't be opened. You
+      // should move it to the Bin", they bin it, and ShipIt then dies on ENOENT
+      // (errSecCSStaticCodeNotFound) because its target just went to the Trash.
+      // That is the whole 2.4.9 story, start to finish.
+      autoUpdater.quitAndInstall(false, true);
     });
 
     // On Linux, also expose a dedicated handler to reveal the file
