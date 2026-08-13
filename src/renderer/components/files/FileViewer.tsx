@@ -9,13 +9,14 @@ import {
 import { toast } from "sonner";
 import { api } from "@/lib/api-client";
 import { fileRawUrl } from "@/lib/file-url";
-import { humanSize, extOf, isImage, isVideo, isAudio, isPdf, isVcard } from "@/lib/file-type";
+import { humanSize, extOf, isImage, isVideo, isAudio, isPdf, isVcard, isOfficeFile } from "@/lib/file-type";
 import { isTextReadable, langFromExtension, looksBinary } from "@/lib/text-detect";
 import { highlightToHtml } from "@/lib/text-highlight";
 import { useInFileFind } from "@/lib/use-in-file-find";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { TextFindBar } from "@/components/files/TextFindBar";
 import { VCardView } from "@/components/files/VCardView";
+import { OfficePreview } from "@/components/files/OfficePreview";
 import { AudioPlayer } from "@/components/files/audio/AudioPlayer";
 import { fileIconSrc } from "@/components/files/FileIcon";
 
@@ -364,6 +365,13 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
     return (
       <iframe src={`${rawUrl}#toolbar=1`} className="h-full w-full rounded-md border-none bg-white" title={`PDF: ${file.name}`} />
     );
+  }
+
+  // Office documents have no native renderer here either: the server converts
+  // them and this shows the resulting PDF. Placed after isPdf so a real .pdf
+  // never takes the conversion path.
+  if (isOfficeFile(file.name)) {
+    return <OfficePreview file={file} />;
   }
 
   if (isTextReadable(file.name, file.mime_type)) {

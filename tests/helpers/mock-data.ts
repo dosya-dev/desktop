@@ -142,6 +142,33 @@ export const mockFiles = [
     created_at: "2025-02-15T09:00:00Z",
     updated_at: "2025-02-15T09:00:00Z",
   },
+  // Office preview fixtures. Three files rather than one because the outcomes
+  // that matter read differently to a user: converted, still converting, and
+  // too large. See tests/e2e/office-preview.spec.ts.
+  {
+    id: "file_docx", name: "report.docx", kind: "file", size_bytes: 24_576,
+    mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: "docx", region: "eu-west", uploaded_by: "user_test_1",
+    uploader_name: "Test User", folder_id: null, workspace_id: "ws_test_1",
+    is_favourite: 0, is_locked: 0, is_hidden: 0,
+    created_at: "2025-03-01T12:00:00Z", updated_at: "2025-03-01T12:00:00Z",
+  },
+  {
+    id: "file_converting", name: "converting.docx", kind: "file", size_bytes: 24_576,
+    mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: "docx", region: "eu-west", uploaded_by: "user_test_1",
+    uploader_name: "Test User", folder_id: null, workspace_id: "ws_test_1",
+    is_favourite: 0, is_locked: 0, is_hidden: 0,
+    created_at: "2025-03-01T12:00:00Z", updated_at: "2025-03-01T12:00:00Z",
+  },
+  {
+    id: "file_huge", name: "huge.pptx", kind: "file", size_bytes: 62_914_560,
+    mime_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    extension: "pptx", region: "eu-west", uploaded_by: "user_test_1",
+    uploader_name: "Test User", folder_id: null, workspace_id: "ws_test_1",
+    is_favourite: 0, is_locked: 0, is_hidden: 0,
+    created_at: "2025-03-01T12:00:00Z", updated_at: "2025-03-01T12:00:00Z",
+  },
 ];
 
 export const mockActivity = [
@@ -184,18 +211,70 @@ export const mockShareLinks = [
   },
 ];
 
+/**
+ * Shaped like what GET /api/file-requests actually returns.
+ *
+ * The old fixture carried recipient_email, uploaded_files_count, status and ISO
+ * date strings - none of which the endpoint sends. That is why the page's
+ * recipient_email line looked fine here while being permanently invisible in
+ * production: the mock supplied a field the API does not.
+ */
 export const mockFileRequests = [
   {
     id: "req_1",
-    workspace_id: "ws_test_1",
-    created_by: "user_test_1",
     token: "req_abc123",
-    recipient_email: "client@example.com",
-    expires_at: "2025-04-01T00:00:00Z",
+    title: "Client brand assets",
+    message: "Logos and typefaces please.",
+    is_password_protected: 0,
+    expires_at: null,
+    allowed_extensions: null,
+    max_file_size_bytes: null,
     max_files: 10,
-    uploaded_files_count: 3,
-    status: "open",
-    created_at: "2025-03-15T10:00:00Z",
+    upload_count: 3,
+    is_revoked: 0,
+    created_at: 1_740_000_000,
+    folder_id: null,
+    created_by_name: "Test User",
+    folder_name: null,
+    url: "https://dosya.dev/upload-request/req_abc123",
+  },
+  {
+    id: "req_2",
+    token: "req_closed",
+    title: "Last quarter's invoices",
+    message: null,
+    is_password_protected: 1,
+    expires_at: null,
+    allowed_extensions: "pdf",
+    max_file_size_bytes: 10 * 1024 * 1024,
+    max_files: null,
+    upload_count: 0,
+    is_revoked: 1,
+    created_at: 1_739_000_000,
+    folder_id: "folder_1",
+    created_by_name: "Test User",
+    folder_name: "Documents",
+    url: "https://dosya.dev/upload-request/req_closed",
+  },
+];
+
+export const mockRequestRecipients = [
+  {
+    id: "rcp_1", email: "client@example.com", token: "rt_1",
+    sent_at: 1_740_000_100, uploaded_at: null, created_at: 1_740_000_050,
+  },
+  {
+    id: "rcp_2", email: "done@example.com", token: "rt_2",
+    sent_at: 1_740_000_100, uploaded_at: 1_740_000_500, created_at: 1_740_000_050,
+  },
+];
+
+export const mockRequestUploads = [
+  {
+    id: "fru_1", file_id: "file_1", uploader_email: "client@example.com",
+    uploader_name: "Client", created_at: 1_740_000_600,
+    file_name: "logo.png", size_bytes: 2048,
+    mime_type: "image/png", extension: ".png",
   },
 ];
 
@@ -238,5 +317,31 @@ export const mockNotifications = [
     icon: null, link_path: "/vault", actions: null, actor_name: null,
     created_at: Math.floor(Date.now() / 1000) - 7200, read_at: Math.floor(Date.now() / 1000) - 60,
     dismissed_at: null,
+  },
+];
+
+/**
+ * Three comments that make the comments tab's three behaviours visible: one this
+ * user wrote (edit is offered), one somebody else wrote (edit is not), and one at
+ * depth two, which the old grouping dropped on the floor.
+ */
+export const mockComments = [
+  {
+    id: "cmt_1", file_id: "file_1", folder_id: null, workspace_id: "ws_test_1",
+    user_id: "user_test_1", parent_id: null, body: "First pass looks good.",
+    is_edited: 0, created_at: 1_740_000_000, updated_at: 1_740_000_000,
+    user_name: "Test User", user_email: "test@example.com", user_avatar: null,
+  },
+  {
+    id: "cmt_2", file_id: "file_1", folder_id: null, workspace_id: "ws_test_1",
+    user_id: "user_other", parent_id: "cmt_1", body: "Agreed, shipping it.",
+    is_edited: 0, created_at: 1_740_000_100, updated_at: 1_740_000_100,
+    user_name: "Grace Hopper", user_email: "grace@example.com", user_avatar: null,
+  },
+  {
+    id: "cmt_3", file_id: "file_1", folder_id: null, workspace_id: "ws_test_1",
+    user_id: "user_test_1", parent_id: "cmt_2", body: "One more thing.",
+    is_edited: 0, created_at: 1_740_000_200, updated_at: 1_740_000_200,
+    user_name: "Test User", user_email: "test@example.com", user_avatar: null,
   },
 ];

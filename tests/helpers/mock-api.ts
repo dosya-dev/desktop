@@ -46,6 +46,27 @@ export async function startMockServer(
     folderStore.set(folder.id, folder);
     return { folder, created: true };
   };
+  // Test-only comment store: the comments specs assert what the panel SENT - the
+  // parent_id on a reply, the edited body - which a static fixture cannot show.
+  const commentStore = new Map<string, any>(data.mockComments.map((c) => [c.id, { ...c }]));
+  let commentSeq = 0;
+  /** Delete a comment and everything descended from it, as the API's CASCADE does. */
+  const deleteCommentTree = (id: string) => {
+    commentStore.delete(id);
+    for (const c of [...commentStore.values()]) {
+      if (c.parent_id === id) deleteCommentTree(c.id);
+    }
+  };
+
+  // Test-only file-request store. The specs assert what the page SENT - whether
+  // create carried `emails` as an array, which recipient a resend named - and a
+  // static fixture cannot show either.
+  const requestStore = new Map<string, any>(data.mockFileRequests.map((r) => [r.id, { ...r }]));
+  const recipientStore = new Map<string, any>(data.mockRequestRecipients.map((r) => [r.id, { ...r }]));
+  const createBodies: any[] = [];
+  const resends: string[] = [];
+  let requestSeq = 0;
+
   const readBody = (req: http.IncomingMessage): Promise<any> =>
     new Promise((resolve) => {
       let raw = "";
@@ -246,6 +267,24 @@ export async function startMockServer(
     if (path.startsWith("/api/notifications/") && path.endsWith("/read") && method === "POST") return json({ ok: true });
     if (path.startsWith("/api/notifications/") && path.endsWith("/dismiss") && method === "POST") return json({ ok: true });
 
+    // Office preview: the endpoint converts on demand, so the interesting part
+    // is the non-200 answers. json(body, status, extraHeaders) - see above.
+    if (path.startsWith("/api/files/") && path.endsWith("/preview-pdf") && method === "GET") {
+      const id = path.split("/")[3];
+      if (id === "file_converting") {
+        return json({ error: "Converting" }, 503, { "Retry-After": "3" });
+      }
+      if (id === "file_huge") {
+        return json({ error: "File too large to preview", code: "too_large" }, 422);
+      }
+      // A minimal valid PDF. Written with res.writeHead/res.end like the mp3
+      // route above, NOT by returning a Response: this is a node http server, so
+      // a returned Response is silently discarded and the request never
+      // completes - which the client sees as an endless "still converting".
+      res.writeHead(200, { "Content-Type": "application/pdf", ...corsHeaders });
+      return res.end(Buffer.from("%PDF-1.4\n%%EOF\n"));
+    }
+
     if (path === "/api/activity" && method === "GET") {
       return json({ ok: true, activities: data.mockActivity, total: data.mockActivity.length, page: 1, per_page: 50, total_pages: 1 });
     }
@@ -287,8 +326,81 @@ export async function startMockServer(
     if (/\/(team\/invite|workspaces\/[^/]+\/invite)$/.test(path) && method === "POST") return json({ ok: true });
 
     // ── File Requests ─────────────────────────────────────
-    if (path === "/api/file-requests" && method === "GET") return json({ ok: true, requests: data.mockFileRequests });
-    if (path === "/api/file-requests" && method === "POST") return json({ ok: true, request: data.mockFileRequests[0] });
+    if (path === "/api/file-requests" && method === "GET") {
+      return json({ ok: true, requests: [...requestStore.values()] });
+    }
+    if (path === "/api/file-requests/create" && method === "POST") {
+      readBody(req).then((body) => {
+        createBodies.push(body);
+        const id = `req_new_${++requestSeq}`;
+        const created = {
+          id, token: `tok_${id}`, title: body.title ?? null, message: body.message ?? null,
+          is_password_protected: body.password ? 1 : 0, expires_at: null,
+          allowed_extensions: body.allowed_extensions ?? null,
+          max_file_size_bytes: body.max_file_size_mb ? body.max_file_size_mb * 1024 * 1024 : null,
+          max_files: body.max_files ?? null, upload_count: 0, is_revoked: 0,
+          created_at: 1_741_000_000, folder_id: body.folder_id ?? null,
+          created_by_name: "Test User", folder_name: null,
+          url: `https://dosya.dev/upload-request/tok_${id}`,
+        };
+        requestStore.set(id, created);
+        json({ ok: true, request: created, url: created.url }, 201);
+      });
+      return;
+    }
+    if (path.startsWith("/api/file-requests/") && path.endsWith("/recipients")) {
+      const id = path.split("/")[3];
+      if (method === "GET") {
+        const request = requestStore.get(id);
+        return json({ ok: true, recipients: [...recipientStore.values()], title: request?.title ?? null });
+      }
+      if (method === "POST") {
+        readBody(req).then((body) => {
+          const email = String(body.email ?? "").toLowerCase();
+          for (const r of recipientStore.values()) {
+            if (r.email === email) return json({ error: "This email is already a recipient" }, 409);
+          }
+          const recipient = {
+            id: `rcp_new_${recipientStore.size + 1}`, email, token: "rt_new",
+            sent_at: 1_741_000_000, uploaded_at: null, created_at: 1_741_000_000,
+          };
+          recipientStore.set(recipient.id, recipient);
+          json({ ok: true, recipient }, 201);
+        });
+        return;
+      }
+      if (method === "DELETE") {
+        recipientStore.delete(url.searchParams.get("recipient_id") ?? "");
+        return json({ ok: true });
+      }
+    }
+    if (path.startsWith("/api/file-requests/") && path.endsWith("/resend") && method === "POST") {
+      readBody(req).then((body) => {
+        resends.push(String(body.recipient_id ?? ""));
+        json({ ok: true });
+      });
+      return;
+    }
+    if (path.startsWith("/api/file-requests/") && path.endsWith("/uploads") && method === "GET") {
+      const request = requestStore.get(path.split("/")[3]) ?? null;
+      return json({ ok: true, request, uploads: data.mockRequestUploads });
+    }
+    if (path.startsWith("/api/file-requests/") && method === "PATCH") {
+      const id = path.split("/")[3];
+      readBody(req).then((body) => {
+        const existing = requestStore.get(id);
+        if (!existing) return json({ error: "Not found" }, 404);
+        Object.assign(existing, body);
+        json({ ok: true });
+      });
+      return;
+    }
+    if (path.startsWith("/api/file-requests/") && method === "DELETE") {
+      // The real endpoint REVOKES: the row stays and is_revoked flips to 1.
+      const existing = requestStore.get(path.split("/")[3]);
+      if (existing) existing.is_revoked = 1;
+      return json({ ok: true });
+    }
 
     // ── Search ────────────────────────────────────────────
     if (path === "/api/search" && method === "GET") {
@@ -311,12 +423,67 @@ export async function startMockServer(
       return;
     }
 
+    // ── Comments ──────────────────────────────────────────
+    if (path === "/api/comments" && method === "GET") {
+      const comments = [...commentStore.values()].sort((a, b) => a.created_at - b.created_at);
+      return json({ ok: true, comments });
+    }
+    if (path === "/api/comments" && method === "POST") {
+      readBody(req).then((body) => {
+        const now = 1_740_000_000 + 1000 * ++commentSeq;
+        const comment = {
+          id: `cmt_new_${commentSeq}`,
+          file_id: body.file_id ?? null,
+          folder_id: body.folder_id ?? null,
+          workspace_id: body.workspace_id ?? "ws_test_1",
+          user_id: "user_test_1",
+          parent_id: body.parent_id ?? null,
+          body: body.body ?? "",
+          is_edited: 0,
+          created_at: now,
+          updated_at: now,
+          user_name: "Test User",
+          user_email: "test@example.com",
+          user_avatar: null,
+        };
+        commentStore.set(comment.id, comment);
+        json({ ok: true, comment }, 201);
+      });
+      return;
+    }
+    if (path.startsWith("/api/comments/") && method === "PUT") {
+      const id = path.split("/").pop() as string;
+      readBody(req).then((body) => {
+        const existing = commentStore.get(id);
+        if (!existing) return json({ error: "Comment not found" }, 404);
+        existing.body = body.body ?? existing.body;
+        existing.is_edited = 1;
+        json({ ok: true, body: existing.body, updated_at: existing.updated_at });
+      });
+      return;
+    }
+    if (path.startsWith("/api/comments/") && method === "DELETE") {
+      deleteCommentTree(path.split("/").pop() as string);
+      return json({ ok: true });
+    }
+
     // ── Test-only instrumentation ───────────────────────────
     if (path === "/__test/upload-init-count" && method === "GET") {
       return json({ count: uploadInitCount });
     }
     if (path === "/__test/folders" && method === "GET") {
       return json({ folders: [...folderStore.values()] });
+    }
+    if (path === "/__test/comments" && method === "GET") {
+      return json({ comments: [...commentStore.values()] });
+    }
+    if (path === "/__test/file-requests" && method === "GET") {
+      return json({
+        requests: [...requestStore.values()],
+        recipients: [...recipientStore.values()],
+        createBodies,
+        resends,
+      });
     }
 
     // ── Regions ───────────────────────────────────────────
@@ -340,6 +507,20 @@ export async function startMockServer(
           { id: "role_member", name: "Member" },
           { id: "role_viewer", name: "Viewer" },
         ],
+      });
+    }
+
+    // Identity only. `permissions` is deliberately ABSENT so can() keeps failing
+    // open exactly as it does today - returning {} here would resolve every
+    // permission to false and flip gated controls off across unrelated specs.
+    if (path === "/api/me/permissions" && method === "GET") {
+      return json({
+        ok: true,
+        user_id: "user_test_1",
+        role_id: "role_owner",
+        role_name: "owner",
+        is_builtin: true,
+        root_folder_id: null,
       });
     }
 
