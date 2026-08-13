@@ -34,7 +34,13 @@ import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { formatDate } from "@/lib/format";
-import { validatePassword } from "@dosya-dev/shared";
+import {
+  validatePassword,
+  DELETE_CODE_LENGTH, normaliseDeleteCode, isCompleteDeleteCode,
+  deleteCooldownRemaining, describeDeletionBlocker, formatDeletionDate,
+  deletionDaysRemaining, classifyDeleteFailure,
+  type AccountDeletePreview,
+} from "@dosya-dev/shared";
 import { toast } from "sonner";
 import { THEMES, type Mode } from "@/lib/themes";
 import { readCache, writeCache, applyTheme, applyThemeAnimated, subscribeThemeChange, type ThemePref } from "@/lib/theme";
@@ -962,18 +968,159 @@ function HelpSection() {
 // ── Delete Account Section ──────────────────────────────────────────
 
 function DeleteSection() {
+  const [preview, setPreview] = useState<AccountDeletePreview | null>(null);
+  const [step, setStep] = useState<"idle" | "code">("idle");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [scheduledFor, setScheduledFor] = useState<number | null>(null);
+  const [sentAt, setSentAt] = useState<number | null>(null);
+  const [remaining, setRemaining] = useState(0);
+
+  const load = async () => {
+    try {
+      const res = await api.get<{ ok: boolean } & AccountDeletePreview>("/api/me/delete-preview");
+      if (res.ok) { setPreview(res); setScheduledFor(res.deletion_scheduled_for); }
+    } catch { /* the section still renders; the action reports its own error */ }
+  };
+
+  useEffect(() => { void load(); }, []);
+
+  // A live countdown rather than a dead button: the server rejects a resend
+  // inside its cooldown, so the control has to say when it will work.
+  useEffect(() => {
+    if (sentAt == null) return;
+    const update = () => setRemaining(deleteCooldownRemaining(sentAt, Date.now()));
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [sentAt]);
+
+  const blockers = preview?.blockers ?? [];
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  const requestCode = async () => {
+    setError(null); setBusy(true);
+    try {
+      await api.post("/api/me/delete-request");
+      setSentAt(Date.now());
+      setStep("code");
+    } catch (e) { setError(classifyDeleteFailure(e).message); }
+    finally { setBusy(false); }
+  };
+
+  const confirm = async () => {
+    setError(null); setBusy(true);
+    try {
+      const res = await api.delete<{ ok: boolean; deletion_scheduled_for: number }>("/api/me", { code });
+      setScheduledFor(res.deletion_scheduled_for);
+      setStep("idle");
+      toast.success("Deletion scheduled", {
+        description: "You have been signed out everywhere. Sign in again to cancel.",
+      });
+    } catch (e) {
+      const f = classifyDeleteFailure(e);
+      if (f.kind === "code_burned") setCode("");
+      setError(f.message);
+    } finally { setBusy(false); }
+  };
+
+  const cancel = async () => {
+    setError(null); setBusy(true);
+    try {
+      await api.post("/api/me/delete-cancel");
+      setScheduledFor(null);
+      toast.success("Deletion cancelled", { description: "Your account will not be deleted." });
+      await load();
+    } catch (e) { setError(classifyDeleteFailure(e).message); }
+    finally { setBusy(false); }
+  };
+
   return (
     <div className="max-w-lg space-y-6">
       <h2 className="text-lg font-semibold">Danger zone</h2>
 
       <div className="rounded-xl border-2 border-dashed p-6" style={{ borderColor: "var(--color-danger)" }}>
         <h3 className="mb-2 font-semibold text-[var(--color-danger)]">Delete account</h3>
-        <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-          Permanently delete your account and all owned workspaces. This action cannot be undone.
-        </p>
-        <button className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white">
-          Delete my account
-        </button>
+
+        {error && <p className="mb-3 text-xs text-[var(--color-danger)]" data-testid="delete-error">{error}</p>}
+
+        {scheduledFor != null ? (
+          <div data-testid="delete-scheduled">
+            <p className="mb-1 text-sm font-medium">Deletion scheduled</p>
+            <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
+              Your account and its files will be deleted on{" "}
+              <span className="font-medium text-[var(--color-text)]">{formatDeletionDate(scheduledFor)}</span>
+              {" "}- {deletionDaysRemaining(scheduledFor, nowSeconds)} days from now. Nothing has been deleted yet.
+            </p>
+            <button
+              onClick={cancel} disabled={busy} data-testid="cancel-deletion"
+              className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-black/5 disabled:opacity-60"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              Cancel deletion
+            </button>
+          </div>
+        ) : step === "code" ? (
+          <div data-testid="delete-code-step">
+            <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
+              We emailed you a {DELETE_CODE_LENGTH}-digit code. Entering it schedules the deletion.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                value={code}
+                onChange={(e) => setCode(normaliseDeleteCode(e.target.value))}
+                placeholder="000000"
+                inputMode="numeric"
+                data-testid="delete-code"
+                className="w-28 rounded-lg border px-2 py-2 text-center font-mono tracking-[0.3em] text-sm"
+                style={{ borderColor: "var(--color-border)", background: "transparent" }}
+              />
+              <button
+                onClick={confirm}
+                disabled={!isCompleteDeleteCode(code) || busy}
+                data-testid="confirm-delete"
+                className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+              >
+                Delete my account
+              </button>
+              {remaining > 0 ? (
+                <span className="text-xs text-[var(--color-text-secondary)]" data-testid="resend-countdown">
+                  Resend in {remaining}s
+                </span>
+              ) : (
+                <button onClick={requestCode} data-testid="resend" className="text-xs underline text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
+                  Resend code
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
+              Scheduled for {preview?.window_days ?? 30} days later, so you can cancel. Deletes{" "}
+              {preview?.workspaces.length ?? 0} workspace{(preview?.workspaces.length ?? 0) === 1 ? "" : "s"}
+              {" "}and {preview?.file_count ?? 0} file{(preview?.file_count ?? 0) === 1 ? "" : "s"}.
+            </p>
+            {blockers.length > 0 && (
+              <ul className="mb-3 space-y-1" data-testid="delete-blockers">
+                {blockers.map((b) => (
+                  <li key={b.workspace_id} className="text-xs text-[var(--color-text-secondary)]">
+                    {describeDeletionBlocker(b)}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <button
+              onClick={requestCode}
+              disabled={blockers.length > 0 || busy}
+              data-testid="start-delete"
+              className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+            >
+              Delete my account
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

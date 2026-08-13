@@ -26,6 +26,7 @@ export interface MyPermissions {
   role_name: string | null;
   is_builtin: boolean;
   root_folder_id: string | null;
+  root_folder_name: string | null;
   permissions: Record<string, boolean>;
 }
 
@@ -53,5 +54,6 @@ export function usePermissions() {
     roleId: data?.role_id ?? null,
     roleName: data?.role_name ?? null,
     rootFolderId: data?.root_folder_id ?? null,
+    rootFolderName: data?.root_folder_name ?? null,
   };
 }
