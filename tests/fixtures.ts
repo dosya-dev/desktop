@@ -32,6 +32,11 @@ async function launchApp(apiBase: string) {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "",
       API_BASE: apiBase,
+      // The mock also stands in for the ONLYOFFICE document server, so the
+      // renderer's CSP names the same origin the editor actually loads from.
+      // Without this the CSP would allow docs.dosya.dev while the test served
+      // api.js from 127.0.0.1, and the spec would pass for the wrong reason.
+      ONLYOFFICE_SERVER_URL: apiBase,
       NODE_ENV: "test",
     },
   });

@@ -36,6 +36,12 @@ export function setupSession(apiBase: string): void {
   // renderer. We intercept the response headers here in the main process
   // and manually store the cookie via Electron's cookies API, which bypasses
   // the renderer-level third-party cookie restrictions.
+  // ONLYOFFICE Document Server. The editor loads its api.js from here and then
+  // iframes the editor itself, so BOTH script-src and frame-src have to name it
+  // - a strict 'self' policy blocks the script silently and the page just never
+  // becomes an editor. Overridable for a self-hosted document server.
+  const docsBase = process.env.ONLYOFFICE_SERVER_URL || "https://docs.dosya.dev";
+
   ses.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
 
@@ -50,15 +56,15 @@ export function setupSession(apiBase: string): void {
         responseHeaders["Content-Security-Policy"] = [
           [
             "default-src 'self'",
-            "script-src 'self'",
+            `script-src 'self' ${docsBase}`,
             "style-src 'self' 'unsafe-inline'",
-            `img-src 'self' data: blob: ${apiBase}`,
-            `connect-src 'self' ${apiBase}`,
+            `img-src 'self' data: blob: ${apiBase} ${docsBase}`,
+            `connect-src 'self' ${apiBase} ${docsBase}`,
             // In-app file viewer: <video>/<audio> stream from the API, and the
             // PDF preview loads /raw in an <iframe>. Without these, media falls
             // back to default-src 'self' and gets blocked.
             `media-src 'self' ${apiBase}`,
-            `frame-src 'self' ${apiBase}`,
+            `frame-src 'self' ${apiBase} ${docsBase}`,
             "font-src 'self' data:",
             "object-src 'none'",
             "base-uri 'self'",
@@ -68,12 +74,12 @@ export function setupSession(apiBase: string): void {
         responseHeaders["Content-Security-Policy"] = [
           [
             "default-src 'self' http://localhost:* ws://localhost:*",
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+            `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${docsBase}`,
             "style-src 'self' 'unsafe-inline'",
-            `img-src 'self' data: blob: http://localhost:* ${apiBase}`,
-            `connect-src 'self' http://localhost:* ws://localhost:* ${apiBase}`,
+            `img-src 'self' data: blob: http://localhost:* ${apiBase} ${docsBase}`,
+            `connect-src 'self' http://localhost:* ws://localhost:* ${apiBase} ${docsBase}`,
             `media-src 'self' http://localhost:* ${apiBase}`,
-            `frame-src 'self' http://localhost:* ${apiBase}`,
+            `frame-src 'self' http://localhost:* ${apiBase} ${docsBase}`,
             "font-src 'self' data:",
             "object-src 'none'",
             "base-uri 'self'",

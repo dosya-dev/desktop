@@ -37,6 +37,7 @@ const FileRequestsPage = lazyPage(() => import("./pages/FileRequestsPage"), "Fil
 const GroupsPage = lazyPage(() => import("./pages/GroupsPage"), "GroupsPage");
 const DuplicatesPage = lazyPage(() => import("./pages/DuplicatesPage"), "DuplicatesPage");
 const MapPage = lazyPage(() => import("./pages/MapPage"), "MapPage");
+const EditorPage = lazyPage(() => import("./pages/EditorPage"), "EditorPage");
 const ForgotPasswordPage = lazyPage(() => import("./pages/ForgotPasswordPage"), "ForgotPasswordPage");
 const LanTransferPage = lazyPage(() => import("./pages/LanTransferPage"), "LanTransferPage");
 const VerifyPage = lazyPage(() => import("./pages/VerifyPage"), "VerifyPage");
@@ -104,6 +105,17 @@ function ProtectedPage({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Authenticated, but WITHOUT the app shell.
+ *
+ * The editor is full-viewport and carries its own header and its own way back,
+ * so wrapping it in AppShell gives two navigations and two "Files" links on one
+ * screen. apps/web keeps its editor outside DashboardLayout for the same reason.
+ */
+function ProtectedBarePage({ children }: { children: React.ReactNode }) {
+  return <ProtectedRoute>{children}</ProtectedRoute>;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -131,6 +143,7 @@ function AppRoutes() {
       <Route path="/groups" element={<ProtectedPage><GroupsPage /></ProtectedPage>} />
       <Route path="/duplicates" element={<ProtectedPage><DuplicatesPage /></ProtectedPage>} />
       <Route path="/map" element={<ProtectedPage><MapPage /></ProtectedPage>} />
+      <Route path="/editor/:fileId" element={<ProtectedBarePage><EditorPage /></ProtectedBarePage>} />
       <Route path="/lan-transfer" element={<ProtectedPage><LanTransferPage /></ProtectedPage>} />
       <Route path="/workspaces" element={<ProtectedPage><WorkspaceDashboardPage /></ProtectedPage>} />
       <Route path="/notifications" element={<ProtectedPage><NotificationsPage /></ProtectedPage>} />

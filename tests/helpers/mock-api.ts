@@ -552,6 +552,36 @@ export async function startMockServer(
       return;
     }
 
+    // Editor config. documentServerUrl points at the mock itself so the spec
+    // never reaches the real document server - what is under test is that the
+    // app requests, mounts and reports, not ONLYOFFICE's own behaviour.
+    if (path.startsWith("/api/files/") && path.endsWith("/editor-config") && method === "GET") {
+      const fileId = path.split("/")[3];
+      return json({
+        ok: true,
+        documentServerUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        config: {
+          document: { title: "Budget.docx", url: "https://example.invalid/doc", fileType: "docx", key: `k_${fileId}` },
+          documentType: "word",
+          editorConfig: { mode: "edit", callbackUrl: "https://example.invalid/cb" },
+          token: "signed.jwt.value",
+        },
+      });
+    }
+    // A stand-in for ONLYOFFICE's api.js: defines just enough of DocsAPI for the
+    // page to mount an "editor".
+    if (path === "/web-apps/apps/api/documents/api.js" && (method === "GET" || method === "HEAD")) {
+      res.writeHead(200, { "Content-Type": "application/javascript", ...corsHeaders });
+      return res.end(
+        "window.DocsAPI = { DocEditor: function (el, cfg) {" +
+        "  var host = document.getElementById(el);" +
+        "  if (host) { host.setAttribute('data-testid', 'oo-editor-mounted');" +
+        "    host.textContent = (cfg && cfg.document && cfg.document.title) || 'document'; }" +
+        "  return { destroyEditor: function () {} };" +
+        "} };",
+      );
+    }
+
     // ── Map ───────────────────────────────────────────────
     // WebGL IS available in the test Electron window (measured: it reports a
     // "WebKit WebGL" context), so the specs assert on markers maplibre actually

@@ -1434,7 +1434,10 @@ export function FileBrowserPage() {
                 }} />
                 {isOfficeFile(contextMenu.item.name) && (
                   <CtxItem icon={<SquarePen size={14} />} label="Open in editor" onClick={() => {
-                    window.open(`https://app.dosya.dev/editor/${contextMenu.item.id}`, "_blank");
+                    // In-app now. This used to window.open the web app, which
+                    // threw the user out of the desktop app into a browser and a
+                    // second login for a document they already had open here.
+                    navigate(`/editor/${contextMenu.item.id}`);
                     setContextMenu(null);
                   }} />
                 )}
