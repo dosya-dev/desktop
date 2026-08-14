@@ -54,13 +54,36 @@ win:
     - sha256
 
 # ── Microsoft Store (MSIX/AppX) ────────────────────────────────────
+# Do NOT sign this target. Microsoft re-signs Store packages, and a package
+# we signed ourselves is rejected on upload.
 appx:
-  identityName: "dosya.dev.dosya.dev"
-  displayName: "dosya.dev"
-  publisher: "CN=9C40EE20-FDD6-4D45-BE36-45A257E76FCA"
-  publisherDisplayName: "dosya.dev"
+  # These three are copied verbatim from Partner Center > Product management >
+  # Product identity. They are not ours to choose: any drift, including case,
+  # fails the Store upload with an identity mismatch. identityName is issued
+  # per product, so it changes if the product is ever recreated.
+  identityName: "DOSYA.dosyaCloudStorageandFileSync"
+  publisher: "CN=BEC0775D-6155-4622-BFBE-ABEBBF38FA5E"
+  publisherDisplayName: "DOSYA"
+  # Start menu, taskbar, Apps list and tile - NOT the Store listing, which uses
+  # the reserved product name "dosya: Cloud Storage and File Sync" instead. That
+  # title is 34 characters and truncates in every one of those Windows surfaces,
+  # so the short form is deliberate. Both names are reserved in Partner Center.
+  #
+  # Also note this string lands in AppxManifest.xml through a raw regex
+  # substitution with no XML escaping (app-builder-lib AppxTarget.js), so an
+  # unescaped "&" here would produce a malformed manifest and fail makeappx.
+  displayName: "dosya"
+  # Forms part of the AUMID. Changing it after the first Store release breaks
+  # taskbar pinning and notification identity for everyone already installed.
+  # Charset is letters, digits and dots only - no spaces, colons or hyphens.
   applicationId: "dosya"
   backgroundColor: "#f9f8f6"
+  # electron-builder defaults x64 to MinVersion 10.0.14316.0 - a pre-release
+  # 1607 build, older than 1607's own RTM. Electron 23+ dropped everything
+  # below Windows 10, so the default advertises a floor this app cannot
+  # actually run on, and the Store would happily install it there. 17763 is
+  # Windows 10 1809 / LTSC 2019, the oldest build still worth supporting.
+  minVersion: "10.0.17763.0"
   languages:
     - en-US
 

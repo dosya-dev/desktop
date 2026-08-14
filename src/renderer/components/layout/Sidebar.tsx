@@ -20,6 +20,9 @@ import {
   FileUp,
   Inbox,
   LayoutGrid,
+  Layers,
+  CopyX,
+  MapPin,
 } from "lucide-react";
 import type { Workspace } from "@dosya-dev/shared";
 import { useAuth } from "@/lib/auth-context";
@@ -43,6 +46,11 @@ const navItems = [
   { to: "/upload", icon: Upload, label: "Upload", perm: "access_upload" },
   { to: "/shared", icon: Share2, label: "Shared", perm: "access_shared" },
   { to: "/file-requests", icon: Inbox, label: "Requests" },
+  // Ungated: groups are per-user shortcuts, not a workspace resource, so there
+  // is no access_* permission that governs them.
+  { to: "/groups", icon: Layers, label: "Groups" },
+  { to: "/duplicates", icon: CopyX, label: "Duplicates", perm: "access_files" },
+  { to: "/map", icon: MapPin, label: "Map", perm: "access_files" },
   { to: "/team", icon: Users, label: "Team", perm: "access_team" },
   { to: "/sync", icon: RefreshCw, label: "Sync" },
   { to: "/settings", icon: Settings, label: "Settings", perm: "access_settings" },

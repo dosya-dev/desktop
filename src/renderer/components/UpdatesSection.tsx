@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Download, RefreshCw, Monitor, Apple, Terminal, Loader2, AlertTriangle,
+  Download, RefreshCw, Monitor, Apple, Terminal, Loader2, AlertTriangle, Store,
 } from "lucide-react";
 import { apiRequest } from "@/lib/api-client";
 import { formatDate, formatBytes } from "@/lib/format";
@@ -57,6 +57,10 @@ export function UpdatesSection() {
   const [version, setVersion] = useState("");
   const [platform, setPlatform] = useState<Platform>("windows");
   const [status, setStatus] = useState<Status>({ state: "idle" });
+  // null = not resolved yet. Deliberately tri-state rather than defaulting to
+  // false: a Store user must never see the installer download list, not even
+  // for the frame before the IPC answers.
+  const [storeBuild, setStoreBuild] = useState<boolean | null>(null);
 
   // Current version + OS (default the platform tab to the user's OS) + live status.
   useEffect(() => {
@@ -64,6 +68,11 @@ export function UpdatesSection() {
     window.electronAPI.getAppVersion().then((v) => { if (!cancelled) setVersion(v); }).catch(() => {});
     window.electronAPI.getPlatform().then((os) => { if (!cancelled) setPlatform(osToPlatform(os)); }).catch(() => {});
     window.electronAPI.getUpdateStatus().then((s) => { if (!cancelled) setStatus(s); }).catch(() => {});
+    // Optional call: an older preload without this channel resolves to false
+    // rather than throwing and leaving the section stuck on the skeleton.
+    (window.electronAPI.isStoreBuild?.() ?? Promise.resolve(false))
+      .then((v) => { if (!cancelled) setStoreBuild(v); })
+      .catch(() => { if (!cancelled) setStoreBuild(false); });
     const off = window.electronAPI.onUpdateStatusChanged((s: Status) => setStatus(s));
     return () => { cancelled = true; off?.(); };
   }, []);
@@ -72,6 +81,8 @@ export function UpdatesSection() {
     queryKey: ["desktop-releases"],
     queryFn: () => apiRequest<ReleasesResponse>("/api/desktop/releases"),
     staleTime: 5 * 60 * 1000,
+    // The Store build never lists installers, so don't fetch them either.
+    enabled: storeBuild === false,
   });
 
   const releases = data?.ok ? data.releases ?? [] : [];
@@ -84,6 +95,49 @@ export function UpdatesSection() {
 
   const hint = statusHint(status);
   const busy = status.state === "checking" || status.state === "downloading";
+
+  // Still resolving which build this is. Hold the skeleton rather than guess.
+  if (storeBuild === null) {
+    return (
+      <div className="space-y-5">
+        <div className="h-[74px] animate-pulse rounded-xl" style={{ background: "var(--color-bg-tertiary)" }} />
+      </div>
+    );
+  }
+
+  // Microsoft Store build. The Store owns updates here, so this section shows
+  // no self-update controls and, critically, no installer download list - an
+  // app distributed through the Store may not pull executable code from
+  // anywhere else, and a "Download" button doing exactly that is the kind of
+  // thing certification rejects.
+  if (storeBuild) {
+    return (
+      <div className="space-y-5">
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
+          style={{ borderColor: "var(--color-border)", background: "var(--color-bg-secondary)" }}
+        >
+          <div>
+            <p className="text-sm font-medium">dosya Desktop</p>
+            <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+              {version ? `You're on v${version}` : "Version unknown"} &middot; Updates are managed by the Microsoft Store
+            </p>
+          </div>
+          <button
+            onClick={() => window.electronAPI.openStoreUpdates()}
+            className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <Store size={14} /> Open Microsoft Store
+          </button>
+        </div>
+        <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+          You installed dosya from the Microsoft Store, so it updates through the Store
+          alongside your other apps. Check for a new version under Library &rsaquo; Downloads and updates.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">

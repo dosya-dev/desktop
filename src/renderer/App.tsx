@@ -34,6 +34,9 @@ const ActivityPage = lazyPage(() => import("./pages/ActivityPage"), "ActivityPag
 const SearchPage = lazyPage(() => import("./pages/SearchPage"), "SearchPage");
 const SyncPage = lazyPage(() => import("./pages/SyncPage"), "SyncPage");
 const FileRequestsPage = lazyPage(() => import("./pages/FileRequestsPage"), "FileRequestsPage");
+const GroupsPage = lazyPage(() => import("./pages/GroupsPage"), "GroupsPage");
+const DuplicatesPage = lazyPage(() => import("./pages/DuplicatesPage"), "DuplicatesPage");
+const MapPage = lazyPage(() => import("./pages/MapPage"), "MapPage");
 const ForgotPasswordPage = lazyPage(() => import("./pages/ForgotPasswordPage"), "ForgotPasswordPage");
 const LanTransferPage = lazyPage(() => import("./pages/LanTransferPage"), "LanTransferPage");
 const VerifyPage = lazyPage(() => import("./pages/VerifyPage"), "VerifyPage");
@@ -125,6 +128,9 @@ function AppRoutes() {
       <Route path="/search" element={<ProtectedPage><SearchPage /></ProtectedPage>} />
       <Route path="/sync" element={<ProtectedPage><SyncPage /></ProtectedPage>} />
       <Route path="/file-requests" element={<ProtectedPage><FileRequestsPage /></ProtectedPage>} />
+      <Route path="/groups" element={<ProtectedPage><GroupsPage /></ProtectedPage>} />
+      <Route path="/duplicates" element={<ProtectedPage><DuplicatesPage /></ProtectedPage>} />
+      <Route path="/map" element={<ProtectedPage><MapPage /></ProtectedPage>} />
       <Route path="/lan-transfer" element={<ProtectedPage><LanTransferPage /></ProtectedPage>} />
       <Route path="/workspaces" element={<ProtectedPage><WorkspaceDashboardPage /></ProtectedPage>} />
       <Route path="/notifications" element={<ProtectedPage><NotificationsPage /></ProtectedPage>} />

@@ -345,3 +345,43 @@ export const mockComments = [
     user_name: "Test User", user_email: "test@example.com", user_avatar: null,
   },
 ];
+
+/** Two groups: one with items of both kinds, one empty. */
+export const mockGroups = [
+  {
+    id: "grp_1", name: "Client work", color: "#706E69", sort_order: 0, created_at: 1_740_000_000,
+    folders: [{ item_id: "gfi_1", folder_id: "folder_1", folder_name: "Documents", parent_id: null }],
+    files: [{ item_id: "gf_1", file_id: "file_1", file_name: "Project Report.pdf", size_bytes: 1_048_576, extension: ".pdf", folder_id: null }],
+  },
+  {
+    id: "grp_2", name: "Reading list", color: "#1D4ED8", sort_order: 1, created_at: 1_739_000_000,
+    folders: [], files: [],
+  },
+];
+
+/**
+ * Two duplicate groups, newest-first inside each (the API sorts created_at DESC).
+ * dup_hash_a has three copies so "select all but newest" has something to leave.
+ */
+export const mockDuplicates = {
+  groups: [
+    {
+      content_hash: "hash_a", size_bytes: 1_048_576, count: 3, wasted_bytes: 2_097_152,
+      files: [
+        { id: "dupfile_1", name: "Photo.png", folder_id: null, folder_path: "Workspace root", created_at: 1_740_000_300, uploaded_by: "user_test_1", uploader_name: "Test User", mime_type: "image/png", extension: ".png" },
+        { id: "dupfile_2", name: "Photo.png", folder_id: "folder_1", folder_path: "Documents", created_at: 1_740_000_200, uploaded_by: "user_test_1", uploader_name: "Test User", mime_type: "image/png", extension: ".png" },
+        { id: "dupfile_3", name: "Photo.png", folder_id: "folder_1", folder_path: "Documents/Old", created_at: 1_740_000_100, uploaded_by: "user_test_1", uploader_name: "Test User", mime_type: "image/png", extension: ".png" },
+      ],
+    },
+    {
+      content_hash: "hash_b", size_bytes: 512_000, count: 2, wasted_bytes: 512_000,
+      files: [
+        { id: "dupfile_4", name: "Budget.docx", folder_id: null, folder_path: "Workspace root", created_at: 1_739_000_200, uploaded_by: "user_test_1", uploader_name: "Test User", mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", extension: ".docx" },
+        { id: "dupfile_5", name: "Budget.docx", folder_id: "folder_1", folder_path: "Documents", created_at: 1_739_000_100, uploaded_by: "user_test_1", uploader_name: "Test User", mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", extension: ".docx" },
+      ],
+    },
+  ],
+  total_groups: 2,
+  total_wasted_bytes: 2_609_152,
+  scanning: { pending: 0 },
+};

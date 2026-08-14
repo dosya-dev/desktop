@@ -67,6 +67,14 @@ export async function startMockServer(
   const resends: string[] = [];
   let requestSeq = 0;
 
+  // Test-only group store, so the specs can assert creates, renames and removals
+  // rather than a static list.
+  const groupStore = new Map<string, any>(data.mockGroups.map((g) => [g.id, JSON.parse(JSON.stringify(g))]));
+  let groupSeq = 0;
+
+  // Test-only: every batch-delete body, so a spec can prove the 500-id chunking.
+  const batchDeletes: string[][] = [];
+
   const readBody = (req: http.IncomingMessage): Promise<any> =>
     new Promise((resolve) => {
       let raw = "";
@@ -467,12 +475,96 @@ export async function startMockServer(
       return json({ ok: true });
     }
 
+    // ── Groups ────────────────────────────────────────────
+    if (path === "/api/groups" && method === "GET") {
+      return json({ ok: true, groups: [...groupStore.values()] });
+    }
+    if (path === "/api/groups" && method === "POST") {
+      readBody(req).then((body) => {
+        const id = `grp_new_${++groupSeq}`;
+        const group = {
+          id, name: body.name ?? "", color: body.color ?? "#706E69",
+          sort_order: groupStore.size, created_at: 1_741_000_000, folders: [], files: [],
+        };
+        groupStore.set(id, group);
+        json({ ok: true, group }, 201);
+      });
+      return;
+    }
+    if (path.startsWith("/api/groups/") && path.includes("/files/") && method === "DELETE") {
+      const [, , , gid, , fid] = path.split("/");
+      const group = groupStore.get(gid);
+      if (group) group.files = group.files.filter((f: any) => f.file_id !== fid);
+      return json({ ok: true });
+    }
+    if (path.startsWith("/api/groups/") && path.includes("/folders/") && method === "DELETE") {
+      const [, , , gid, , fid] = path.split("/");
+      const group = groupStore.get(gid);
+      if (group) group.folders = group.folders.filter((f: any) => f.folder_id !== fid);
+      return json({ ok: true });
+    }
+    if (path.startsWith("/api/groups/") && method === "PUT") {
+      const gid = path.split("/")[3];
+      readBody(req).then((body) => {
+        const group = groupStore.get(gid);
+        if (!group) return json({ error: "Group not found" }, 404);
+        if (body.name !== undefined) group.name = body.name;
+        if (body.color !== undefined) group.color = body.color;
+        json({ ok: true });
+      });
+      return;
+    }
+    if (path.startsWith("/api/groups/") && method === "POST") {
+      const gid = path.split("/")[3];
+      readBody(req).then((body) => {
+        const group = groupStore.get(gid);
+        if (!group) return json({ error: "Group not found" }, 404);
+        if (body.file_id) group.files.push({ item_id: `gf_${++groupSeq}`, file_id: body.file_id, file_name: "Added file", size_bytes: 10, extension: null, folder_id: null });
+        if (body.folder_id) group.folders.push({ item_id: `gfi_${++groupSeq}`, folder_id: body.folder_id, folder_name: "Added folder", parent_id: null });
+        json({ ok: true }, 201);
+      });
+      return;
+    }
+    if (path.startsWith("/api/groups/") && method === "DELETE") {
+      groupStore.delete(path.split("/")[3]);
+      return json({ ok: true });
+    }
+
+    // ── Duplicates ────────────────────────────────────────
+    if (path === "/api/duplicates" && method === "GET") {
+      return json({ ok: true, ...data.mockDuplicates });
+    }
+    if (path === "/api/files/batch-delete" && method === "POST") {
+      readBody(req).then((body) => {
+        batchDeletes.push(body.file_ids ?? []);
+        json({ ok: true, deleted: (body.file_ids ?? []).length });
+      });
+      return;
+    }
+
+    // ── Map ───────────────────────────────────────────────
+    // No pins: the empty state is the case worth pinning, and WebGL is
+    // unavailable in the test window so rendered markers prove nothing anyway.
+    if (path === "/api/map/pins" && method === "GET") {
+      return json({ ok: true, pins: [], counts: { gps: 0, approximate: 0, pending: 0 } });
+    }
+    if (path === "/api/map/basemap") {
+      // 404 = "not provisioned", which is what checkBasemapAvailable probes for.
+      return json({ error: "No basemap" }, 404);
+    }
+
     // ── Test-only instrumentation ───────────────────────────
     if (path === "/__test/upload-init-count" && method === "GET") {
       return json({ count: uploadInitCount });
     }
     if (path === "/__test/folders" && method === "GET") {
       return json({ folders: [...folderStore.values()] });
+    }
+    if (path === "/__test/batch-deletes" && method === "GET") {
+      return json({ batches: batchDeletes });
+    }
+    if (path === "/__test/groups" && method === "GET") {
+      return json({ groups: [...groupStore.values()] });
     }
     if (path === "/__test/comments" && method === "GET") {
       return json({ comments: [...commentStore.values()] });

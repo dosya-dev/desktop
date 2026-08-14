@@ -9,9 +9,25 @@ export type UpdateStatus =
   | { state: "downloading"; percent: number }
   | { state: "ready"; version: string; filePath?: string }
   | { state: "error"; message: string }
-  | { state: "not-available" };
+  | { state: "not-available" }
+  | { state: "store-managed" };
 
 let updateStatus: UpdateStatus = { state: "idle" };
+
+// ── Microsoft Store builds ──────────────────────────────────────────
+// A Store build must not update itself. Store policy forbids an app fetching
+// and installing executable code from outside the Store, and the Store's own
+// update channel would be racing electron-updater for the same install anyway.
+//
+// Electron sets process.windowsStore only when the app is running from an
+// appx/msix container, so it discriminates the Store build from the NSIS build
+// off the identical codebase - there is no separate build flag to keep in sync,
+// and it is false everywhere else at zero cost.
+const isStoreBuild = process.windowsStore === true;
+
+// Opens the Store's own "Downloads and updates" pane, which is where a Store
+// user actually triggers an update check.
+const STORE_UPDATES_URI = "ms-windows-store://downloadsandupdates";
 
 function broadcastStatus(status: UpdateStatus): void {
   updateStatus = status;
@@ -98,6 +114,22 @@ export async function initAutoUpdater(): Promise<void> {
   // Always register IPC so the renderer doesn't error in dev mode
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("updater:get-status", () => updateStatus);
+  ipcMain.handle("app:is-store-build", () => isStoreBuild);
+  ipcMain.handle("updater:open-store", async () => {
+    if (isStoreBuild) await shell.openExternal(STORE_UPDATES_URI);
+  });
+
+  // Store build: register the updater channels as no-ops and return before
+  // electron-updater is ever imported, so no feed is contacted and nothing is
+  // downloaded. The renderer reads "store-managed" and hides every update
+  // control instead of showing dead buttons.
+  if (isStoreBuild) {
+    updateStatus = { state: "store-managed" };
+    ipcMain.handle("updater:check", () => {});
+    ipcMain.handle("updater:install", () => {});
+    ipcMain.handle("updater:show-file", () => {});
+    return;
+  }
 
   if (!app.isPackaged) {
     // In dev, simulate check so the UI gives feedback

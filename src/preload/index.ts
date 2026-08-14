@@ -73,6 +73,10 @@ const electronAPI = {
   checkForUpdates: (): Promise<void> => ipcRenderer.invoke("updater:check"),
   installUpdate: (): Promise<void> => ipcRenderer.invoke("updater:install"),
   showUpdateFile: (): Promise<void> => ipcRenderer.invoke("updater:show-file"),
+  // True only in the Microsoft Store (appx) build, where the app must not
+  // update itself and the update UI is replaced by a pointer to the Store.
+  isStoreBuild: (): Promise<boolean> => ipcRenderer.invoke("app:is-store-build"),
+  openStoreUpdates: (): Promise<void> => ipcRenderer.invoke("updater:open-store"),
   onUpdateStatusChanged: (cb: (status: any) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, status: any) => cb(status);
     ipcRenderer.on("updater:status-changed", handler);
