@@ -328,6 +328,42 @@ export const mockNotifications = [
 ];
 
 /**
+ * GET /api/me/notifications, as the server answers it since the preference
+ * groups shipped: the settings screen described by the server rather than
+ * hard-coded by each client.
+ *
+ * Transcribed from apps/api's GROUP_LABELS and spec §3.4. The point of the
+ * fixture is that the RENDERER holds no copy of this list - if it did, a
+ * fixture with different labels would still render the client's own.
+ */
+export const mockNotificationGroups = [
+  { key: "security", label: "Security and sign-in", description: "New device sign-ins, failed attempts, password, email and two-factor changes.", alwaysOn: "some" as const },
+  { key: "account", label: "Account", description: "Account and workspace deletion, ownership transfers, workspace settings.", alwaysOn: "some" as const },
+  { key: "team", label: "Team and permissions", description: "Invitations, members joining and leaving, role and permission changes.", alwaysOn: "some" as const },
+  { key: "billing", label: "Billing and storage", description: "Payment problems, plan changes, renewals and storage limits.", alwaysOn: "some" as const },
+  { key: "files", label: "File activity", description: "Uploads, deletions, new versions and locks on files you own.", alwaysOn: "none" as const },
+  { key: "sharing", label: "Share links", description: "Views, downloads and expiry of links you created.", alwaysOn: "some" as const },
+  { key: "requests", label: "File requests", description: "Uploads to your requests, and deadlines approaching.", alwaysOn: "none" as const },
+  { key: "comments", label: "Comments", description: "New comments and replies on your files.", alwaysOn: "none" as const },
+  { key: "sync", label: "Sync and backup", description: "Sync failures, stopped devices, conflicts and phone backup.", alwaysOn: "some" as const },
+  { key: "transfers", label: "Imports and transfers", description: "Cloud imports, remote downloads and connection problems.", alwaysOn: "none" as const },
+  { key: "integrations", label: "Integrations and API", description: "API keys, S3 credentials and webhook endpoint health.", alwaysOn: "some" as const },
+  { key: "support", label: "Support and legal", description: "Replies to your tickets, and copyright or moderation actions.", alwaysOn: "some" as const },
+  { key: "product", label: "Product updates", description: "New features, improvements and tips.", alwaysOn: "none" as const },
+  { key: "system", label: "System", description: "Scheduled maintenance and service incidents.", alwaysOn: "none" as const },
+].map((g) => ({
+  ...g,
+  enabled: true,
+  note: g.alwaysOn === "some" ? "Some messages in this group are always sent and cannot be switched off." : null,
+  options: g.key === "files"
+    ? [
+      { key: "type:files_uploaded", label: "Uploads to your workspace", description: "One summary per folder per hour when other people add files. Off unless you ask for it.", enabled: false },
+      { key: "type:files_activity_digest", label: "Daily activity summary", description: "One message each morning counting yesterday's renames and moves. Off unless you ask for it.", enabled: false },
+    ]
+    : [],
+}));
+
+/**
  * Three comments that make the comments tab's three behaviours visible: one this
  * user wrote (edit is offered), one somebody else wrote (edit is not), and one at
  * depth two, which the old grouping dropped on the floor.

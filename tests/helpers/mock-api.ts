@@ -77,6 +77,11 @@ export async function startMockServer(
   // Test-only: every batch-delete body, so a spec can prove the 500-id chunking.
   const batchDeletes: string[][] = [];
 
+  // Notification preferences: the served list, and every write the client made.
+  // Per server instance, so one spec's toggles cannot leak into the next.
+  const notifGroups: typeof data.mockNotificationGroups = JSON.parse(JSON.stringify(data.mockNotificationGroups));
+  const notifPrefWrites: Record<string, boolean>[] = [];
+
   const readBody = (req: http.IncomingMessage): Promise<any> =>
     new Promise((resolve) => {
       let raw = "";
@@ -280,6 +285,32 @@ export async function startMockServer(
     }
     if (path === "/api/notifications" && method === "GET") {
       return json({ ok: true, items: data.mockNotifications, nextBefore: null });
+    }
+    // The preference screen, not the inbox. GET describes the settings screen;
+    // PUT is recorded verbatim so a spec can assert the exact key the client
+    // wrote - the thing that was wrong for months while the UI looked right.
+    if (path === "/api/me/notifications" && method === "GET") {
+      return json({
+        ok: true,
+        preferences: {},
+        channels: { in_app: true, email: true, push: true },
+        groups: notifGroups,
+      });
+    }
+    if (path === "/api/me/notifications" && method === "PUT") {
+      readBody(req).then((body) => {
+        if (body.preferences) {
+          notifPrefWrites.push(body.preferences);
+          for (const [key, value] of Object.entries(body.preferences as Record<string, boolean>)) {
+            for (const g of notifGroups) {
+              if (g.key === key) g.enabled = value;
+              for (const o of g.options) if (o.key === key) o.enabled = value;
+            }
+          }
+        }
+        json({ ok: true });
+      });
+      return;
     }
     if (path === "/api/notifications/read-all" && method === "POST") return json({ ok: true });
     if (path.startsWith("/api/notifications/") && path.endsWith("/read") && method === "POST") return json({ ok: true });
@@ -610,6 +641,9 @@ export async function startMockServer(
     }
     if (path === "/__test/batch-deletes" && method === "GET") {
       return json({ batches: batchDeletes });
+    }
+    if (path === "/__test/notification-pref-writes" && method === "GET") {
+      return json({ writes: notifPrefWrites });
     }
     if (path === "/__test/groups" && method === "GET") {
       return json({ groups: [...groupStore.values()] });

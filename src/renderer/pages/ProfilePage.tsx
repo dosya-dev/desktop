@@ -804,76 +804,85 @@ function SessionsSection() {
 
 // ── Notifications Section ───────────────────────────────────────────
 
-const NOTIFICATION_GROUPS = [
-  {
-    label: "Security & Account",
-    prefs: [
-      { key: "security_new_login", label: "New login from unknown device" },
-      { key: "security_failed_attempts", label: "Failed login attempts" },
-      { key: "security_password_changed", label: "Password changed" },
-    ],
-  },
-  {
-    label: "Files & Sharing",
-    prefs: [
-      { key: "files_uploaded", label: "File uploaded to workspace" },
-      { key: "files_downloaded", label: "Shared file downloaded" },
-      { key: "files_share_expiring", label: "Share link expiring soon" },
-    ],
-  },
-  {
-    label: "File Requests",
-    prefs: [
-      { key: "requests_new_upload", label: "New upload to your request" },
-      { key: "requests_expiring", label: "File request expiring" },
-    ],
-  },
-  {
-    label: "Collaboration",
-    prefs: [
-      { key: "collab_new_comment", label: "New comment on your file" },
-      { key: "collab_comment_reply", label: "Reply to your comment" },
-      { key: "collab_member_joined", label: "New member joined workspace" },
-    ],
-  },
-  {
-    label: "Billing & Storage",
-    prefs: [
-      { key: "billing_payment_failed", label: "Payment failed" },
-      { key: "billing_storage_warning", label: "Storage limit warning" },
-      { key: "billing_renewal", label: "Subscription renewal reminder" },
-    ],
-  },
-];
+/**
+ * No hard-coded switch list here any more.
+ *
+ * It used to be 15 legacy type keys - a subset of web's 18, chosen by whoever
+ * copied the file - and every one of them named a preference the server stopped
+ * storing at migration 0112. The list comes from GET /api/me/notifications now,
+ * so all three clients render the same 14 groups from one description.
+ */
+interface NotifGroup {
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  alwaysOn: "all" | "some" | "none";
+  note: string | null;
+  options: { key: string; label: string; description: string; enabled: boolean }[];
+}
+
+function GroupSwitch({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={onClick}
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${on ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"} ${disabled ? "opacity-50" : ""}`}
+    >
+      <div className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--color-bg)] shadow transition-transform ${on ? "translate-x-5" : "translate-x-0.5"}`} />
+    </button>
+  );
+}
 
 function NotificationsSection() {
-  const [prefs, setPrefs] = useState<Record<string, boolean>>({});
+  const [groups, setGroups] = useState<NotifGroup[]>([]);
   const loaded = useRef(false);
 
   const { data } = useQuery({
     queryKey: ["notification-prefs"],
-    queryFn: () => api.get<{ ok: boolean; preferences: Record<string, boolean> }>("/api/me/notifications"),
+    queryFn: () => api.get<{ ok: boolean; groups: NotifGroup[] }>("/api/me/notifications"),
   });
 
-  if (data?.preferences && !loaded.current) {
-    setPrefs(data.preferences);
+  if (data?.groups && !loaded.current) {
+    setGroups(data.groups);
     loaded.current = true;
   }
 
+  /**
+   * ONE key per request, and this is the fix, not a tidy-up.
+   *
+   * This mutation used to send `{ ...prefs, [key]: !prefs[key] }` - the entire
+   * preference map on every toggle. When GET grew from 25 keys to 39, that map
+   * started echoing the group keys back at their stored values, which overwrote
+   * the single key the user had actually moved: every desktop toggle silently
+   * did nothing, in both directions, until the server learned to ignore echoed
+   * keys. The echo filter still protects old builds, but a whole-map write is
+   * also a stale-map race - two open sessions, and whatever the other one
+   * changed comes back at the value this window loaded with.
+   */
   const saveMut = useMutation({
-    mutationFn: (updated: Record<string, boolean>) => api.put("/api/me/notifications", { preferences: updated }),
+    mutationFn: (change: { key: string; value: boolean }) =>
+      api.put("/api/me/notifications", { preferences: { [change.key]: change.value } }),
     onSuccess: () => toast.success("Preferences saved"),
   });
 
-  const toggle = (key: string) => {
-    const prev = prefs;
-    const updated = { ...prefs, [key]: !prefs[key] };
-    setPrefs(updated);
+  const setValue = (key: string, value: boolean) =>
+    setGroups((gs) => gs.map((g) => (
+      g.key === key
+        ? { ...g, enabled: value }
+        : { ...g, options: g.options.map((o) => (o.key === key ? { ...o, enabled: value } : o)) }
+    )));
+
+  const toggle = (key: string, next: boolean) => {
+    setValue(key, next);
     // Revert the optimistic switch if the save fails, so the UI never lies
     // about a preference the server didn't actually record.
-    saveMut.mutate(updated, {
+    saveMut.mutate({ key, value: next }, {
       onError: (e) => {
-        setPrefs(prev);
+        setValue(key, !next);
         toast.error(e instanceof ApiError ? e.message : "Couldn't save your preferences");
       },
     });
@@ -882,24 +891,39 @@ function NotificationsSection() {
   return (
     <div className="max-w-lg space-y-6">
       <h2 className="text-lg font-semibold">Notifications</h2>
-      {NOTIFICATION_GROUPS.map((group) => (
-        <div key={group.label}>
-          <h3 className="mb-3 text-sm font-semibold text-[var(--color-text-secondary)]">{group.label}</h3>
-          <div className="space-y-2">
-            {group.prefs.map((p) => (
-              <div key={p.key} className="flex items-center justify-between rounded-lg px-1 py-1.5">
-                <span className="text-sm">{p.label}</span>
-                <button
-                  onClick={() => toggle(p.key)}
-                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${prefs[p.key] ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"}`}
-                >
-                  <div className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--color-bg)] shadow transition-transform ${prefs[p.key] ? "translate-x-5" : "translate-x-0.5"}`} />
-                </button>
+      <div className="space-y-4">
+        {groups.map((g) => (
+          <div key={g.key} data-testid={`notif-group-${g.key}`}>
+            <div className="flex items-start justify-between gap-4 rounded-lg px-1 py-1.5">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">{g.label}</p>
+                <p className="text-xs text-[var(--color-text-secondary)]">{g.description}</p>
+                {g.note && <p className="mt-0.5 text-xs italic text-[var(--color-text-secondary)]">{g.note}</p>}
               </div>
-            ))}
+              {g.alwaysOn === "all" ? (
+                <span className="shrink-0 text-xs text-[var(--color-text-secondary)]">Always on</span>
+              ) : (
+                <GroupSwitch on={g.enabled} onClick={() => toggle(g.key, !g.enabled)} />
+              )}
+            </div>
+            {g.options.length > 0 && (
+              <div className="ml-3 border-l border-[var(--color-border)] pl-3">
+                {g.options.map((o) => (
+                  <div key={o.key} className="flex items-start justify-between gap-4 px-1 py-1.5">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium">{o.label}</p>
+                      <p className="text-xs text-[var(--color-text-secondary)]">{o.description}</p>
+                    </div>
+                    {/* A sub-switch under a muted group can only lie: the group
+                        gate runs first, whatever this says. */}
+                    <GroupSwitch on={o.enabled} disabled={!g.enabled} onClick={() => toggle(o.key, !o.enabled)} />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }

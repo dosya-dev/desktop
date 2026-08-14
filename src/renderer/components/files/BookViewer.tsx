@@ -4,7 +4,6 @@ import {
   Minus, Palette, Plus, Search, Trash2, X,
 } from "lucide-react";
 import { apiBase } from "@/lib/api-client";
-import { READER_HTML } from "@/lib/reader/readerHtml.generated";
 import {
   addBookmark, hasBookmarkAt, loadReadingState, removeBookmark, updateReadingState,
   SAVE_DEBOUNCE_MS, type Bookmark, type ReadingState,
@@ -400,7 +399,7 @@ export function BookViewer({
             ref={frameRef}
             data-testid="book-frame"
             title={`Book: ${file.name}`}
-            srcDoc={READER_HTML}
+            src="/reader/index.html"
             className="h-full w-full border-none"
             style={{ background: theme.bg }}
           />
