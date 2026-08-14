@@ -13,16 +13,54 @@ export interface ReaderTheme {
   fg: string;
 }
 
+/**
+ * `app` carries no colours of its own - resolveTheme fills them from the running
+ * app's computed tokens, so a book matches whatever theme the site is wearing
+ * (including all eight accents and light/dark). It is the default because a
+ * reader that ignores the app's theme looks like a different product bolted on.
+ *
+ * The three fixed palettes stay, because reading is not browsing: sepia at night
+ * is a choice people make about a book, not about an app.
+ */
 export const READER_THEMES: ReaderTheme[] = [
+  { id: "app", label: "Match app", bg: "", fg: "" },
   { id: "light", label: "Light", bg: "#ffffff", fg: "#1a1a1a" },
   { id: "sepia", label: "Sepia", bg: "#f4ecd8", fg: "#5b4636" },
   { id: "dark", label: "Dark", bg: "#121212", fg: "#c8c8c8" },
 ];
 
-export const DEFAULT_THEME_ID = "light";
+export const DEFAULT_THEME_ID = "app";
 
 export function themeById(id: string): ReaderTheme {
   return READER_THEMES.find((t) => t.id === id) ?? READER_THEMES[0];
+}
+
+/**
+ * A theme with real colours, resolving `app` against the live DOM.
+ *
+ * The app states its palette in CSS custom properties, which this cannot parse
+ * reliably - so rather than try, it paints a
+ * throwaway element and reads back what the browser computed. That also means it
+ * follows every theme the app ever gains without being taught about any of them.
+ */
+export function resolveTheme(id: string): { bg: string; fg: string } {
+  const theme = themeById(id);
+  if (theme.id !== "app") return { bg: theme.bg, fg: theme.fg };
+
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none";
+  probe.style.background = "var(--color-bg)";
+  probe.style.color = "var(--color-text-primary)";
+  document.body.append(probe);
+  const cs = getComputedStyle(probe);
+  const bg = cs.backgroundColor;
+  const fg = cs.color;
+  probe.remove();
+
+  // A browser that resolved neither leaves us with transparent/empty, which
+  // would paint an unreadable page - fall back to the fixed light palette.
+  const usable = bg && bg !== "rgba(0, 0, 0, 0)" && fg;
+  return usable ? { bg, fg } : { bg: "#ffffff", fg: "#1a1a1a" };
 }
 
 export function isKnownThemeId(id: string): boolean {

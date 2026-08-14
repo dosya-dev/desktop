@@ -19,14 +19,28 @@ const post = (msg) => window.ReactNativeWebView?.postMessage(JSON.stringify(msg)
 // control and scrollbar rendering inside the section iframes), so derive it
 // from the resolved background's perceived luminance instead of a theme
 // name.
-function relativeLuminance(hex) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex ?? "");
-  if (!m) return 1; // unrecognized input: assume light, matches prior default
-  const n = parseInt(m[1], 16);
-  const r = ((n >> 16) & 255) / 255;
-  const g = ((n >> 8) & 255) / 255;
-  const b = (n & 255) / 255;
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+function relativeLuminance(color) {
+  // Accepts "#rgb", "#rrggbb" or "rgb()/rgba()". The host resolves the app's
+  // theme through getComputedStyle, which always answers in rgb(), while the
+  // reader's own palettes are hex.
+  let r, g, b;
+  const rgb = /rgba?\(([^)]+)\)/.exec(color);
+  if (rgb) {
+    const parts = rgb[1].split(/[ ,/]+/).filter(Boolean).map(Number);
+    [r, g, b] = parts;
+  } else {
+    let hex = String(color).replace("#", "");
+    if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+    r = parseInt(hex.slice(0, 2), 16);
+    g = parseInt(hex.slice(2, 4), 16);
+    b = parseInt(hex.slice(4, 6), 16);
+  }
+  if ([r, g, b].some((v) => !Number.isFinite(v))) return 1;
+  const f = (v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
 }
 
 const readerCss = (s) => `
@@ -242,6 +256,48 @@ window.__dosyaSearchClear = () => {
   }
 };
 
+/**
+ * Two pages side by side when the shape allows it, like a physical book.
+ *
+ * foliate's paginator already defaults max-column-count to 2 and drops to 1 in
+ * portrait, so this only has to decide when the container counts as landscape
+ * and keep the divider in step. Apple Books behaves the same way: a spread when
+ * there is room for one, a single page when there is not.
+ */
+const SPREAD_MIN_WIDTH = 820;
+
+function isSpread() {
+  return window.innerWidth >= SPREAD_MIN_WIDTH && window.innerWidth > window.innerHeight;
+}
+
+/**
+ * The gutter line between the two pages.
+ *
+ * foliate draws no divider, and its paginator lives in a CLOSED shadow root, so
+ * this is drawn over the top instead of inside it. Hidden in single-page mode -
+ * a line down the middle of one page would just look like a rendering fault.
+ */
+function ensureDivider() {
+  let el = document.getElementById("dosya-gutter");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "dosya-gutter";
+    el.setAttribute("aria-hidden", "true");
+    document.body.append(el);
+  }
+  const on = isSpread();
+  el.style.display = on ? "block" : "none";
+  return on;
+}
+
+function applySpread() {
+  const on = ensureDivider();
+  // 1 rather than 2: the paginator's own portrait rule would already give one
+  // column, but saying it explicitly keeps the divider and the layout deciding
+  // on exactly the same condition.
+  view?.renderer?.setAttribute?.("max-column-count", on ? "2" : "1");
+}
+
 window.__dosyaOpen = async () => {
   try {
     const buffer = new Uint8Array(received);
@@ -270,6 +326,8 @@ window.__dosyaOpen = async () => {
     // and swipe snapping (reason === 'snap'), and it also drops #turnPage's
     // 100ms settle wait, since the animation itself now covers that time.
     view.renderer?.setAttribute?.("animated", "");
+    applySpread();
+    window.addEventListener("resize", applySpread);
     applySettings(settings);
     post({ type: "toc", items: flattenToc(view.book?.toc) });
     if (config.location) {

@@ -9,7 +9,7 @@ import {
   SAVE_DEBOUNCE_MS, type Bookmark, type ReadingState,
 } from "@/lib/reader/readingState";
 import {
-  clampFont, FONT_MAX, FONT_MIN, FONT_STEP, loadPrefs, READER_THEMES, savePrefs, themeById,
+  clampFont, FONT_MAX, FONT_MIN, FONT_STEP, loadPrefs, READER_THEMES, resolveTheme, savePrefs, themeById,
 } from "@/lib/reader/readerThemes";
 
 interface TocItem {
@@ -64,7 +64,9 @@ export function BookViewer({
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
 
-  const theme = useMemo(() => themeById(prefs.themeId), [prefs.themeId]);
+  // Resolved, not looked up: the `app` theme has no colours of its own and
+  // takes them from whatever the site is currently wearing.
+  const theme = useMemo(() => resolveTheme(prefs.themeId), [prefs.themeId]);
 
   const page = useCallback((): Record<string, any> | null => {
     const win = frameRef.current?.contentWindow as unknown as Record<string, any> | undefined;

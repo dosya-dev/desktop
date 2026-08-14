@@ -43,6 +43,21 @@ const TEMPLATE = `<!doctype html>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
   foliate-view { display: block; height: 100%; }
+  /* The gutter between the two pages of a spread. Drawn over the paginator
+     because its layout lives in a closed shadow root we cannot style into.
+     currentColor at low alpha so it reads on any reading theme without being
+     told which one is active. */
+  #dosya-gutter {
+    position: fixed;
+    top: 6%;
+    bottom: 6%;
+    left: 50%;
+    width: 1px;
+    background: currentColor;
+    opacity: 0.14;
+    pointer-events: none;
+    display: none;
+  }
 </style>
 </head>
 <body>
