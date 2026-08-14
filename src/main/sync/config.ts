@@ -10,7 +10,14 @@ import {
 import { stringifyOffThread } from "./state-writer";
 import { absKey } from "./paths";
 
-function syncDir(): string {
+/**
+ * Everything the sync engine persists lives here: the config, the per-pair
+ * state, and the installation's device id (device-id.ts). Exported because
+ * that module takes the directory as an argument rather than importing
+ * `electron` itself, which is what keeps it testable outside an Electron
+ * process.
+ */
+export function syncDir(): string {
   return join(app.getPath("userData"), "sync");
 }
 

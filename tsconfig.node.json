@@ -15,5 +15,12 @@
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
     "electron.vite.config.ts"
-  ]
+  ],
+  // Unit tests run on Node's own test runner (`npm run test:unit`), which
+  // needs the .ts extension in an import specifier - a spelling this
+  // "moduleResolution": "bundler" project rejects. They are excluded from the
+  // build's typecheck rather than the project being reconfigured around them:
+  // electron-vite bundles from the main/preload entry points and never reaches
+  // a test file either.
+  "exclude": ["src/**/*.test.ts"]
 }

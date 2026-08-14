@@ -5,6 +5,8 @@ import { basename, extname } from "path";
 import { randomBytes } from "crypto";
 import { Transform, type Readable } from "stream";
 import { longPath } from "./paths";
+import { syncDir } from "./config";
+import { DEVICE_ID_HEADER, currentDeviceId, ensureDeviceId } from "./device-id";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
 import http from "http";
 import https from "https";
@@ -388,10 +390,19 @@ export class RemoteClient {
       bodyBuf = Buffer.isBuffer(opts.body) ? opts.body : Buffer.from(opts.body, "utf-8");
     }
 
+    // This installation's identity, minted on first use and persisted beside
+    // the sync config. It is what lets the server notice that this machine has
+    // STOPPED syncing - a stopped app emits nothing, so the only trace is a
+    // last-seen timestamp going stale. ensureDeviceId never throws and never
+    // returns empty, so a device store that cannot be read or written costs the
+    // watchdog, not the sync.
+    const deviceId = await ensureDeviceId(syncDir());
+
     const headers: Record<string, string> = {
       Cookie: `dosya_session=${sessionCookie}`,
       "X-Dosya-Sync": "1",
       "X-Dosya-Client": "desktop",
+      [DEVICE_ID_HEADER]: deviceId,
       ...opts.headers,
     };
     if (this.d1Bookmark) headers["X-D1-Bookmark"] = this.d1Bookmark;
@@ -1026,6 +1037,12 @@ export class RemoteClient {
           Cookie: `dosya_session=${cookie}`,
           "X-Dosya-Sync": "1",
           "X-Dosya-Client": "desktop",
+          // Already resolved by the time any byte upload runs (every transfer
+          // is preceded by a manifest call through fetchOnce, which awaits it),
+          // and omitted rather than awaited here because these headers are
+          // built inside a Promise executor. Costs nothing if it is ever
+          // missing: only /api/sync/commit reads the device id.
+          ...(currentDeviceId() ? { [DEVICE_ID_HEADER]: currentDeviceId()! } : {}),
         },
         timeout: 300_000,
         agent,
@@ -1194,6 +1211,12 @@ export class RemoteClient {
           Cookie: `dosya_session=${cookie}`,
           "X-Dosya-Sync": "1",
           "X-Dosya-Client": "desktop",
+          // Already resolved by the time any byte upload runs (every transfer
+          // is preceded by a manifest call through fetchOnce, which awaits it),
+          // and omitted rather than awaited here because these headers are
+          // built inside a Promise executor. Costs nothing if it is ever
+          // missing: only /api/sync/commit reads the device id.
+          ...(currentDeviceId() ? { [DEVICE_ID_HEADER]: currentDeviceId()! } : {}),
         },
         timeout: 300_000,
         agent,
