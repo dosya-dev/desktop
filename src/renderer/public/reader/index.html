@@ -9,12 +9,6 @@
 </style>
 </head>
 <body>
-<script>
-  /* Host bridge shim. This page is shared with apps/mobile, where the host is
-     react-native-webview; here the host is the parent window. Same message
-     shapes either way, so main.js needs no branching. */
-  window.ReactNativeWebView = { postMessage: function (m) { parent.postMessage(m, "*"); } };
-</script>
 <script src="./reader.js"></script>
 </body>
 </html>

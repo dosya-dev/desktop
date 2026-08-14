@@ -46,12 +46,6 @@ const TEMPLATE = `<!doctype html>
 </style>
 </head>
 <body>
-<script>
-  /* Host bridge shim. This page is shared with apps/mobile, where the host is
-     react-native-webview; here the host is the parent window. Same message
-     shapes either way, so main.js needs no branching. */
-  window.ReactNativeWebView = { postMessage: function (m) { parent.postMessage(m, "*"); } };
-</script>
 <script src="./reader.js"></script>
 </body>
 </html>
@@ -72,6 +66,24 @@ mkdirSync(outDir, { recursive: true });
 //
 // apps/mobile still inlines its copy: a react-native-webview has no origin to
 // serve an asset from, and no parent document whose CSP it inherits.
-writeFileSync(join(outDir, "reader.js"), js);
+const SHIM = `// Host bridge shim, PREPENDED into the bundle rather than written as an inline
+// <script> in the page. The embedding app's CSP is \`script-src 'self'\` and an
+// iframe inherits it, so any inline script here is blocked - which is exactly
+// how this shipped broken twice. Being first in the bundle, it still runs
+// before main.js touches it.
+//
+// The page is shared with apps/mobile, where the host is react-native-webview;
+// here the host is the parent window. Same message shapes either way, so
+// main.js needs no branching.
+window.ReactNativeWebView = { postMessage: function (m) { parent.postMessage(m, "*"); } };
+`;
+writeFileSync(join(outDir, "reader.js"), SHIM + js);
+// GUARD: an inline <script> here is silently fatal under `script-src 'self'`
+// - the reader loads, executes nothing, and the viewer falls back to a Download
+// button that looks like the feature was never built. Fail the build instead.
+if (/<script(?![^>]*\ssrc=)/i.test(TEMPLATE)) {
+  console.error("build-reader: the reader page contains an inline <script>, which the embedding CSP blocks. Move it into the bundle.");
+  process.exit(1);
+}
 writeFileSync(join(outDir, "index.html"), TEMPLATE);
 console.log(`desktop reader assets written (src/renderer/public/reader, ${(js.length / 1024).toFixed(0)} KB)`);
