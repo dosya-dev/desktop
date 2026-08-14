@@ -118,9 +118,27 @@ export function MapPage() {
       west = Math.min(west, p.longitude); east = Math.max(east, p.longitude);
       south = Math.min(south, p.latitude); north = Math.max(north, p.latitude);
     }
-    const fit = () => map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 12, duration: 0 });
+    // resize() FIRST. fitBounds projects against the container's cached size,
+    // and on this page the map box settles after the style loads - so fitting
+    // without it framed the pins against stale dimensions and left every
+    // marker rendered below the fold, on a map that looked empty.
+    const fit = () => {
+      map.resize();
+      map.fitBounds([[west, south], [east, north]], { padding: 90, maxZoom: 12, duration: 0 });
+    };
     if (map.loaded()) fit(); else map.once('load', fit);
   }, [pins]);
+
+  // The window is resizable and the map box is flex-sized, so a cached viewport
+  // goes stale on any layout change, not just at startup.
+  useEffect(() => {
+    const el = containerRef.current;
+    const map = mapRef.current;
+    if (!el || !map || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => map.resize());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasBasemap]);
 
   // Render cluster/pin markers for the current viewport.
   const renderMarkers = useCallback(() => {

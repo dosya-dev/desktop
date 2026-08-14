@@ -543,10 +543,18 @@ export async function startMockServer(
     }
 
     // ── Map ───────────────────────────────────────────────
-    // No pins: the empty state is the case worth pinning, and WebGL is
-    // unavailable in the test window so rendered markers prove nothing anyway.
+    // WebGL IS available in the test Electron window (measured: it reports a
+    // "WebKit WebGL" context), so the specs assert on markers maplibre actually
+    // rendered. `?empty=1` switches to the no-pins case.
     if (path === "/api/map/pins" && method === "GET") {
-      return json({ ok: true, pins: [], counts: { gps: 0, approximate: 0, pending: 0 } });
+      const empty = url.searchParams.get("folder_id") === "none";
+      return json({
+        ok: true,
+        pins: empty ? [] : data.mockMapPins,
+        counts: empty
+          ? { gps: 0, approximate: 0, pending: 0 }
+          : { gps: 2, approximate: 1, pending: 0 },
+      });
     }
     if (path === "/api/map/basemap") {
       // 404 = "not provisioned", which is what checkBasemapAvailable probes for.

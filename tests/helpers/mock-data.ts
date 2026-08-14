@@ -385,3 +385,13 @@ export const mockDuplicates = {
   total_wasted_bytes: 2_609_152,
   scanning: { pending: 0 },
 };
+
+/**
+ * Two located files and one located folder, spread far enough apart that the map
+ * has to fit real bounds rather than centring on a single point.
+ */
+export const mockMapPins = [
+  { kind: "file", id: "file_1", name: "Photo.png", size_bytes: 2_097_152, mime_type: "image/png", extension: ".png", region: "apac", created_at: 1_740_000_000, updated_at: 1_740_000_000, current_version: 1, lock_mode: "none", is_hidden: 0, uploaded_by: "user_test_1", uploader_name: "Test User", share_count: 0, comment_count: 0, is_synced: 0, latitude: -33.8688, longitude: 151.2093, captured_at: null, source: "exif" },
+  { kind: "file", id: "file_2", name: "Harbour.jpg", size_bytes: 1_048_576, mime_type: "image/jpeg", extension: ".jpg", region: "apac", created_at: 1_740_000_100, updated_at: 1_740_000_100, current_version: 1, lock_mode: "none", is_hidden: 0, uploaded_by: "user_test_1", uploader_name: "Test User", share_count: 0, comment_count: 0, is_synced: 0, latitude: 51.5074, longitude: -0.1278, captured_at: null, source: "exif" },
+  { kind: "folder", id: "folder_1", name: "Documents", latitude: 40.7128, longitude: -74.006, source: "ip" },
+];
