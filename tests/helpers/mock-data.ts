@@ -169,7 +169,14 @@ export const mockFiles = [
     is_favourite: 0, is_locked: 0, is_hidden: 0,
     created_at: "2025-03-01T12:00:00Z", updated_at: "2025-03-01T12:00:00Z",
   },
-];
+  {
+    id: "file_book", name: "The Dosya Test Book.epub", folder_id: null,
+    size_bytes: 1699, mime_type: "application/epub+zip", extension: ".epub",
+    created_at: "2025-03-01T12:00:00Z", updated_at: "2025-03-01T12:00:00Z",
+    uploaded_by: "user_test_1", uploader_name: "Test User", region: "apac",
+    current_version: 1, lock_mode: "none", is_hidden: 0, is_synced: 0,
+    share_count: 0, comment_count: 0, origin: null,
+  },];
 
 export const mockActivity = [
   {

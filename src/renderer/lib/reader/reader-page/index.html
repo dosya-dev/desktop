@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' blob:; img-src blob: data:; media-src blob: data:; font-src blob: data:; frame-src blob:">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  foliate-view { display: block; height: 100%; }
+</style>
+</head>
+<body>
+<script>
+  /* Host bridge shim. This page is shared with apps/mobile, where the host is
+     react-native-webview; here the host is the parent window. Same message
+     shapes either way, so main.js needs no branching. */
+  window.ReactNativeWebView = { postMessage: function (m) { parent.postMessage(m, "*"); } };
+</script>
+<!--INJECT:BUNDLE-->
+</body>
+</html>

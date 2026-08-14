@@ -59,6 +59,20 @@ export function isPdf(name: string): boolean {
   return extOf(name) === "pdf";
 }
 
+/**
+ * Formats the reader can open. foliate-js also handles mobi/azw3/fb2/cbz, and
+ * they are vendored, so they are listed here too rather than falling through to
+ * a Download button that pretends the app cannot read them.
+ *
+ * .pdf is deliberately absent: vendor/foliate-js/pdf.js needs a pdfjs build
+ * that is not vendored, and this app already renders PDFs natively.
+ */
+const BOOK_EXTS = new Set(["epub", "mobi", "azw3", "fb2", "cbz"]);
+
+export function isBook(name: string): boolean {
+  return BOOK_EXTS.has(extOf(name));
+}
+
 export function isVcard(name: string): boolean {
   const e = extOf(name);
   return e === "vcf" || e === "vcard";

@@ -27,7 +27,8 @@
     "test:unit": "node --test \"src/main/**/*.test.ts\"",
     "test:only": "npx playwright test",
     "test:headed": "electron-vite build && npx playwright test --headed",
-    "test:ui": "electron-vite build && npx playwright test --ui"
+    "test:ui": "electron-vite build && npx playwright test --ui",
+    "build:reader": "node scripts/build-reader.mjs"
   },
   "dependencies": {
     "@dosya-dev/shared": "file:../../packages/shared",
