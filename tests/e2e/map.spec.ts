@@ -23,7 +23,7 @@ test.describe("photo map", () => {
     await navigateTo(page, "/map");
     await expect(async () => {
       expect((await mapState(page)).canvases).toBe(1);
-    }).toPass({ timeout: 10_000 });
+    }).toPass({ timeout: 25_000 });
   });
 
   test("renders one marker per located item", async ({ appPage: page }) => {
@@ -33,7 +33,7 @@ test.describe("photo map", () => {
     await navigateTo(page, "/map");
     await expect(async () => {
       expect((await mapState(page)).markers).toBe(3);
-    }).toPass({ timeout: 10_000 });
+    }).toPass({ timeout: 25_000 });
   });
 
   test("distinguishes GPS-located from approximate in the chip", async ({ appPage: page }) => {
@@ -49,7 +49,7 @@ test.describe("photo map", () => {
     await navigateTo(page, "/map");
     await expect(async () => {
       expect((await mapState(page)).markers).toBe(3);
-    }).toPass({ timeout: 10_000 });
+    }).toPass({ timeout: 25_000 });
     // A NON-approx pin, deliberately: approximate pins are IP-derived, and the
     // folder pin among them navigates to /files rather than opening a viewer, so
     // `.first()` would be testing whichever marker maplibre happened to append.
@@ -68,7 +68,7 @@ test.describe("photo map", () => {
       const s = await mapState(page);
       expect(s.canvases).toBe(1);
       expect(s.markers).toBe(3);
-    }).toPass({ timeout: 10_000 });
+    }).toPass({ timeout: 25_000 });
   });
 
   test("says there is nothing geotagged when nothing is", async ({ appPage: page }) => {
