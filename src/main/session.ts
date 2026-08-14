@@ -57,15 +57,19 @@ export function setupSession(apiBase: string): void {
           [
             "default-src 'self'",
             `script-src 'self' ${docsBase}`,
-            "style-src 'self' 'unsafe-inline'",
+            // blob: throughout for the ebook reader: foliate-js renders the
+            // book inside a blob iframe and hands it the book's OWN stylesheets,
+            // fonts and media as blob/data URLs. Without these the reader loads
+            // and then quietly drops the book's typography and images.
+            "style-src 'self' 'unsafe-inline' blob:",
             `img-src 'self' data: blob: ${apiBase} ${docsBase}`,
             `connect-src 'self' ${apiBase} ${docsBase}`,
             // In-app file viewer: <video>/<audio> stream from the API, and the
             // PDF preview loads /raw in an <iframe>. Without these, media falls
             // back to default-src 'self' and gets blocked.
-            `media-src 'self' ${apiBase}`,
-            `frame-src 'self' ${apiBase} ${docsBase}`,
-            "font-src 'self' data:",
+            `media-src 'self' blob: data: ${apiBase}`,
+            `frame-src 'self' blob: ${apiBase} ${docsBase}`,
+            "font-src 'self' data: blob:",
             "object-src 'none'",
             "base-uri 'self'",
           ].join("; "),
@@ -75,12 +79,12 @@ export function setupSession(apiBase: string): void {
           [
             "default-src 'self' http://localhost:* ws://localhost:*",
             `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${docsBase}`,
-            "style-src 'self' 'unsafe-inline'",
+            "style-src 'self' 'unsafe-inline' blob:",
             `img-src 'self' data: blob: http://localhost:* ${apiBase} ${docsBase}`,
             `connect-src 'self' http://localhost:* ws://localhost:* ${apiBase} ${docsBase}`,
-            `media-src 'self' http://localhost:* ${apiBase}`,
-            `frame-src 'self' http://localhost:* ${apiBase} ${docsBase}`,
-            "font-src 'self' data:",
+            `media-src 'self' blob: data: http://localhost:* ${apiBase}`,
+            `frame-src 'self' blob: http://localhost:* ${apiBase} ${docsBase}`,
+            "font-src 'self' data: blob:",
             "object-src 'none'",
             "base-uri 'self'",
           ].join("; "),
