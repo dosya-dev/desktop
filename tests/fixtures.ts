@@ -21,7 +21,7 @@ export { expect } from "@playwright/test";
  * workspace - a stale id could then resolve to a *different* real workspace
  * instead of falling back to `workspaces[0]`.
  */
-async function launchApp(apiBase: string) {
+export async function launchApp(apiBase: string, extraEnv: Record<string, string> = {}) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "dosya-e2e-"));
   const app = await electron.launch({
     args: [
@@ -38,6 +38,7 @@ async function launchApp(apiBase: string) {
       // api.js from 127.0.0.1, and the spec would pass for the wrong reason.
       ONLYOFFICE_SERVER_URL: apiBase,
       NODE_ENV: "test",
+      ...extraEnv,
     },
   });
   return {

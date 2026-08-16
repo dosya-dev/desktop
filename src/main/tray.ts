@@ -1,12 +1,25 @@
-import { app, Tray, Menu, nativeImage, shell, type BrowserWindow } from "electron";
+import { app, Tray, Menu, nativeImage, shell } from "electron";
 import { join } from "path";
 import { markQuitting } from "./quit-state";
 import type { SyncEngine } from "./sync";
 import type { SyncStatus } from "./sync/types";
 
+/**
+ * The tray outlives every window generation: with memory reclaim, the hidden
+ * window is destroyed and recreated on demand, so the tray takes accessors
+ * (which recreate the window when needed) instead of a BrowserWindow
+ * reference that would go stale after the first reclaim.
+ */
+export interface TrayWindowHandles {
+  /** Show the main window, recreating it if it was destroyed. */
+  showWindow: () => void;
+  /** Send to the renderer, queued until it finishes loading if just recreated. */
+  sendToWindow: (channel: string, ...args: unknown[]) => void;
+}
+
 let tray: Tray | null = null;
 
-export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): void {
+export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngine): void {
   // Load tray icon from build resources
   const trayIconPath = join(__dirname, "../../build/tray-icon.png");
   let icon: Electron.NativeImage;
@@ -119,18 +132,15 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
     const menu = Menu.buildFromTemplate([
       {
         label: "Open dosya",
-        click: () => {
-          mainWindow.show();
-          mainWindow.focus();
-        },
+        click: () => win.showWindow(),
       },
       { type: "separator" },
       ...syncItems,
       {
         label: "Upload File...",
         click: () => {
-          mainWindow.show();
-          mainWindow.webContents.send("navigate", "/upload");
+          win.showWindow();
+          win.sendToWindow("navigate", "/upload");
         },
       },
       { type: "separator" },
@@ -183,14 +193,9 @@ export function createTray(mainWindow: BrowserWindow, syncEngine?: SyncEngine): 
     });
   }
 
-  const showWindow = () => {
-    mainWindow.show();
-    mainWindow.focus();
-  };
-
-  tray.on("click", showWindow);
+  tray.on("click", win.showWindow);
   // Windows users expect double-click on a tray icon to open the app; without
   // this the gesture did nothing there. Harmless elsewhere - macOS and Linux
   // fire "click" and this simply never arrives.
-  tray.on("double-click", showWindow);
+  tray.on("double-click", win.showWindow);
 }

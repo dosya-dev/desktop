@@ -18,6 +18,7 @@ crashReporter.start({
 });
 import { registerIpcHandlers } from "./ipc";
 import { isQuitting, markQuitting } from "./quit-state";
+import { createWindowReclaimer } from "./window-reclaim";
 import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { setupSession } from "./session";
@@ -86,6 +87,62 @@ function registerAppProtocol(): void {
 }
 
 let mainWindow: BrowserWindow | null = null;
+// Hoisted to module scope so the per-window listeners createWindow attaches
+// (visibility → poller cadence, reclaim) can reach the engine.
+let syncEngine: SyncEngine | undefined;
+
+// ── Window memory reclaim ──────────────────────────────────────────
+// The app lives in the tray: "closing" the window only hides it, which kept a
+// full renderer + GPU process (easily 150-300 MB) alive for a window nobody
+// could see. After WINDOW_RECLAIM_MS hidden, the window is destroyed and its
+// memory returned; every open path (tray, dock activate, deep link, second
+// instance) recreates it on demand via showMainWindow(). Sync is untouched -
+// the engine lives entirely in the main process.
+//
+// DOSYA_WINDOW_RECLAIM_MS overrides the delay (tests use a short one);
+// 0 disables reclaim.
+const WINDOW_RECLAIM_DEFAULT_MS = 5 * 60 * 1000;
+const reclaimEnvMs = Number(process.env.DOSYA_WINDOW_RECLAIM_MS);
+const WINDOW_RECLAIM_MS =
+  Number.isFinite(reclaimEnvMs) && reclaimEnvMs >= 0 ? reclaimEnvMs : WINDOW_RECLAIM_DEFAULT_MS;
+
+/** True from the moment reclaim destroys the window until the next create -
+ * tells window-all-closed "the app is still resident in the tray, don't quit". */
+let windowReclaimed = false;
+
+/** The live window, or null if it was never created, was reclaimed, or is mid-destroy. */
+function getWindow(): BrowserWindow | null {
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+}
+
+/** Show the window, recreating it if reclaim (or anything else) destroyed it. */
+function showMainWindow(): void {
+  const win = getWindow();
+  if (win) {
+    win.show();
+    win.focus();
+    return;
+  }
+  createWindow(); // ready-to-show will show and focus it
+}
+
+/**
+ * Send to the renderer, queueing until did-finish-load when the window was
+ * just (re)created and its listeners aren't attached yet - the generalized
+ * form of the pendingSyncPath pattern below.
+ */
+function sendToWindow(channel: string, ...args: unknown[]): void {
+  const win = getWindow();
+  if (!win) return;
+  const wc = win.webContents;
+  if (wc.isLoading()) {
+    wc.once("did-finish-load", () => {
+      if (!wc.isDestroyed()) wc.send(channel, ...args);
+    });
+  } else {
+    wc.send(channel, ...args);
+  }
+}
 
 // ── dosya:// URL handler ───────────────────────────────────────────
 // Handles URLs like dosya://sync?path=/Users/john/Documents
@@ -130,11 +187,12 @@ function handleDosyaUrl(url: string): void {
         sameSite: "no_restriction",
         expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
       }).then(() => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
+        // Pre-ready (cold start) there is no window yet and none is created
+        // here: the renderer's normal startup auth check finds the cookie.
+        if (app.isReady()) {
+          showMainWindow(); // recreates the window if reclaim destroyed it
           // Tell the renderer to refresh auth state and navigate to dashboard
-          mainWindow.webContents.send("auth:oauth-complete");
+          sendToWindow("auth:oauth-complete");
         }
       }).catch((err) => {
         console.error("[auth] Failed to store OAuth cookie:", err);
@@ -158,11 +216,12 @@ function handleDosyaUrl(url: string): void {
         return;
       }
 
-      if (mainWindow) {
-        mainWindow.show();
-        mainWindow.focus();
-        mainWindow.webContents.send("navigate", `/sync?localPath=${encodeURIComponent(folderPath)}`);
+      if (app.isReady()) {
+        showMainWindow(); // recreates the window if reclaim destroyed it
+        sendToWindow("navigate", `/sync?localPath=${encodeURIComponent(folderPath)}`);
       } else {
+        // Cold start (macOS open-url fires before whenReady): parked until the
+        // first window finishes loading.
         pendingSyncPath = folderPath;
       }
     }
@@ -243,16 +302,52 @@ function createWindow(): void {
     },
   });
 
-  mainWindow.on("ready-to-show", () => {
-    mainWindow?.show();
+  const win = mainWindow;
+  windowReclaimed = false;
+
+  win.on("ready-to-show", () => {
+    win.show();
+    win.focus();
   });
 
   // Hide window instead of closing - app keeps running in tray
-  mainWindow.on("close", (e) => {
+  win.on("close", (e) => {
     if (!isQuitting()) {
       e.preventDefault();
-      mainWindow?.hide();
+      win.hide();
     }
+  });
+
+  // Reclaim the renderer's memory once the window has been hidden a while.
+  // Decision logic lives in window-reclaim.ts (unit-tested); this wires the
+  // real window. Listeners are attached HERE, per window, so a recreated
+  // window gets the same visibility → sync-cadence and reclaim behavior.
+  const reclaimer = createWindowReclaimer({
+    delayMs: WINDOW_RECLAIM_MS,
+    isQuitting,
+    isHidden: () => !win.isDestroyed() && !win.isVisible(),
+    destroy: () => {
+      if (win.isDestroyed()) return;
+      windowReclaimed = true;
+      win.destroy();
+    },
+  });
+
+  win.on("hide", () => {
+    // Hidden (tray) → pollers slow to their idle cadence.
+    syncEngine?.setAppVisible(false);
+    reclaimer.onHide();
+  });
+  win.on("show", () => {
+    syncEngine?.setAppVisible(true);
+    reclaimer.onShow();
+  });
+
+  win.on("closed", () => {
+    // A window closed for ANY reason must not leave a live timer behind, and
+    // stale references must read as "no window" from here on.
+    reclaimer.dispose();
+    if (mainWindow === win) mainWindow = null;
   });
 
   // Restrict navigation to the app's own URLs (prevents XSS escalation).
@@ -261,7 +356,7 @@ function createWindow(): void {
   // every other case - packaged builds AND the built-but-unpackaged case (test
   // harness / `electron-vite preview`) - loads from app://bundle, so a bare
   // `app.isPackaged` check on this side used to wrongly block reload() there.
-  mainWindow.webContents.on("will-navigate", (event, url) => {
+  win.webContents.on("will-navigate", (event, url) => {
     const devServerUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined;
     const allowed = devServerUrl
       ? url.startsWith(devServerUrl)
@@ -272,7 +367,7 @@ function createWindow(): void {
   });
 
   // Open external links in system browser (only http/https)
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  win.webContents.setWindowOpenHandler(({ url }) => {
     try {
       const parsed = new URL(url);
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
@@ -284,9 +379,9 @@ function createWindow(): void {
 
   // Load renderer. Dev: Vite server. Packaged: our app:// scheme (real origin).
   if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+    win.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
-    mainWindow.loadURL(`${APP_ORIGIN}/index.html`);
+    win.loadURL(`${APP_ORIGIN}/index.html`);
   }
 }
 
@@ -297,18 +392,17 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on("second-instance", (_event, argv) => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
     // Windows/Linux deliver dosya:// links by launching a second instance with
     // the URL in argv - this is the path the OAuth callback takes while the app
     // is already running.
     const urlArg = findDeepLinkArg(argv);
+    // Relaunching while the window is reclaimed must bring one back.
+    const win = getWindow();
+    if (win?.isMinimized()) win.restore();
+    showMainWindow();
     if (urlArg) handleDosyaUrl(urlArg);
   });
 
-  let syncEngine: SyncEngine | undefined;
   /** Guard so the did-finish-load signal and its fallback timer can't both start sync. */
   let syncStarted = false;
   let startSyncOnce: (() => void) | undefined;
@@ -375,7 +469,9 @@ if (!gotTheLock) {
     try {
       syncEngine = new SyncEngine(API_BASE);
       registerSyncIpcHandlers(syncEngine);
-      createTray(mainWindow!, syncEngine);
+      // The tray outlives any window generation, so it gets accessors that
+      // recreate a reclaimed window instead of a reference that can go stale.
+      createTray({ showWindow: showMainWindow, sendToWindow }, syncEngine);
       // Sync must not start before the renderer has painted: state loading,
       // snapshot fetch and reconcile all block the main thread's IPC and the
       // window would sit blank. This waited a flat 3s for that, which both
@@ -397,15 +493,11 @@ if (!gotTheLock) {
       setTimeout(() => startSyncOnce?.(), SYNC_START_FALLBACK_MS);
     } catch (err) {
       console.error("[sync] Failed to initialize:", err);
-      createTray(mainWindow!);
+      createTray({ showWindow: showMainWindow, sendToWindow });
     }
 
-    // Notify sync engine when window visibility changes.
-    // Hidden (tray) → pollers slow to 2-5 min. Shown → pollers speed up.
-    if (syncEngine && mainWindow) {
-      mainWindow.on("show", () => syncEngine?.setAppVisible(true));
-      mainWindow.on("hide", () => syncEngine?.setAppVisible(false));
-    }
+    // Visibility → sync poller cadence is wired inside createWindow (it must
+    // re-attach on every recreated window), not here.
 
     // Watch for login/logout by monitoring the dosya_session cookie.
     // Start sync engine on login, stop on logout.
@@ -480,12 +572,7 @@ if (!gotTheLock) {
     // transitions), so sync and the battery rule are decided by one signal.
 
     app.on("activate", () => {
-      if (mainWindow) {
-        mainWindow.show();
-        mainWindow.focus();
-      } else {
-        createWindow();
-      }
+      showMainWindow();
     });
   });
 
@@ -493,6 +580,10 @@ if (!gotTheLock) {
   // Exception: on Linux without a system tray (e.g. GNOME 40+), the user
   // has no way to reopen the app, so we quit instead.
   app.on("window-all-closed", () => {
+    // Memory reclaim destroyed a hidden window on purpose: the app is still
+    // resident in the tray and the next open path recreates the window. Not a
+    // reason to quit on any platform.
+    if (windowReclaimed) return;
     if (process.platform === "linux") {
       // On Linux, quit if there's no tray icon to reopen from
       markQuitting();
