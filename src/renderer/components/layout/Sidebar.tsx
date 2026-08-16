@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
+import { NavLink, useNavigate, useLocation, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   LayoutDashboard,
@@ -11,18 +11,26 @@ import {
   Search,
   LogOut,
   ChevronDown,
+  ChevronRight,
   Check,
   Plus,
   HardDrive,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
-  FileUp,
   Inbox,
   LayoutGrid,
   Layers,
-  CopyX,
   MapPin,
+  Files,
+  FileText,
+  Video,
+  Image as ImageIcon,
+  Star,
+  Trash2,
+  EyeOff,
+  Plug,
+  type LucideIcon,
 } from "lucide-react";
 import type { Workspace } from "@dosya-dev/shared";
 import { useAuth } from "@/lib/auth-context";
@@ -33,28 +41,100 @@ import { api, ApiError } from "@/lib/api-client";
 import { usePermissions } from "@/lib/use-permissions";
 import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
+import { activeFilter, filesHref, type FilterId } from "@/lib/files-params";
 import { toast } from "sonner";
 
 // `perm` is the page-access permission that reveals the entry. Those six
 // access_* keys shipped in migration 0008 and were read by nothing anywhere -
 // so a viewer with "Access Upload" off still saw Upload here and got a 403 on
-// arrival. Entries with no `perm` (Requests, Sync) are not workspace pages
-// governed by a page permission.
-const navItems = [
-  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", perm: "access_dashboard" },
-  { to: "/files", icon: FolderOpen, label: "Files", perm: "access_files" },
-  { to: "/upload", icon: Upload, label: "Upload", perm: "access_upload" },
-  { to: "/shared", icon: Share2, label: "Shared", perm: "access_shared" },
-  { to: "/file-requests", icon: Inbox, label: "Requests" },
+// arrival. Entries with no `perm` (File requests, Groups, Sync) are not
+// workspace pages governed by a page permission.
+
+/**
+ * The Files section's children.
+ *
+ * `filter` rows are views of the files browser and differ only by query string,
+ * so they carry a FilterId rather than a path - filesHref() turns that into a
+ * URL against wherever the user currently is. `route` rows are real pages that
+ * happen to be about files, and belong here because that is where someone looks
+ * for them, not because they share a URL.
+ */
+type FilesChild = {
+  label: string;
+  icon: LucideIcon;
+  perm?: string;
+  /** Render a separator above this row. */
+  sep?: boolean;
+} & ({ filter: FilterId; to?: never } | { to: string; filter?: never });
+
+const FILES_CHILDREN: FilesChild[] = [
+  { filter: "all", label: "All", icon: Files, perm: "access_files" },
+  { filter: "documents", label: "Documents", icon: FileText, perm: "access_files" },
+  { filter: "videos", label: "Videos", icon: Video, perm: "access_files" },
+  { filter: "images", label: "Images", icon: ImageIcon, perm: "access_files" },
+  // "Shared files" not "Shared": this is the files that HAVE a share link,
+  // which is a different thing from the top-level Shared page listing the links
+  // themselves. Two rows reading "Shared" on one sidebar would be a riddle.
+  { filter: "shared", label: "Shared files", icon: Share2, perm: "access_files" },
+  { filter: "favourites", label: "Favourites", icon: Star, perm: "access_files" },
   // Ungated: groups are per-user shortcuts, not a workspace resource, so there
   // is no access_* permission that governs them.
-  { to: "/groups", icon: Layers, label: "Groups" },
-  { to: "/duplicates", icon: CopyX, label: "Duplicates", perm: "access_files" },
-  { to: "/map", icon: MapPin, label: "Map", perm: "access_files" },
-  { to: "/team", icon: Users, label: "Team", perm: "access_team" },
-  { to: "/sync", icon: RefreshCw, label: "Sync" },
-  { to: "/settings", icon: Settings, label: "Settings", perm: "access_settings" },
+  { to: "/groups", label: "Groups", icon: Layers },
+  { to: "/map", label: "Map", icon: MapPin, perm: "access_files" },
+  { to: "/file-requests", label: "File requests", icon: Inbox },
+  // The two destructive-adjacent views sit below a rule so they read as a
+  // different kind of place than the type filters above them.
+  { filter: "deleted", label: "Deleted", icon: Trash2, perm: "access_files", sep: true },
+  { filter: "hidden", label: "Hidden", icon: EyeOff, perm: "access_files" },
 ];
+
+/** Routes the Files section owns - used for auto-expand and parent highlight. */
+const FILES_ROUTES = ["/files", "/groups", "/map", "/file-requests"];
+
+type NavEntry =
+  | { kind: "link"; to: string; icon: LucideIcon; label: string; perm?: string }
+  | { kind: "files" };
+
+const NAV_MAIN: NavEntry[] = [
+  { kind: "link", to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", perm: "access_dashboard" },
+  { kind: "files" },
+  { kind: "link", to: "/upload", icon: Upload, label: "Upload", perm: "access_upload" },
+  { kind: "link", to: "/shared", icon: Share2, label: "Shared", perm: "access_shared" },
+  { kind: "link", to: "/sync", icon: RefreshCw, label: "Sync" },
+];
+
+const NAV_WORKSPACE: NavEntry[] = [
+  { kind: "link", to: "/integrations", icon: Plug, label: "Integrations" },
+  { kind: "link", to: "/team", icon: Users, label: "Team", perm: "access_team" },
+  { kind: "link", to: "/settings", icon: Settings, label: "Settings", perm: "access_settings" },
+];
+
+const FILES_OPEN_KEY = "dosya_sidebar_files_open";
+
+/**
+ * Width below which the sidebar drops to icons on its own.
+ *
+ * The window can now be dragged to 700px. At 260px the expanded sidebar would
+ * take more than a third of that, so it collapses before the content has to.
+ */
+const NARROW_WINDOW = "(max-width: 1000px)";
+
+function useNarrowWindow(): boolean {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(NARROW_WINDOW).matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW_WINDOW);
+    const onChange = (e: MediaQueryListEvent) => setNarrow(e.matches);
+    mq.addEventListener("change", onChange);
+    setNarrow(mq.matches);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return narrow;
+}
+
+/** Tallest the collapsed-mode Files flyout is allowed to get, in px. */
+const FLYOUT_MAX_H = 380;
 
 export function Sidebar() {
   const { user, logout } = useAuth();
@@ -66,9 +146,116 @@ export function Sidebar() {
   const [showCreate, setShowCreate] = useState(false);
   const [newWsName, setNewWsName] = useState("");
   const [newWsColor, setNewWsColor] = useState("#22c55e");
-  const [collapsed, setCollapsed] = useState(false);
+  // Two inputs decide this. The user's own choice, and the window being too
+  // narrow to afford 260px of navigation - below that threshold a 700px window
+  // would have had well under half its width left for actual content, so the
+  // sidebar gives way first and the toggle is withdrawn rather than left as a
+  // control that immediately undoes itself.
+  const [userCollapsed, setUserCollapsed] = useState(false);
+  const narrow = useNarrowWindow();
+  const collapsed = userCollapsed || narrow;
   const [platform, setPlatform] = useState<string>("darwin");
   const [switchingWs, setSwitchingWs] = useState<Workspace | null>(null);
+
+  // ── Files section ──────────────────────────────────────────
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const onFilesPage = location.pathname === "/files";
+  const inFilesSection = FILES_ROUTES.includes(location.pathname);
+  const currentFilter = activeFilter(searchParams);
+
+  // Shut on first run, and remembered after that.
+  //
+  // Nineteen rows of navigation do not fit the ~475px this sidebar gets at the
+  // default window size, so an always-open tree pushes Shared, Sync and the
+  // whole Workspace group below the fold. Shut, every destination is on screen
+  // at once - which is the point of the section existing. There is deliberately
+  // no auto-open on arrival: re-opening the tree every time you entered /files
+  // would put you back under the fold for most of the session, and would
+  // override a choice the user had already made.
+  const [filesOpen, setFilesOpen] = useState(
+    () => localStorage.getItem(FILES_OPEN_KEY) === "1",
+  );
+  const toggleFiles = useCallback((next: boolean) => {
+    setFilesOpen(next);
+    localStorage.setItem(FILES_OPEN_KEY, next ? "1" : "0");
+  }, []);
+
+  const visibleFilesChildren = useMemo(
+    () => FILES_CHILDREN.filter((c) => !c.perm || can(c.perm)),
+    [can],
+  );
+
+  // Collapsed (60px) has no room for a tree, so the Files icon opens a flyout
+  // instead. Positioned fixed from the row's measured rect: the sidebar's inner
+  // wrapper is overflow-hidden, which would clip an absolutely-positioned panel.
+  const filesRowRef = useRef<HTMLButtonElement>(null);
+  const [flyout, setFlyout] = useState<{ top: number; left: number } | null>(null);
+  const openFlyout = () => {
+    const r = filesRowRef.current?.getBoundingClientRect();
+    if (!r) return;
+    // Eleven rows is taller than the gap between this row and the bottom of a
+    // minimum-height window, so pull the panel up rather than let it run off
+    // the screen. It scrolls if even that isn't enough.
+    const top = Math.max(8, Math.min(r.top, window.innerHeight - FLYOUT_MAX_H - 8));
+    setFlyout({ top, left: r.right + 6 });
+  };
+  // Any navigation, or leaving collapsed mode, dismisses it.
+  useEffect(() => { setFlyout(null); }, [location.pathname, location.search]);
+  useEffect(() => { if (!collapsed) setFlyout(null); }, [collapsed]);
+
+  // ── Sliding active pill ────────────────────────────────────
+  // One indicator glides to whichever row is active instead of each row
+  // switching its own background on and off, which is what makes moving
+  // through the menu read as movement. Ported from apps/web's sidebar.
+  //
+  // Measured from the DOM rather than computed from the nav data: rows are
+  // different heights (top-level vs child), the Files tree opens and closes,
+  // and permissions hide entries - all of which the layout already knows and a
+  // parallel calculation would have to duplicate and keep correct.
+  const navRef = useRef<HTMLElement>(null);
+  const [pill, setPill] = useState<
+    { top: number; height: number; left: number; width: number } | null
+  >(null);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const nav = navRef.current;
+      if (!nav) return;
+      const el = nav.querySelector<HTMLElement>("[data-active]");
+      if (!el) { setPill(null); return; }
+      const navRect = nav.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      // Horizontal bounds are measured too, not fixed insets: child rows are
+      // indented under Files, so a full-width pill would sit outside the row it
+      // is meant to be highlighting.
+      setPill({
+        top: r.top - navRect.top + nav.scrollTop,
+        height: r.height,
+        left: r.left - navRect.left,
+        width: r.width,
+      });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+    // filesOpen and collapsed change which row is active and how tall it is.
+  }, [location.pathname, location.search, filesOpen, collapsed, visibleFilesChildren.length]);
+
+  /** Where a Files child row points, given where the user is standing now. */
+  const childHref = (c: FilesChild) =>
+    c.filter ? filesHref(searchParams, onFilesPage, c.filter) : c.to!;
+
+  /** Whether a Files child row is the view currently on screen. */
+  const childActive = (c: FilesChild) =>
+    c.filter ? onFilesPage && currentFilter === c.filter : location.pathname === c.to;
+
+  // With the tree shut, the parent row is the only thing naming where you are,
+  // and "Files" alone cannot tell Images from the trash. Name the view beside
+  // it. "All" is the bare files page, so it needs no qualifier.
+  const activeChild = visibleFilesChildren.find(childActive);
+  const filesSuffix =
+    !filesOpen && activeChild && activeChild.filter !== "all" ? activeChild.label : null;
 
   // Sync state now comes from the single shared store (see AppShell.init).
   const syncPaused = useSyncPaused();
@@ -131,6 +318,143 @@ export function Sidebar() {
     },
   });
 
+  // Shared row treatments, so the three kinds of row (top-level link, Files
+  // parent, Files child) can't drift apart on hover and active colours.
+  //
+  // The active row paints no background of its own: a single pill slides
+  // between rows behind them (see the measuring effect above and the element
+  // rendered inside <nav>). Two backgrounds would show as a flash of the old
+  // one while the pill is still travelling.
+  const ROW_ACTIVE = "font-medium text-[var(--color-primary)]";
+  const ROW_IDLE = "text-[var(--color-text-secondary)] hover:bg-black/5";
+
+  /** A Files child row, used by both the expanded tree and the collapsed flyout. */
+  const renderFilesChild = (c: FilesChild) => (
+    <div key={c.label}>
+      {c.sep && <div className="my-1 h-px" style={{ background: "var(--color-border)" }} />}
+      <button
+        onClick={() => navigate(childHref(c))}
+        data-testid={`nav-files-${c.filter ?? c.to!.slice(1)}`}
+        data-active={childActive(c) ? "" : undefined}
+        className={`relative z-10 flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs transition-colors ${
+          childActive(c) ? ROW_ACTIVE : ROW_IDLE
+        }`}
+      >
+        <c.icon size={14} className="shrink-0" />
+        <span className="truncate">{c.label}</span>
+      </button>
+    </div>
+  );
+
+  const renderNavEntry = (entry: NavEntry) => {
+    if (entry.kind === "files") {
+      if (visibleFilesChildren.length === 0) return null;
+      // The child carries the highlight while the tree is open; the parent takes
+      // it over when the tree is shut or the sidebar is collapsed, so "where am
+      // I" is answered exactly once.
+      const parentActive = inFilesSection && (collapsed || !filesOpen);
+      return (
+        <div key="files">
+          <div
+            data-active={parentActive ? "" : undefined}
+            className={`relative z-10 flex items-center rounded-lg text-sm transition-colors ${parentActive ? ROW_ACTIVE : ROW_IDLE}`}
+          >
+            <button
+              ref={filesRowRef}
+              data-testid="nav-files"
+              title={collapsed ? "Files" : undefined}
+              onClick={() => {
+                if (collapsed) { flyout ? setFlyout(null) : openFlyout(); return; }
+                if (!filesOpen) toggleFiles(true);
+                if (can("access_files")) navigate(filesHref(searchParams, onFilesPage, "all"));
+              }}
+              className={`flex flex-1 items-center ${collapsed ? "justify-center" : "gap-3"} rounded-lg px-3 py-2`}
+            >
+              <FolderOpen size={18} className="shrink-0" />
+              {!collapsed && (
+                <span className="flex-1 truncate text-left">
+                  Files
+                  {filesSuffix && (
+                    <span className="text-[var(--color-text-muted)]"> · {filesSuffix}</span>
+                  )}
+                </span>
+              )}
+            </button>
+            {!collapsed && (
+              <button
+                data-testid="nav-files-toggle"
+                onClick={() => toggleFiles(!filesOpen)}
+                aria-expanded={filesOpen}
+                aria-label={filesOpen ? "Collapse Files" : "Expand Files"}
+                className="mr-1 rounded p-1.5 hover:bg-black/10"
+              >
+                <ChevronRight size={13} className={`transition-transform ${filesOpen ? "rotate-90" : ""}`} />
+              </button>
+            )}
+          </div>
+          {!collapsed && filesOpen && (
+            <div
+              className="ml-[18px] mt-0.5 space-y-0.5 border-l pl-2.5"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              {visibleFilesChildren.map((c) => renderFilesChild(c))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const { to, icon: Icon, label, perm } = entry;
+    if (perm && !can(perm)) return null;
+
+    const isSyncNav = to === "/sync";
+    // Use per-workspace sync status for the active workspace
+    const activeWsSync = active ? wsSyncMap[active.id] : undefined;
+    const wsHasPairs = (activeWsSync?.count ?? 0) > 0;
+    const wsHasError = activeWsSync?.error ?? false;
+    const wsPaused = activeWsSync?.paused ?? false;
+    const showPing = isSyncNav && wsHasPairs && (wsPaused || wsHasError);
+    const showStartNow = isSyncNav && !wsHasPairs;
+    const showRunning = isSyncNav && wsHasPairs && !wsPaused && !wsHasError;
+    const linkActive = location.pathname === to;
+    return (
+      <NavLink
+        key={to}
+        to={to}
+        title={collapsed ? label : undefined}
+        data-testid={`nav-${to.slice(1)}`}
+        data-active={linkActive ? "" : undefined}
+        className={`relative z-10 flex items-center ${collapsed ? "justify-center" : "gap-3"} rounded-lg px-3 py-2 text-sm transition-colors ${
+          linkActive ? ROW_ACTIVE : ROW_IDLE
+        }`}
+      >
+        <span className="relative">
+          <Icon size={18} />
+          {showPing && (
+            <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+            </span>
+          )}
+        </span>
+        {!collapsed && <span className="flex-1">{label}</span>}
+        {!collapsed && showPing && (
+          <span className="text-[10px] font-medium text-red-500">
+            {syncPaused ? "Paused" : "Error"}
+          </span>
+        )}
+        {!collapsed && showRunning && (
+          <span className="text-[10px] font-medium text-[var(--color-primary)]">Running</span>
+        )}
+        {!collapsed && showStartNow && (
+          <span className="text-[10px] font-medium text-[var(--color-primary)]">Start now</span>
+        )}
+      </NavLink>
+    );
+  };
+
+  const workspaceRows = NAV_WORKSPACE.map(renderNavEntry).filter(Boolean);
+
   return (
     <>
     {switchingWs && (
@@ -160,19 +484,25 @@ export function Sidebar() {
         overflow: "visible",
       }}
     >
-      {/* Collapse toggle - sits on the sidebar/content border, near the user profile */}
-      <button
-        onClick={() => setCollapsed(!collapsed)}
-        className="absolute z-30 flex h-6 w-6 items-center justify-center rounded-full border bg-[var(--color-bg)] text-[var(--color-text-muted)] shadow-sm hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
-        style={{
-          borderColor: "var(--color-border)",
-          right: -12,
-          bottom: 42,
-        }}
-        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-      >
-        {collapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
-      </button>
+      {/* Collapse toggle - sits on the sidebar/content border, near the user
+          profile. Withdrawn while the window is narrow: the width, not the
+          user, is deciding there, and a button that expanded the sidebar only
+          for it to snap shut again would be a control that lies. */}
+      {!narrow && (
+        <button
+          data-testid="sidebar-collapse-toggle"
+          onClick={() => setUserCollapsed((v) => !v)}
+          className="absolute z-30 flex h-6 w-6 items-center justify-center rounded-full border bg-[var(--color-bg)] text-[var(--color-text-muted)] shadow-sm hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
+          style={{
+            borderColor: "var(--color-border)",
+            right: -12,
+            bottom: 42,
+          }}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {collapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
+        </button>
+      )}
 
       {/* Inner scrollable content */}
       <div className="flex h-full flex-col overflow-hidden">
@@ -313,63 +643,61 @@ export function Sidebar() {
         </button>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 space-y-1 px-3">
-        {navItems.filter(({ perm }) => !perm || can(perm)).map(({ to, icon: Icon, label }) => {
-          const isSyncNav = to === "/sync";
-          // Use per-workspace sync status for the active workspace
-          const activeWsSync = active ? wsSyncMap[active.id] : undefined;
-          const wsHasPairs = (activeWsSync?.count ?? 0) > 0;
-          const wsHasError = activeWsSync?.error ?? false;
-          const wsPaused = activeWsSync?.paused ?? false;
-          const wsRunning = activeWsSync?.syncing ?? false;
-          const showPing = isSyncNav && wsHasPairs && (wsPaused || wsHasError);
-          const showStartNow = isSyncNav && !wsHasPairs;
-          const showRunning = isSyncNav && wsHasPairs && !wsPaused && !wsHasError;
-          return (
-            <NavLink
-              key={to}
-              to={to}
-              title={collapsed ? label : undefined}
-              className={({ isActive }) =>
-                `relative flex items-center ${collapsed ? "justify-center" : "gap-3"} rounded-lg px-3 py-2 text-sm transition-colors ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
-                    : "text-[var(--color-text-secondary)] hover:bg-black/5"
-                }`
-              }
-            >
-              <span className="relative">
-                <Icon size={18} />
-                {showPing && (
-                  <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
-                    <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
-                  </span>
-                )}
-              </span>
-              {!collapsed && (
-                <span className="flex-1">{label}</span>
-              )}
-              {!collapsed && showPing && (
-                <span className="text-[10px] font-medium text-red-500">
-                  {syncPaused ? "Paused" : "Error"}
-                </span>
-              )}
-              {!collapsed && showRunning && (
-                <span className="text-[10px] font-medium text-[var(--color-primary)]">
-                  Running
-                </span>
-              )}
-              {!collapsed && showStartNow && (
-                <span className="text-[10px] font-medium text-[var(--color-primary)]">
-                  Start now
-                </span>
-              )}
-            </NavLink>
-          );
-        })}
+      {/* Navigation. Scrolls on its own: the Files tree can outgrow a short
+          window, and the storage widget and profile below must stay put. */}
+      <nav ref={navRef} className="relative flex-1 space-y-1 overflow-y-auto px-3">
+        {/* The pill itself. Rows sit above it (z-10) and paint no background of
+            their own, so this is the only active surface on screen and it
+            travels rather than blinking between rows. `motion-reduce` drops the
+            travel for anyone who has asked the OS for less movement - the pill
+            still lands in the right place, it just gets there instantly. */}
+        {pill && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute rounded-lg bg-[var(--color-primary)]/10 transition-[top,height,left,width] duration-200 ease-out motion-reduce:transition-none"
+            style={{ top: pill.top, height: pill.height, left: pill.left, width: pill.width }}
+          />
+        )}
+        {NAV_MAIN.map(renderNavEntry)}
+
+        {workspaceRows.length > 0 && (
+          <div className="pt-3">
+            {collapsed ? (
+              <div className="mx-2 mb-2 h-px" style={{ background: "var(--color-border)" }} />
+            ) : (
+              <p className="px-3 pb-1 text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-muted)]">
+                Workspace
+              </p>
+            )}
+            <div className="space-y-1">{workspaceRows}</div>
+          </div>
+        )}
       </nav>
+
+      {/* Collapsed-mode Files flyout. Fixed-positioned from the row's measured
+          rect - the sidebar's inner wrapper is overflow-hidden, so an absolutely
+          positioned panel would be clipped at 60px wide. */}
+      {flyout && collapsed && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setFlyout(null)} />
+          <div
+            data-testid="nav-files-flyout"
+            className="fixed z-50 w-52 overflow-y-auto rounded-lg border p-1.5 shadow-lg"
+            style={{
+              top: flyout.top,
+              left: flyout.left,
+              maxHeight: FLYOUT_MAX_H,
+              borderColor: "var(--color-border)",
+              background: "var(--color-bg)",
+            }}
+          >
+            <p className="px-2.5 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+              Files
+            </p>
+            {visibleFilesChildren.map((c) => renderFilesChild(c))}
+          </div>
+        </>
+      )}
 
       {/* Storage info */}
       <div className="px-3 pb-2">

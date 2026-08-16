@@ -16,6 +16,11 @@ applyTheme(readCache());
   const root = document.getElementById("root")!;
   try {
     await primeApiBase();
+    // Stamp the platform on <html> before first paint. Surfaces that cover the
+    // title bar key off this to leave room for the macOS traffic lights (see
+    // --titlebar-inset-left in styles/index.css); resolving it here means they
+    // never render once at the wrong offset and then jump.
+    document.documentElement.dataset.platform = await window.electronAPI.getPlatform();
   } catch {
     root.innerHTML =
       '<div style="display:flex;height:100vh;align-items:center;justify-content:center;font-family:system-ui;font-size:14px;color:#666">Failed to start - could not reach the main process. Please restart the app.</div>';

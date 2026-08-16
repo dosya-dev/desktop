@@ -24,6 +24,25 @@ export function labelFor(name: string): string {
   return e ? e.toUpperCase() : "FILE";
 }
 
+/**
+ * Broad category for the file list's Type column.
+ *
+ * Distinct from `labelFor` on purpose: that returns the extension, which is
+ * what the Extension column already shows. A Type column repeating it says
+ * nothing, and the raw MIME type it replaced was unreadable at any width.
+ */
+export function kindLabel(name: string): string {
+  if (isPdf(name)) return "PDF";
+  if (isImage(name)) return "Image";
+  if (isVideo(name)) return "Video";
+  if (isAudio(name)) return "Audio";
+  if (isBook(name)) return "Book";
+  if (isVcard(name)) return "Contact";
+  if (isOfficeFile(name)) return "Document";
+  if (isText(name)) return "Text";
+  return "File";
+}
+
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "heic", "heif"]);
 export function isImage(name: string): boolean {
   return IMAGE_EXTS.has(extOf(name));

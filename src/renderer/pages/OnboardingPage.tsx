@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
+import { readLastRoute } from "@/lib/route-restore";
 import {
   FolderSync,
   Upload,
@@ -78,9 +79,10 @@ export function OnboardingPage() {
   const Icon = current.icon;
   const isLast = step === steps.length - 1;
 
-  // Already logged in - skip onboarding and go to dashboard
+  // Already logged in - go back to where the user left off (a reclaimed
+  // window boots through here), falling back to the dashboard.
   if (!isLoading && isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={readLastRoute(window.localStorage) ?? "/dashboard"} replace />;
   }
 
   function finish() {

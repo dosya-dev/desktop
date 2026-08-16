@@ -36,7 +36,8 @@ import { api, apiBase, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes, formatDate } from "@/lib/format";
-import { timeAgo, extOf, colorFor, originLabel, isOfficeFile, hiddenTitle } from "@/lib/file-type";
+import { activeFilter as readActiveFilter } from "@/lib/files-params";
+import { timeAgo, extOf, colorFor, originLabel, isOfficeFile, hiddenTitle, kindLabel, regionLabel } from "@/lib/file-type";
 import { toast } from "sonner";
 import { FileIcon, FolderIcon, fileIconSrc } from "@/components/files/FileIcon";
 import { FileViewer, downloadViaDialog, type ViewerFile } from "@/components/files/FileViewer";
@@ -102,24 +103,45 @@ interface ColumnDef {
   key: ColumnKey;
   label: string;
   defaultVisible: boolean;
-  width?: string;
+  /** Fixed column width in px. Omitted only for `name`, which takes the rest. */
+  width?: number;
   render: (f: FileRow) => React.ReactNode;
   renderFolder?: (f: FolderRow) => React.ReactNode;
 }
 
+/**
+ * Widths are px, not Tailwind classes, because the table needs to add them up.
+ *
+ * Turning on every column used to crush twelve of them into whatever the window
+ * was, wrapping MIME types over three lines and leaving the header unreadable.
+ * The table now declares `min-width` = these widths + a floor for Name, so once
+ * the columns no longer fit the container scrolls sideways instead of
+ * compressing. See the colgroup in the table below.
+ */
+const NAME_COL_MIN = 260;
+const CHECKBOX_COL = 32;
+const ACTIONS_COL = 40;
+
 const ALL_COLUMNS: ColumnDef[] = [
   { key: "name", label: "Name", defaultVisible: true, render: () => null /* handled separately */ },
-  { key: "size", label: "Size", defaultVisible: true, width: "w-20", render: (f) => formatBytes(f.size_bytes), renderFolder: (f) => formatBytes(f.total_size_bytes ?? 0) },
-  { key: "created", label: "Created", defaultVisible: true, width: "w-24", render: (f) => timeAgo(f.created_at), renderFolder: (f) => timeAgo(f.created_at) },
-  { key: "modified", label: "Modified", defaultVisible: false, width: "w-24", render: (f) => timeAgo(f.updated_at), renderFolder: (f) => timeAgo(f.content_updated_at ?? f.created_at) },
-  { key: "type", label: "Type", defaultVisible: false, width: "w-28", render: (f) => f.mime_type, renderFolder: () => "Folder" },
-  { key: "extension", label: "Extension", defaultVisible: false, width: "w-16", render: (f) => (f.extension || extOf(f.name) || "-").toUpperCase() },
-  { key: "version", label: "Version", defaultVisible: false, width: "w-16", render: (f) => (f.current_version ?? 1) > 1 ? `v${f.current_version}` : "-" },
-  { key: "uploader", label: "Uploader", defaultVisible: false, width: "w-28", render: (f) => f.uploader_name ?? "-", renderFolder: (f) => f.uploader_name ?? "-" },
-  { key: "region", label: "Region", defaultVisible: true, width: "w-24", render: (f) => f.region || "-", renderFolder: (f) => f.region === "multi" ? "Multiple" : (f.region || "-") },
-  { key: "origin", label: "Origin", defaultVisible: true, width: "w-20", render: (f) => originLabel(f.origin), renderFolder: (f) => originLabel(f.origin) },
-  { key: "shares", label: "Shares", defaultVisible: false, width: "w-14", render: (f) => f.share_count > 0 ? String(f.share_count) : "-", renderFolder: (f) => f.share_count > 0 ? String(f.share_count) : "-" },
-  { key: "comments", label: "Comments", defaultVisible: false, width: "w-14", render: (f) => f.comment_count > 0 ? String(f.comment_count) : "-", renderFolder: (f) => f.comment_count > 0 ? String(f.comment_count) : "-" },
+  { key: "size", label: "Size", defaultVisible: true, width: 88, render: (f) => formatBytes(f.size_bytes), renderFolder: (f) => formatBytes(f.total_size_bytes ?? 0) },
+  { key: "created", label: "Created", defaultVisible: true, width: 104, render: (f) => timeAgo(f.created_at), renderFolder: (f) => timeAgo(f.created_at) },
+  { key: "modified", label: "Modified", defaultVisible: false, width: 104, render: (f) => timeAgo(f.updated_at), renderFolder: (f) => timeAgo(f.content_updated_at ?? f.created_at) },
+  // The raw MIME type was unreadable at any column width
+  // ("application/vnd.openxmlformats-officedocument.wordprocessingml.document").
+  // A category rather than the extension, because Extension is its own column
+  // and two columns reading "DOCX" would waste one of them. The full MIME type
+  // is still on hover, via the title attribute this cell carries.
+  { key: "type", label: "Type", defaultVisible: false, width: 96, render: (f) => kindLabel(f.name), renderFolder: () => "Folder" },
+  { key: "extension", label: "Extension", defaultVisible: false, width: 88, render: (f) => (f.extension || extOf(f.name) || "-").toUpperCase() },
+  { key: "version", label: "Version", defaultVisible: false, width: 80, render: (f) => (f.current_version ?? 1) > 1 ? `v${f.current_version}` : "-" },
+  { key: "uploader", label: "Uploader", defaultVisible: false, width: 120, render: (f) => f.uploader_name ?? "-", renderFolder: (f) => f.uploader_name ?? "-" },
+  // regionLabel already existed and turns "ap-southeast-2" into "Sydney" - the
+  // raw code was both wider and less useful.
+  { key: "region", label: "Region", defaultVisible: true, width: 112, render: (f) => f.region ? regionLabel(f.region) : "-", renderFolder: (f) => f.region ? regionLabel(f.region) : "-" },
+  { key: "origin", label: "Origin", defaultVisible: true, width: 88, render: (f) => originLabel(f.origin), renderFolder: (f) => originLabel(f.origin) },
+  { key: "shares", label: "Shares", defaultVisible: false, width: 72, render: (f) => f.share_count > 0 ? String(f.share_count) : "-", renderFolder: (f) => f.share_count > 0 ? String(f.share_count) : "-" },
+  { key: "comments", label: "Comments", defaultVisible: false, width: 88, render: (f) => f.comment_count > 0 ? String(f.comment_count) : "-", renderFolder: (f) => f.comment_count > 0 ? String(f.comment_count) : "-" },
 ];
 
 const DEFAULT_VISIBLE: Set<ColumnKey> = new Set(ALL_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key));
@@ -171,8 +193,9 @@ export function FileBrowserPage() {
   const showDeleted = searchParams.get("deleted") === "1";
   const showHidden = searchParams.get("hidden") === "1";
 
-  // Determine which filter chip is active
-  const activeFilter = showDeleted ? "deleted" : showHidden ? "hidden" : filter;
+  // Which view is on screen. Read through the shared helper so this page and the
+  // sidebar that now selects the view agree on what the query string means.
+  const activeFilter = readActiveFilter(searchParams);
 
   const [viewMode, setViewModeState] = useState<ViewMode>(loadSavedView);
   const setViewMode = (m: ViewMode) => {
@@ -257,6 +280,9 @@ export function FileBrowserPage() {
   // Guards the one-shot restore of ?view=/?panel= from the URL on first load.
   const openRestored = useRef(false);
 
+  /** Open state of the collapsed-breadcrumb "…" menu. */
+  const [crumbsOpen, setCrumbsOpen] = useState(false);
+
   const { data, isLoading } = useQuery({
     queryKey: ["files", active?.id, folderId, filter, sort, search, page, showDeleted, showHidden],
     queryFn: () => {
@@ -275,6 +301,15 @@ export function FileBrowserPage() {
     },
     enabled: !!active,
     placeholderData: keepPreviousData,
+    // Shorter than the app-wide default on purpose. Every other cache only
+    // changes when this window changes it; this listing can also change from
+    // underneath - another device, or a teammate.
+    //
+    // Local sync no longer relies on this: sync-store invalidates ["files"] the
+    // moment a pair stops syncing. What a minute still bounds is the case
+    // nothing here can observe at all - a change made somewhere else entirely -
+    // while keeping ordinary back-and-forth navigation instant.
+    staleTime: 60_000,
   });
 
   const navigateToFolder = useCallback(
@@ -287,25 +322,6 @@ export function FileBrowserPage() {
     },
     [setSearchParams, showDeleted],
   );
-
-  const setFilter = (f: string) => {
-    const p = new URLSearchParams(searchParams);
-    p.delete("deleted");
-    p.delete("hidden");
-
-    if (f === "deleted") {
-      p.set("filter", "all");
-      p.set("deleted", "1");
-    } else if (f === "hidden") {
-      p.set("filter", "all");
-      p.set("hidden", "1");
-    } else {
-      p.set("filter", f);
-    }
-    p.delete("page");
-    if (f === "deleted" || f === "hidden") p.delete("folder"); // deleted/hidden views show all, not per-folder
-    setSearchParams(p);
-  };
 
   const setSort = (s: string) => {
     const p = new URLSearchParams(searchParams);
@@ -499,6 +515,17 @@ export function FileBrowserPage() {
   const allFolders = data?.folders ?? [];
   const allFiles = data?.files ?? [];
   const breadcrumbs = data?.breadcrumbs ?? [];
+
+  // How many trailing folders stay on the trail before the middle collapses.
+  // Two ancestors plus where you are: enough to keep your bearings, few enough
+  // that the toolbar never has to fight the path for width.
+  const MAX_VISIBLE_CRUMBS = 3;
+  const hiddenCrumbs =
+    breadcrumbs.length > MAX_VISIBLE_CRUMBS
+      ? breadcrumbs.slice(0, breadcrumbs.length - MAX_VISIBLE_CRUMBS)
+      : [];
+  const shownCrumbs =
+    hiddenCrumbs.length > 0 ? breadcrumbs.slice(-MAX_VISIBLE_CRUMBS) : breadcrumbs;
   const pagination = data?.pagination;
 
   // can_lock / can_hide have been in this response type since the file was
@@ -745,6 +772,13 @@ export function FileBrowserPage() {
 
   const visibleCols = ALL_COLUMNS.filter((c) => visibleColumns.has(c.key));
 
+  // What the table needs before it starts squeezing. Past this the wrapper
+  // scrolls sideways, which is the whole point: twelve columns cannot share a
+  // 900px window legibly, and shrinking them is worse than scrolling to them.
+  const tableMinWidth =
+    CHECKBOX_COL + ACTIONS_COL + NAME_COL_MIN +
+    visibleCols.reduce((sum, c) => sum + (c.width ?? 0), 0);
+
   const ctxFile = contextMenu?.item.kind === "file" ? allFiles.find((f) => f.id === contextMenu.item.id) : undefined;
   const ctxFolder = contextMenu?.item.kind === "folder" ? allFolders.find((f) => f.id === contextMenu.item.id) : undefined;
 
@@ -766,23 +800,76 @@ export function FileBrowserPage() {
         </div>
       )}
 
-      {/* Header */}
-      <div className="mb-4 flex items-center justify-between">
-        <div>
+      {/* Header. Wraps rather than overflowing: at 700px the trail and six
+          controls cannot share one line, so the toolbar drops below the
+          breadcrumb instead of pushing itself off the right edge. */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        {/* min-w-0 is what stops a deep path from pushing the toolbar off the
+            right edge: a flex item defaults to min-width:auto and will not
+            shrink below its content, so every extra folder level used to steal
+            width from the buttons instead of the trail giving way. */}
+        {/* basis keeps the trail on its own line once the toolbar no longer
+            fits beside it, instead of the two fighting over a few pixels. */}
+        <div className="min-w-0 flex-1 basis-64">
           {/* Breadcrumbs */}
-          <div className="flex items-center gap-1 text-sm">
+          <div className="flex min-w-0 items-center gap-1 text-sm">
             <button
               onClick={() => setSearchParams({})}
-              className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              className="shrink-0 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
             >
               Files
             </button>
-            {breadcrumbs.map((bc) => (
-              <span key={bc.id} className="flex items-center gap-1">
+
+            {/* Past a few levels the middle of the trail collapses behind a "…"
+                menu. Truncation alone is not enough here - the useful ends of a
+                path are its root and where you are standing, and squeezing
+                every level equally hides both. */}
+            {hiddenCrumbs.length > 0 && (
+              <span className="relative flex shrink-0 items-center gap-1">
                 <ChevronRight size={14} className="text-[var(--color-text-muted)]" />
                 <button
+                  onClick={() => setCrumbsOpen((v) => !v)}
+                  title={hiddenCrumbs.map((c) => c.name).join(" / ")}
+                  aria-label={`Show ${hiddenCrumbs.length} hidden folder${hiddenCrumbs.length === 1 ? "" : "s"}`}
+                  aria-expanded={crumbsOpen}
+                  className="rounded px-1 leading-none text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)]"
+                >
+                  …
+                </button>
+                {crumbsOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setCrumbsOpen(false)} />
+                    <div
+                      className="absolute left-4 top-6 z-50 max-h-64 w-56 overflow-y-auto rounded-lg border py-1 shadow-lg"
+                      style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
+                    >
+                      {hiddenCrumbs.map((c) => (
+                        <button
+                          key={c.id}
+                          onClick={() => { setCrumbsOpen(false); navigateToFolder(c.id); }}
+                          className="block w-full truncate px-3 py-1.5 text-left text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)]"
+                          title={c.name}
+                        >
+                          {c.name}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </span>
+            )}
+
+            {shownCrumbs.map((bc, i) => (
+              <span key={bc.id} className="flex min-w-0 items-center gap-1">
+                <ChevronRight size={14} className="shrink-0 text-[var(--color-text-muted)]" />
+                <button
                   onClick={() => navigateToFolder(bc.id)}
-                  className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                  title={bc.name}
+                  // The folder you are in keeps the most room; its ancestors
+                  // give way first, which is the order you can afford to lose.
+                  className={`truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text)] ${
+                    i === shownCrumbs.length - 1 ? "max-w-[22rem] font-medium text-[var(--color-text)]" : "max-w-[10rem]"
+                  }`}
                 >
                   {bc.name}
                 </button>
@@ -790,7 +877,11 @@ export function FileBrowserPage() {
             ))}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        {/* Wraps internally too. Making only the outer header wrap moved the
+            whole toolbar onto its own line but kept it one unbreakable row, so
+            at 700px Upload still sat ~100px past the right edge - off screen
+            and, because nothing here scrolls sideways, unreachable. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Search */}
           <div className="relative">
             <Search
@@ -803,8 +894,11 @@ export function FileBrowserPage() {
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && doSearch()}
               placeholder="Search files..."
-              className="rounded-lg border py-1.5 pl-8 pr-3 text-sm outline-none focus:border-[var(--color-primary)]"
-              style={{ borderColor: "var(--color-border)", width: 200 }}
+              // Was a hard 200px, which is a lot to spend on one control in a
+              // 700px window. It now gives way down to 120 before anything
+              // else in the row has to.
+              className="w-[200px] min-w-[120px] max-w-full rounded-lg border py-1.5 pl-8 pr-3 text-sm outline-none focus:border-[var(--color-primary)]"
+              style={{ borderColor: "var(--color-border)" }}
             />
           </div>
 
@@ -904,35 +998,8 @@ export function FileBrowserPage() {
         </div>
       </div>
 
-      {/* Filter Chips */}
-      <div className="mb-3 flex items-center gap-1.5">
-        {[
-          { id: "all", label: "All" },
-          { id: "documents", label: "Documents" },
-          { id: "videos", label: "Videos" },
-          { id: "images", label: "Images" },
-          { id: "shared", label: "Shared" },
-          { id: "favourites", label: "Favourites" },
-          { id: "deleted", label: "Deleted" },
-          { id: "hidden", label: "Hidden" },
-        ].map((f) => (
-          <button
-            key={f.id}
-            onClick={() => setFilter(f.id)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-              activeFilter === f.id
-                ? f.id === "deleted"
-                  ? "bg-red-50 text-red-600"
-                  : f.id === "hidden"
-                    ? "bg-orange-50 text-orange-600"
-                    : "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-      </div>
+      {/* The filter chips that used to sit here moved into the sidebar's Files
+          section, so a view is picked in one place instead of two. */}
 
       {/* Trash notice - items here still count against storage; only a
           permanent delete reclaims it. Static text, not a dismissible
@@ -1060,7 +1127,21 @@ export function FileBrowserPage() {
         </div>
       ) : viewMode === "table" ? (
         <div className="flex-1 overflow-auto">
-          <table className="w-full text-left text-sm">
+          <table
+            className="w-full table-fixed text-left text-sm"
+            style={{ minWidth: tableMinWidth }}
+          >
+            {/* Explicit widths, so `table-fixed` honours them and Name absorbs
+                whatever is left. Without this the browser reflows every column
+                to fit the container, which is what wrapped MIME types across
+                three lines once all twelve were switched on. */}
+            <colgroup>
+              <col style={{ width: CHECKBOX_COL }} />
+              {visibleCols.map((col) => (
+                <col key={col.key} style={col.width ? { width: col.width } : undefined} />
+              ))}
+              <col style={{ width: ACTIONS_COL }} />
+            </colgroup>
             <thead>
               <tr className="border-b text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
                 <th className="w-8 py-2 pl-3">
@@ -1074,7 +1155,7 @@ export function FileBrowserPage() {
                   />
                 </th>
                 {visibleCols.map((col) => (
-                  <th key={col.key} className={`py-2 font-medium ${col.key === "name" ? "" : col.width ?? ""}`}>{col.label}</th>
+                  <th key={col.key} className="truncate py-2 pr-3 font-medium">{col.label}</th>
                 ))}
                 <th className="w-10 py-2"></th>
               </tr>
@@ -1101,13 +1182,13 @@ export function FileBrowserPage() {
                   {visibleCols.map((col) => {
                     if (col.key === "name") {
                       return (
-                        <td key="name" className="py-2">
-                          <div className="flex items-center gap-2.5">
+                        <td key="name" className="py-2 pr-3">
+                          <div className="flex min-w-0 items-center gap-2.5">
                             <span className="relative shrink-0">
                               <FolderIcon fileCount={folder.file_count} size={18} synced={!!(syncedFolderIds.has(folder.id) || folder.is_synced)} />
                               <OriginBadge origin={folder.origin} />
                             </span>
-                            <span className="truncate font-medium">{folder.name}</span>
+                            <span className="truncate font-medium" title={folder.name}>{folder.name}</span>
                             <span className="shrink-0 text-xs text-[var(--color-text-muted)]">{folder.file_count} files</span>
                             {folder.lock_mode !== "none" && (
                               <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />
@@ -1120,7 +1201,7 @@ export function FileBrowserPage() {
                       );
                     }
                     return (
-                      <td key={col.key} className={`py-2 text-xs text-[var(--color-text-muted)] ${col.width ?? ""}`}>
+                      <td key={col.key} className="truncate py-2 pr-3 text-xs text-[var(--color-text-muted)]">
                         {col.renderFolder ? col.renderFolder(folder) : "-"}
                       </td>
                     );
@@ -1166,10 +1247,11 @@ export function FileBrowserPage() {
                     {visibleCols.map((col) => {
                       if (col.key === "name") {
                         return (
-                          <td key="name" className="py-2">
-                            <div className="flex items-center gap-2.5">
+                          <td key="name" className="py-2 pr-3">
+                            <div className="flex min-w-0 items-center gap-2.5">
                               <RowThumbnail fileId={file.id} fileName={file.name} />
                               <span
+                                title={file.name}
                                 className="truncate hover:text-[var(--color-primary)] hover:underline"
                                 onClick={(e) => { e.stopPropagation(); openFileWithLockCheck(file, "view"); }}
                               >
@@ -1193,7 +1275,13 @@ export function FileBrowserPage() {
                         );
                       }
                       return (
-                        <td key={col.key} className={`py-2 text-xs text-[var(--color-text-muted)] ${col.width ?? ""}`}>
+                        <td
+                          key={col.key}
+                          className="truncate py-2 pr-3 text-xs text-[var(--color-text-muted)]"
+                          // The full value is still reachable on hover, which is
+                          // what makes the shortened Type column safe.
+                          title={col.key === "type" ? file.mime_type : undefined}
+                        >
                           {col.render(file)}
                         </td>
                       );

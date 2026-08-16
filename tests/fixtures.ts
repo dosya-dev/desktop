@@ -2,6 +2,7 @@ import {
   test as base,
   _electron as electron,
   type Page,
+  type ElectronApplication,
 } from "@playwright/test";
 import path from "path";
 import fs from "fs";
@@ -53,6 +54,7 @@ export const test = base.extend<{ appPage: Page }>({
     const mock = await startMockServer({ authenticated: true });
     const { app, cleanup } = await launchApp(mock.url);
     const page = await app.firstWindow();
+    appsByPage.set(page, app);
     await page.waitForLoadState("domcontentloaded");
 
     // Wait for auth to resolve and app to land on the dashboard
@@ -89,6 +91,7 @@ export const multiWsTest = base.extend<{ appPage: Page }>({
     });
     const { app, cleanup } = await launchApp(mock.url);
     const page = await app.firstWindow();
+    appsByPage.set(page, app);
     await page.waitForLoadState("domcontentloaded");
     await page.waitForFunction(
       () => window.location.hash.includes("/dashboard"),
@@ -114,6 +117,7 @@ export const guestTest = base.extend<{ appPage: Page }>({
     const mock = await startMockServer({ authenticated: false });
     const { app, cleanup } = await launchApp(mock.url);
     const page = await app.firstWindow();
+    appsByPage.set(page, app);
     await page.waitForLoadState("domcontentloaded");
 
     // Wait for auth check to complete (app lands on onboarding)
@@ -135,6 +139,33 @@ export const guestTest = base.extend<{ appPage: Page }>({
     }
   },
 });
+
+/**
+ * The Electron app behind each page, so a spec can drive the window itself.
+ *
+ * Kept in a side table rather than promoted to its own fixture: the app is
+ * created inside the page fixtures, and restructuring those would touch every
+ * spec in the suite for the sake of one capability.
+ */
+const appsByPage = new WeakMap<Page, ElectronApplication>();
+
+/**
+ * Resize the real window.
+ *
+ * `page.setViewportSize` does nothing useful in Electron - the OS window drives
+ * the viewport - so responsive behaviour has to be exercised through the
+ * BrowserWindow. Values below the app's own minimum are clamped by Electron,
+ * which is itself worth knowing when a spec appears not to take effect.
+ */
+export async function resizeWindow(page: Page, width: number, height: number): Promise<void> {
+  const app = appsByPage.get(page);
+  if (!app) throw new Error("resizeWindow: no Electron app recorded for this page");
+  await app.evaluate(async ({ BrowserWindow }, size) => {
+    BrowserWindow.getAllWindows()[0]?.setSize(size.width, size.height);
+  }, { width, height });
+  // Let the media queries and the layout settle before anything is measured.
+  await page.waitForTimeout(500);
+}
 
 /** Navigate within the hash router and wait for React to render */
 export async function navigateTo(page: Page, route: string): Promise<void> {

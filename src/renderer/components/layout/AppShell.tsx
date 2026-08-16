@@ -17,7 +17,12 @@ export function AppShell({ children }: { children: ReactNode }) {
       <DeletionBanner />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6">{children}</main>
+        {/* `relative` is load-bearing: MapPage lays itself out with
+            `absolute inset-0`, and without a positioned ancestor here that
+            resolves against the viewport - painting the map over the sidebar
+            with no way back out. Any page that fills its area absolutely
+            anchors to the content region because of this. */}
+        <main className="relative flex-1 overflow-y-auto p-6">{children}</main>
       </div>
     </div>
   );

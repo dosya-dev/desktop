@@ -120,7 +120,10 @@ export function EditorPage() {
 
   return (
     <div className="h-screen flex flex-col bg-background">
-      <header className="flex items-center gap-3 px-4 py-2 border-b shrink-0">
+      {/* Same reason as the file viewer: this page renders without the app
+          shell, so its header owns the top-left corner the traffic lights
+          occupy. */}
+      <header className="titlebar-inset flex items-center gap-3 pr-4 py-2 border-b shrink-0">
         <Link to="/files" className="inline-flex items-center gap-1.5 text-sm text-[var(--color-text-muted)] hover:text-foreground">
           <ArrowLeft className="size-4" /> Files
         </Link>

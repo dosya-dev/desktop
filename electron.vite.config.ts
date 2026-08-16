@@ -47,6 +47,13 @@ export default defineConfig({
             if (id.includes("react-router") || id.includes("@remix-run")) return "vendor-router";
             if (id.includes("@tanstack")) return "vendor-query";
             if (id.includes("lucide-react")) return "vendor-icons";
+            // Lazy-only heavyweights get their own chunks so the entry does
+            // not depend on them: maplibre (Map page) and shiki (code viewer)
+            // together were ~4.2 MB of the old catch-all vendor chunk, fetched
+            // and parsed on EVERY window start for pages most sessions never
+            // visit.
+            if (id.includes("maplibre") || id.includes("pmtiles") || id.includes("supercluster")) return "vendor-map";
+            if (id.includes("shiki") || id.includes("oniguruma")) return "vendor-shiki";
             return "vendor";
           },
         },

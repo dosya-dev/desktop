@@ -3,7 +3,7 @@ import { gracefulify } from "graceful-fs";
 import fs, { statSync } from "fs";
 gracefulify(fs);
 
-import { app, BrowserWindow, shell, powerMonitor, session, crashReporter, ipcMain, protocol, net } from "electron";
+import { app, BrowserWindow, shell, powerMonitor, session, crashReporter, ipcMain, protocol, net, screen } from "electron";
 import { randomUUID } from "crypto";
 import { join, resolve, sep } from "path";
 import { pathToFileURL } from "url";
@@ -19,6 +19,7 @@ crashReporter.start({
 import { registerIpcHandlers } from "./ipc";
 import { isQuitting, markQuitting } from "./quit-state";
 import { createWindowReclaimer } from "./window-reclaim";
+import { captureWindowState, readWindowState, resolveWindowState, writeWindowState } from "./window-state";
 import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { setupSession } from "./session";
@@ -267,11 +268,29 @@ function registerProtocolClient(): void {
 }
 
 function createWindow(): void {
+  // Reopen where the user left the window - reclaim recreates windows, so
+  // without this every reopen-from-tray snapped back to 1200x800 centered.
+  const stateDir = app.getPath("userData");
+  const { bounds: savedBounds, maximized: savedMaximized } = resolveWindowState(
+    readWindowState(stateDir),
+    screen.getAllDisplays().map((d) => d.workArea),
+    { width: 1200, height: 800, minWidth: 900, minHeight: 600 },
+  );
+
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
+    width: savedBounds?.width ?? 1200,
+    height: savedBounds?.height ?? 800,
+    ...(savedBounds ? { x: savedBounds.x, y: savedBounds.y } : {}),
+    // 900 was wide enough that the app could not be used beside anything else -
+    // no macOS split view on a 13" laptop, no half-screen next to a browser.
+    // The renderer holds up down to this width: the sidebar drops to icons
+    // below 1000 (see Sidebar), the files toolbar wraps, and the file table
+    // scrolls sideways rather than compressing its columns.
+    //
+    // Restored bounds are clamped to these by Electron, so a window saved at
+    // an older, larger minimum still reopens at whatever the user last chose.
+    minWidth: 700,
+    minHeight: 560,
     show: false,
     icon: join(__dirname, "../../build/icon.png"),
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
@@ -304,11 +323,25 @@ function createWindow(): void {
 
   const win = mainWindow;
   windowReclaimed = false;
+  if (savedMaximized) win.maximize();
 
   win.on("ready-to-show", () => {
     win.show();
     win.focus();
   });
+
+  // Persist geometry: debounced on resize/move, immediately on hide (the
+  // reclaim path - state must be on disk before a destroy) and close (the
+  // real-quit path, where close is not prevented).
+  const persistBounds = (): void => writeWindowState(stateDir, captureWindowState(win));
+  let boundsTimer: ReturnType<typeof setTimeout> | null = null;
+  const persistBoundsSoon = (): void => {
+    if (boundsTimer) clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(persistBounds, 500);
+  };
+  win.on("resize", persistBoundsSoon);
+  win.on("move", persistBoundsSoon);
+  win.on("close", persistBounds);
 
   // Hide window instead of closing - app keeps running in tray
   win.on("close", (e) => {
@@ -334,6 +367,7 @@ function createWindow(): void {
   });
 
   win.on("hide", () => {
+    persistBounds();
     // Hidden (tray) → pollers slow to their idle cadence.
     syncEngine?.setAppVisible(false);
     reclaimer.onHide();
@@ -344,6 +378,7 @@ function createWindow(): void {
   });
 
   win.on("closed", () => {
+    if (boundsTimer) clearTimeout(boundsTimer);
     // A window closed for ANY reason must not leave a live timer behind, and
     // stale references must read as "no window" from here on.
     reclaimer.dispose();

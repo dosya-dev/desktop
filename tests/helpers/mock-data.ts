@@ -88,6 +88,27 @@ export const mockFiles = [
     created_at: "2025-03-01T12:00:00Z",
     updated_at: "2025-03-01T12:00:00Z",
   },
+  // `file_v*` ids get version history from the mock API (see mock-api.ts), so
+  // specs can exercise the viewer's version panel. Everything else stays at a
+  // single version, which is what the viewer saw before the endpoint existed.
+  {
+    id: "file_v1",
+    name: "Versioned Report.pdf",
+    kind: "file",
+    size_bytes: 1_048_576,
+    mime_type: "application/pdf",
+    extension: "pdf",
+    region: "eu-west",
+    uploaded_by: "user_test_1",
+    uploader_name: "Test User",
+    folder_id: null,
+    workspace_id: "ws_test_1",
+    is_favourite: 0,
+    is_locked: 0,
+    is_hidden: 0,
+    created_at: "2025-03-01T12:00:00Z",
+    updated_at: "2025-03-01T12:00:00Z",
+  },
   {
     id: "file_2",
     name: "Photo.png",

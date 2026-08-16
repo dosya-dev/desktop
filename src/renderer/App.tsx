@@ -1,10 +1,11 @@
-import { lazy, Suspense } from "react";
-import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
+import { lazy, Suspense, useEffect } from "react";
+import { HashRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { queryClient } from "./lib/query-client";
 import { AuthProvider, useAuth } from "./lib/auth-context";
 import { WorkspaceProvider, useWorkspace } from "./lib/workspace-context";
+import { saveLastRoute } from "./lib/route-restore";
 
 // Auth entry points stay eager so first paint after launch is instant.
 import { LoginPage } from "./pages/LoginPage";
@@ -36,6 +37,7 @@ const SyncPage = lazyPage(() => import("./pages/SyncPage"), "SyncPage");
 const FileRequestsPage = lazyPage(() => import("./pages/FileRequestsPage"), "FileRequestsPage");
 const GroupsPage = lazyPage(() => import("./pages/GroupsPage"), "GroupsPage");
 const DuplicatesPage = lazyPage(() => import("./pages/DuplicatesPage"), "DuplicatesPage");
+const IntegrationsPage = lazyPage(() => import("./pages/IntegrationsPage"), "IntegrationsPage");
 const MapPage = lazyPage(() => import("./pages/MapPage"), "MapPage");
 const EditorPage = lazyPage(() => import("./pages/EditorPage"), "EditorPage");
 const ForgotPasswordPage = lazyPage(() => import("./pages/ForgotPasswordPage"), "ForgotPasswordPage");
@@ -45,6 +47,39 @@ const TwoFactorPage = lazyPage(() => import("./pages/TwoFactorPage"), "TwoFactor
 const CreateWorkspacePage = lazyPage(() => import("./pages/CreateWorkspacePage"), "CreateWorkspacePage");
 const WorkspaceDashboardPage = lazyPage(() => import("./pages/WorkspaceDashboardPage"), "WorkspaceDashboardPage");
 const NotificationsPage = lazyPage(() => import("./pages/NotificationsPage"), "NotificationsPage");
+
+/**
+ * Records the current page so a reclaimed window can boot straight back into
+ * it (OnboardingPage reads it on the auth redirect). Renders nothing.
+ */
+function RouteMemory() {
+  const location = useLocation();
+  useEffect(() => {
+    saveLastRoute(location.pathname + location.search, window.localStorage);
+  }, [location]);
+  return null;
+}
+
+/**
+ * Warm the page chunks a session actually visits, 2s after an authenticated
+ * first paint. Lazy routes keep startup light; this removes the one cost they
+ * add - the first-click load - without bringing map/shiki back onto the
+ * startup path (those stay behind their own routes). Renders nothing.
+ */
+function IdlePrefetch() {
+  const { isAuthenticated } = useAuth();
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const timer = setTimeout(() => {
+      void import("./pages/FileBrowserPage");
+      void import("./pages/UploadPage");
+      void import("./pages/SettingsPage");
+      void import("./pages/SyncPage");
+    }, 2_000);
+    return () => clearTimeout(timer);
+  }, [isAuthenticated]);
+  return null;
+}
 
 /** Full-screen spinner shown while a lazily-loaded page chunk downloads. */
 function PageFallback() {
@@ -142,6 +177,7 @@ function AppRoutes() {
       <Route path="/file-requests" element={<ProtectedPage><FileRequestsPage /></ProtectedPage>} />
       <Route path="/groups" element={<ProtectedPage><GroupsPage /></ProtectedPage>} />
       <Route path="/duplicates" element={<ProtectedPage><DuplicatesPage /></ProtectedPage>} />
+      <Route path="/integrations" element={<ProtectedPage><IntegrationsPage /></ProtectedPage>} />
       <Route path="/map" element={<ProtectedPage><MapPage /></ProtectedPage>} />
       <Route path="/editor/:fileId" element={<ProtectedBarePage><EditorPage /></ProtectedBarePage>} />
       <Route path="/lan-transfer" element={<ProtectedPage><LanTransferPage /></ProtectedPage>} />
@@ -161,6 +197,8 @@ export function App() {
       <HashRouter>
         <AuthProvider>
           <WorkspaceProvider>
+          <RouteMemory />
+          <IdlePrefetch />
           <Suspense fallback={<PageFallback />}>
             <AppRoutes />
           </Suspense>

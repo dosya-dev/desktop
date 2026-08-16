@@ -170,7 +170,12 @@ export function SharedLinksPage() {
           </div>
         ) : (
           <div className="overflow-auto">
-            <table className="w-full text-left text-sm">
+            {/* `table-fixed` is what keeps a long filename from breaking this
+                layout. With auto layout the File column grows to fit its
+                longest cell and shoves Region/Views/Expiry/Status off the
+                edge; fixed layout honours the widths below and gives File
+                whatever is left, so the name truncates instead. */}
+            <table className="w-full table-fixed text-left text-sm">
               <thead>
                 <tr className="border-b text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
                   <th className="py-2 font-medium">File</th>
@@ -188,12 +193,17 @@ export function SharedLinksPage() {
                     className="border-b hover:bg-[var(--color-bg-secondary)] transition-colors"
                     style={{ borderColor: "var(--color-border)" }}
                   >
-                    <td className="py-3">
-                      <div className="flex items-center gap-2">
+                    <td className="py-3 pr-3">
+                      {/* min-w-0 is required for the truncate below: a flex
+                          item defaults to min-width:auto and refuses to shrink
+                          under its content, so the ellipsis never engages. */}
+                      <div className="flex min-w-0 items-center gap-2">
                         <Link2 size={14} className="text-[var(--color-text-muted)] shrink-0" />
-                        <span className="truncate font-medium">{link.display_name}</span>
+                        <span className="truncate font-medium" title={link.display_name}>
+                          {link.display_name}
+                        </span>
                         {link.is_password_protected === 1 && (
-                          <Shield size={12} className="text-[var(--color-text-muted)]" />
+                          <Shield size={12} className="shrink-0 text-[var(--color-text-muted)]" />
                         )}
                       </div>
                     </td>

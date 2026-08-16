@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { ipc } from "@/lib/ipc";
@@ -13,9 +14,36 @@ export function SignUpPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [terms, setTerms] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  /**
+   * One handler for all three providers.
+   *
+   * Google and GitHub each carried their own copy of this; adding Apple as a
+   * third would have meant three places to keep in step. The main process
+   * already accepts every provider name it is given (see the allowlist in
+   * main/index.ts), so the only per-provider thing left is the button.
+   */
+  async function runOAuth(provider: "google" | "github" | "apple") {
+    setError("");
+    setLoading(true);
+    try {
+      const result = await ipc.oauth(provider);
+      if (result.ok) {
+        await refreshUser();
+        navigate("/dashboard");
+      } else if (result.error) {
+        setError(result.error);
+      }
+    } catch (err: any) {
+      setError(err.message || "OAuth failed");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -103,15 +131,29 @@ export function SignUpPage() {
 
           <div>
             <label className="mb-1 block text-sm font-medium">Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
-              style={{ borderColor: "var(--color-border)" }}
-              placeholder="Min. 8 characters"
-            />
+            {/* Reveal toggle, same as the login form. A signup field enforcing
+                four character classes is the one most worth being able to read
+                back before submitting. */}
+            <div className="relative">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                className="w-full rounded-lg border px-3 py-2 pr-10 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
+                style={{ borderColor: "var(--color-border)" }}
+                placeholder="Min. 8 characters"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text-secondary)]"
+                tabIndex={-1}
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
             <p className="mt-1 text-xs text-[var(--color-text-muted)]">
               Must include uppercase, lowercase, number, and special character
             </p>
@@ -154,23 +196,7 @@ export function SignUpPage() {
 
         <div className="space-y-2">
           <button
-            onClick={async () => {
-              setError("");
-              setLoading(true);
-              try {
-                const result = await ipc.oauth("google");
-                if (result.ok) {
-                  await refreshUser();
-                  navigate("/dashboard");
-                } else if (result.error) {
-                  setError(result.error);
-                }
-              } catch (err: any) {
-                setError(err.message || "OAuth failed");
-              } finally {
-                setLoading(false);
-              }
-            }}
+            onClick={() => runOAuth("google")}
             disabled={loading}
             className="flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)] transition-colors disabled:opacity-50"
             style={{ borderColor: "var(--color-border)" }}
@@ -184,23 +210,7 @@ export function SignUpPage() {
             Continue with Google
           </button>
           <button
-            onClick={async () => {
-              setError("");
-              setLoading(true);
-              try {
-                const result = await ipc.oauth("github");
-                if (result.ok) {
-                  await refreshUser();
-                  navigate("/dashboard");
-                } else if (result.error) {
-                  setError(result.error);
-                }
-              } catch (err: any) {
-                setError(err.message || "OAuth failed");
-              } finally {
-                setLoading(false);
-              }
-            }}
+            onClick={() => runOAuth("github")}
             disabled={loading}
             className="flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)] transition-colors disabled:opacity-50"
             style={{ borderColor: "var(--color-border)" }}
@@ -209,6 +219,20 @@ export function SignUpPage() {
               <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
             </svg>
             Continue with GitHub
+          </button>
+          {/* Bordered like its neighbours rather than web's filled black
+              button: this app ships eight themes, and a hardcoded black
+              surface is unreadable in several of them. */}
+          <button
+            onClick={() => runOAuth("apple")}
+            disabled={loading}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)] transition-colors disabled:opacity-50"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 14.25 3.51 5.88 9.05 5.6c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.1l.01-.31zM12.03 5.5C11.88 3.24 13.71 1.38 15.82 1.2c.29 2.58-2.34 4.5-3.79 4.3z" />
+            </svg>
+            Continue with Apple
           </button>
         </div>
 

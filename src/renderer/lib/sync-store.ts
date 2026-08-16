@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { queryClient } from "./query-client";
+import { syncJustSettled } from "./sync-settled";
 
 /** Mirrors SyncNotice in src/main/sync/types.ts. */
 export interface SyncNotice {
@@ -95,6 +97,7 @@ const MAX_CONFLICTS = 200;
 let refCount = 0;
 let unsubscribers: Array<() => void> = [];
 
+
 export const useSyncStore = create<SyncStore>((set) => ({
   status: null,
   conflicts: [],
@@ -111,9 +114,18 @@ export const useSyncStore = create<SyncStore>((set) => ({
         .then((c: SyncConflict[]) => set({ conflicts: c.slice(-MAX_CONFLICTS) }))
         .catch(() => {});
 
-      const unsub1 = window.electronAPI.onSyncStatusChanged((s: SyncStatus) =>
-        set({ status: s }),
-      );
+      const unsub1 = window.electronAPI.onSyncStatusChanged((s: SyncStatus) => {
+        // The sync engine writes files from the main process, where there is no
+        // React Query cache to invalidate - so a file pulled down while the
+        // Files page was open stayed invisible until its data went stale on a
+        // timer. This is the one place every status tick already arrives, which
+        // makes it the right seam to close that gap.
+        if (syncJustSettled(useSyncStore.getState().status, s)) {
+          void queryClient.invalidateQueries({ queryKey: ["files"] });
+          void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        }
+        set({ status: s });
+      });
       const unsub2 = window.electronAPI.onSyncConflictDetected((c: SyncConflict) =>
         set((state) => ({ conflicts: [...state.conflicts, c].slice(-MAX_CONFLICTS) })),
       );

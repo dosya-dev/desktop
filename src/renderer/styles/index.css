@@ -41,6 +41,27 @@
 
   --sidebar-width: 260px;
   --titlebar-height: 52px;
+
+  /* Room the macOS traffic lights need before content may start. They are
+     drawn by the OS at trafficLightPosition (16,16) over whatever the renderer
+     paints, so any surface reaching the top-left corner has to keep clear of
+     them. Zero everywhere else - Windows and Linux draw their own controls on
+     the right, inside TitleBar. */
+  --titlebar-inset-left: 0px;
+}
+
+/* Set from main.tsx once the platform is known. */
+:root[data-platform="darwin"] {
+  --titlebar-inset-left: 80px;
+}
+
+/**
+ * For a full-window surface that covers the title bar - the file viewer, the
+ * editor - rather than sitting below it. Without this the filename renders
+ * underneath the close/minimise/zoom buttons and cannot be read or clicked.
+ */
+.titlebar-inset {
+  padding-left: max(var(--titlebar-inset-left), 1rem);
 }
 
 .dark {

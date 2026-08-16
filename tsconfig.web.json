@@ -23,5 +23,10 @@
     "src/renderer/**/*.tsx",
     "../../packages/shared/src/**/*.ts",
     "vendor/audio-player/**/*.ts"
-  ]
+  ],
+  // Same reason as tsconfig.node.json's exclude, now that renderer logic has
+  // unit tests too: Node's test runner needs the .ts extension in an import
+  // specifier, which "moduleResolution": "bundler" rejects. Vite bundles from
+  // the renderer entry point and never reaches a test file.
+  "exclude": ["src/**/*.test.ts"]
 }

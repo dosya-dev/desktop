@@ -75,6 +75,9 @@ function getThumbWindow(activeIdx: number, total: number) {
 }
 
 /** Save via the main process (save dialog → streamed download), with a "Show in Folder" toast. */
+/** Remembers whether the version panel is expanded, across files and launches. */
+const VERSIONS_OPEN_KEY = "dosya_viewer_versions_open";
+
 async function downloadViaDialog(file: ViewerFile, version?: number): Promise<void> {
   try {
     const res = await window.electronAPI.downloadFile(file.id, file.name, version);
@@ -98,6 +101,20 @@ async function downloadViaDialog(file: ViewerFile, version?: number): Promise<vo
 export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps) {
   const [versions, setVersions] = useState<Version[]>([]);
   const [activeVersion, setActiveVersion] = useState(-1);
+
+  // The version list is a 208px column that most files never need - a file with
+  // one version showed an empty panel taking a fifth of the viewer. It now
+  // collapses to the right, leaving a small toggle in the header, and the
+  // choice is remembered.
+  const [versionsOpen, setVersionsOpen] = useState(
+    () => localStorage.getItem(VERSIONS_OPEN_KEY) === "1",
+  );
+  const toggleVersions = useCallback(() => {
+    setVersionsOpen((open) => {
+      localStorage.setItem(VERSIONS_OPEN_KEY, open ? "0" : "1");
+      return !open;
+    });
+  }, []);
   const [closing, setClosing] = useState(false);
 
   const idx = files.findIndex((f) => f.id === file.id);
@@ -201,8 +218,10 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
     <div
       className={`fixed inset-0 z-[300] flex flex-col bg-[var(--color-bg)] transition-opacity duration-200 ${closing ? "opacity-0" : "opacity-100"}`}
     >
-      {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b px-4 py-2.5" style={{ borderColor: "var(--color-border)" }}>
+      {/* Header. `titlebar-inset` keeps the filename clear of the macOS traffic
+          lights: this overlay covers the whole window, title bar included, so
+          without it the name renders underneath the window buttons. */}
+      <div className="titlebar-inset flex shrink-0 items-center justify-between border-b pr-4 py-2.5" style={{ borderColor: "var(--color-border)" }}>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <svg viewBox="0 0 14 14" fill="none" width="14" height="14" className="shrink-0 text-[var(--color-text-muted)]">
             <path d="M1 7s2.5-4.5 6-4.5S13 7 13 7s-2.5 4.5-6 4.5S1 7 1 7z" stroke="currentColor" strokeWidth="1.1" />
@@ -220,6 +239,22 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
           {hasNext && (
             <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(files[idx + 1])} title="Next (→)">
               <ChevronRight size={16} className="text-[var(--color-text-muted)]" />
+            </button>
+          )}
+          {/* The collapsed form of the version panel. Carries the count so it
+              is worth opening only when there is something in there. */}
+          {versions.length > 1 && (
+            <button
+              data-testid="viewer-versions-toggle"
+              onClick={toggleVersions}
+              aria-expanded={versionsOpen}
+              title={versionsOpen ? "Hide versions" : `Versions (${versions.length})`}
+              className={`flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium hover:bg-[var(--color-bg-tertiary)] ${
+                versionsOpen ? "bg-[var(--color-bg-tertiary)] text-[var(--color-text)]" : "text-[var(--color-text-muted)]"
+              }`}
+            >
+              <Clock size={14} />
+              {versions.length}
             </button>
           )}
           <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={onDownload} title="Download">
@@ -240,10 +275,28 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
           <FileContent file={file} files={files} rawUrl={rawUrl} version={previewVersion} onDownload={onDownload} onNavigate={onNavigate} />
         </div>
 
-        {/* Version sidebar */}
-        <aside className="hidden w-52 shrink-0 flex-col border-l bg-[var(--color-bg)] md:flex" style={{ borderColor: "var(--color-border)" }}>
+        {/* Version sidebar. Only mounted when opened from the header toggle -
+            a file with a single version has nothing to show here, and the empty
+            panel was taking a fifth of the viewer from the file itself. */}
+        {/* Conditionally rendered rather than hidden with an attribute: the
+            `md:flex` below sets display:flex, which wins over the user-agent
+            rule behind the `hidden` attribute, so the panel would still have
+            shown at md and up. */}
+        {versionsOpen && versions.length > 1 && (
+        <aside
+          data-testid="viewer-versions-panel"
+          className="hidden w-52 shrink-0 flex-col border-l bg-[var(--color-bg)] md:flex"
+          style={{ borderColor: "var(--color-border)" }}
+        >
           <div className="flex shrink-0 items-center gap-1.5 border-b px-3.5 py-2.5 text-xs font-semibold" style={{ borderColor: "var(--color-border)" }}>
-            <Clock size={12} className="text-[var(--color-text-muted)]" />
+            <button
+              onClick={toggleVersions}
+              title="Collapse versions"
+              aria-label="Collapse versions"
+              className="-ml-1 flex size-5 items-center justify-center rounded hover:bg-[var(--color-bg-tertiary)]"
+            >
+              <ChevronRight size={13} className="text-[var(--color-text-muted)]" />
+            </button>
             Versions
             <div className="ml-auto flex items-center gap-0.5">
               <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>↑</kbd>
@@ -284,6 +337,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
             )}
           </div>
         </aside>
+        )}
       </div>
 
       {/* Thumbnail strip footer */}

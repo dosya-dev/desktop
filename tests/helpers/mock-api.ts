@@ -237,8 +237,38 @@ export async function startMockServer(
       return;
     }
 
+    // Version history. Opt-in by file id so the viewer's version toggle only
+    // appears where a spec asks for it - every other file keeps the single
+    // version it had when there was no endpoint here at all.
+    if (/^\/api\/files\/[^/]+\/versions$/.test(path) && method === "GET") {
+      const id = path.split("/")[3];
+      const count = id.startsWith("file_v") ? 3 : 1;
+      return json({
+        ok: true,
+        current_version: count,
+        versions: Array.from({ length: count }, (_, i) => ({
+          version_number: count - i,
+          size_bytes: 1024 * (count - i),
+          created_at: 1_700_000_000 - i * 86_400,
+          uploader_name: "Test User",
+        })),
+      });
+    }
+
     if (path === "/api/files" && method === "GET") {
-      return json({ ok: true, files: data.mockFiles, total: data.mockFiles.length, page: 1, per_page: 50, total_pages: 1 });
+      // Breadcrumbs are opt-in via a `deep_` folder id so that every existing
+      // spec keeps seeing the empty trail it was written against. The real API
+      // returns this array on every folder listing; the mock omitted it
+      // entirely, which is why nothing caught the trail overrunning the
+      // toolbar on a deeply nested folder.
+      const folderId = url.searchParams.get("folder_id") ?? "";
+      const breadcrumbs = folderId.startsWith("deep_")
+        ? Array.from({ length: 6 }, (_, i) => ({
+            id: `deep_${i + 1}`,
+            name: `Quarterly Reports And Supporting Material ${i + 1}`,
+          }))
+        : [];
+      return json({ ok: true, files: data.mockFiles, breadcrumbs, total: data.mockFiles.length, page: 1, per_page: 50, total_pages: 1 });
     }
     if ((path === "/api/files/folder" || path === "/api/folders") && method === "POST") {
       readBody(req).then((body) => {

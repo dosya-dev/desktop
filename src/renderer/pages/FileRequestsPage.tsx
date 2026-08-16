@@ -177,34 +177,60 @@ export function FileRequestsPage() {
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">Create a request to receive files from anyone</p>
         </div>
       ) : (
-        <div className="space-y-3">
+        // One bordered card of rows, matching apps/web's file requests list.
+        // Previously each request was its own floating card, which at three or
+        // more requests read as a pile of boxes rather than a list.
+        <div className="overflow-hidden rounded-xl border" style={{ borderColor: "var(--color-border)" }}>
           {requests.map((req) => {
             const status = requestStatus(req, now);
+            const revoked = req.is_revoked === 1;
+            const title = req.title || "Untitled request";
             return (
-              <div key={req.id} data-testid={`request-${req.id}`} className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-                <div className="flex items-start justify-between">
-                  <div>
-                    <p className="text-sm font-semibold">{req.title || "Untitled request"}</p>
-                    {req.message && (
-                      <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">{req.message}</p>
+              <div
+                key={req.id}
+                data-testid={`request-${req.id}`}
+                className={`flex items-center gap-3 border-b px-4 py-3.5 transition-colors last:border-b-0 hover:bg-[var(--color-bg-secondary)] ${revoked ? "opacity-60" : ""}`}
+                style={{ borderColor: "var(--color-border)" }}
+              >
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-bg-tertiary)] text-[var(--color-text-muted)]">
+                  <Mail size={16} />
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <p className={`truncate text-sm font-medium ${revoked ? "line-through" : ""}`} title={title}>
+                    {title}
+                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_STYLE[status]}`}>
+                      {STATUS_LABEL[status]}
+                    </span>
+                    <span className="rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)]">
+                      {req.upload_count} file{req.upload_count === 1 ? "" : "s"}
+                    </span>
+                    {req.is_password_protected === 1 && (
+                      <span className="flex items-center gap-1 rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)]">
+                        <Lock size={9} /> Password
+                      </span>
                     )}
+                    <span className="truncate text-[11px] text-[var(--color-text-muted)]">
+                      {req.folder_name ?? (req.folder_id ? "Unknown folder" : "Workspace root")}
+                    </span>
+                    {req.expires_at && (
+                      <span className="flex items-center gap-1 text-[11px] text-[var(--color-text-muted)]">
+                        <Clock size={10} /> Expires {formatDate(req.expires_at)}
+                      </span>
+                    )}
+                    <span className="text-[11px] text-[var(--color-text-muted)]">
+                      Created {formatRelative(req.created_at)}
+                    </span>
                   </div>
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLE[status]}`}>
-                    {STATUS_LABEL[status]}
-                  </span>
                 </div>
-                <div className="mt-3 flex items-center gap-4 text-xs text-[var(--color-text-muted)]">
-                  <span className="flex items-center gap-1"><FileUp size={11} /> {req.upload_count} uploads</span>
-                  <span>{req.folder_name ?? (req.folder_id ? "Unknown folder" : "Workspace root")}</span>
-                  {req.expires_at && <span className="flex items-center gap-1"><Clock size={11} /> Expires {formatDate(req.expires_at)}</span>}
-                  {req.is_password_protected === 1 && <span className="flex items-center gap-1"><Lock size={11} /> Password</span>}
-                  <span>{formatRelative(req.created_at)}</span>
-                </div>
-                <div className="mt-3 flex items-center gap-2 border-t pt-3" style={{ borderColor: "var(--color-border)" }}>
+
+                <div className="flex shrink-0 items-center gap-1.5">
                   <button
                     data-testid={`request-${req.id}-open`}
                     onClick={() => setDetailId(req.id)}
-                    className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs hover:bg-[var(--color-bg-secondary)]"
+                    className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs hover:bg-[var(--color-bg-tertiary)]"
                     style={{ borderColor: "var(--color-border)" }}
                   >
                     Details <ChevronRight size={11} />
@@ -212,19 +238,19 @@ export function FileRequestsPage() {
                   <button
                     data-testid={`request-${req.id}-copy`}
                     onClick={() => { navigator.clipboard.writeText(req.url); toast.success("Link copied"); }}
-                    className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs hover:bg-[var(--color-bg-secondary)]"
+                    className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs hover:bg-[var(--color-bg-tertiary)]"
                     style={{ borderColor: "var(--color-border)" }}
                   >
                     <Copy size={11} /> Copy link
                   </button>
-                  {req.is_revoked === 0 && (
+                  {!revoked && (
                     <button
                       data-testid={`request-${req.id}-close`}
                       onClick={() => setCloseTarget(req)}
-                      className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs text-[var(--color-danger)] hover:bg-red-50"
-                      style={{ borderColor: "var(--color-border)" }}
+                      className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10"
+                      style={{ borderColor: "color-mix(in oklab, var(--color-danger) 30%, transparent)" }}
                     >
-                      <Lock size={11} /> Close request
+                      <Lock size={11} /> Close
                     </button>
                   )}
                 </div>
