@@ -235,14 +235,16 @@ export function FileRequestsPage() {
                   >
                     Details <ChevronRight size={11} />
                   </button>
-                  <button
-                    data-testid={`request-${req.id}-copy`}
-                    onClick={() => { navigator.clipboard.writeText(req.url); toast.success("Link copied"); }}
-                    className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs hover:bg-[var(--color-bg-tertiary)]"
-                    style={{ borderColor: "var(--color-border)" }}
-                  >
-                    <Copy size={11} /> Copy link
-                  </button>
+                  {!revoked && (
+                    <button
+                      data-testid={`request-${req.id}-copy`}
+                      onClick={() => { navigator.clipboard.writeText(req.url); toast.success("Link copied"); }}
+                      className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs hover:bg-[var(--color-bg-tertiary)]"
+                      style={{ borderColor: "var(--color-border)" }}
+                    >
+                      <Copy size={11} /> Copy link
+                    </button>
+                  )}
                   {!revoked && (
                     <button
                       data-testid={`request-${req.id}-close`}

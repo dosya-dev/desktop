@@ -191,7 +191,9 @@ export function GroupsPage() {
                 )}
               </div>
 
-              {/* Recolour */}
+              {/* Recolour - shown while editing: a set-and-forget control has
+                  no claim to permanent card space. */}
+              {editingId === g.id && (
               <div className="mt-2 flex items-center gap-1.5">
                 {SWATCHES.map((c) => (
                   <button
@@ -204,6 +206,7 @@ export function GroupsPage() {
                   />
                 ))}
               </div>
+              )}
 
               {g.folders.length === 0 && g.files.length === 0 ? (
                 <p className="mt-3 text-xs text-[var(--color-text-muted)]" data-testid={`group-${g.id}-empty`}>

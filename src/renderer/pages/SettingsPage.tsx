@@ -244,6 +244,9 @@ export function SettingsPage() {
         {tab === "limits" && (
           <Section title="Hard limits">
             <div className="space-y-4 max-w-sm">
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Set any limit to 0 to leave it unlimited.
+              </p>
               <NumberInput
                 label="Max upload file size (GB)"
                 value={maxFileSize}

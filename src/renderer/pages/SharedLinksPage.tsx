@@ -174,16 +174,18 @@ export function SharedLinksPage() {
                 layout. With auto layout the File column grows to fit its
                 longest cell and shoves Region/Views/Expiry/Status off the
                 edge; fixed layout honours the widths below and gives File
-                whatever is left, so the name truncates instead. */}
+                whatever is left, so the name truncates instead. The fixed
+                widths are deliberately tight: at a narrow window every spare
+                pixel they hold is stolen from the filename. */}
             <table className="w-full table-fixed text-left text-sm">
               <thead>
                 <tr className="border-b text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
                   <th className="py-2 font-medium">File</th>
                   <th className="py-2 font-medium w-20">Region</th>
-                  <th className="py-2 font-medium w-16">Views</th>
-                  <th className="py-2 font-medium w-28">Expiry</th>
-                  <th className="py-2 font-medium w-24">Status</th>
-                  <th className="py-2 w-28"></th>
+                  <th className="py-2 font-medium w-14">Views</th>
+                  <th className="py-2 font-medium w-24">Expiry</th>
+                  <th className="py-2 font-medium w-20">Status</th>
+                  <th className="py-2 w-16"></th>
                 </tr>
               </thead>
               <tbody>

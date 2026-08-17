@@ -51,7 +51,7 @@ export function TwoFactorPage() {
   }
 
   return (
-    <div className="bg-grid flex h-screen flex-col items-center justify-center bg-[var(--color-bg-secondary)]">
+    <div className="bg-grid flex h-screen flex-col items-center overflow-y-auto py-8 [justify-content:safe_center] bg-[var(--color-bg-secondary)]">
       <div className="mb-6 flex items-center gap-2.5">
         <img src={logoSvg} alt="dosya.dev" className="h-9 w-9" />
         <span className="text-xl font-semibold">dosya.dev</span>

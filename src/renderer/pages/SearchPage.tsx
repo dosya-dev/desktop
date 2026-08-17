@@ -70,6 +70,17 @@ export function SearchPage() {
     setInput(queryParam);
   }, [queryParam]);
 
+  // Live search: react to typing after a pause, not only to a secret Enter.
+  useEffect(() => {
+    const trimmed = input.trim();
+    if (trimmed === queryParam) return;
+    const t = setTimeout(() => {
+      if (trimmed) setSearchParams({ q: trimmed }, { replace: true });
+      else if (queryParam) setSearchParams({}, { replace: true });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [input, queryParam, setSearchParams]);
+
   const { data, isLoading, isFetching } = useQuery({
     queryKey: ["search", active?.id, queryParam],
     queryFn: () =>
@@ -211,9 +222,11 @@ export function SearchPage() {
             {showFiles && files.length > 0 && (
               <ResultSection title="Files" count={files.length}>
                 {files.map((f) => (
-                  <div
+                  <button
+                    type="button"
                     key={f.id}
-                    className="flex cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 transition-colors hover:bg-[var(--color-bg-secondary)]"
+                    onClick={() => navigate(f.folder_id ? `/files?folder=${f.folder_id}` : "/files")}
+                    className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-bg-secondary)]"
                   >
                     <FileIcon name={f.name} size={20} className="shrink-0" />
                     <div className="min-w-0 flex-1">
@@ -226,7 +239,7 @@ export function SearchPage() {
                     <span className="text-xs text-[var(--color-text-muted)]">
                       {formatRelative(f.created_at)}
                     </span>
-                  </div>
+                  </button>
                 ))}
               </ResultSection>
             )}
@@ -235,10 +248,11 @@ export function SearchPage() {
             {showFolders && folders.length > 0 && (
               <ResultSection title="Folders" count={folders.length}>
                 {folders.map((f) => (
-                  <div
+                  <button
+                    type="button"
                     key={f.id}
                     onClick={() => navigate(`/files?folder=${f.id}`)}
-                    className="flex cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 transition-colors hover:bg-[var(--color-bg-secondary)]"
+                    className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-bg-secondary)]"
                   >
                     <FolderIcon fileCount={f.file_count} size={20} className="shrink-0" />
                     <div className="min-w-0 flex-1">
@@ -250,7 +264,7 @@ export function SearchPage() {
                     <span className="text-xs text-[var(--color-text-muted)]">
                       {formatRelative(f.created_at)}
                     </span>
-                  </div>
+                  </button>
                 ))}
               </ResultSection>
             )}
@@ -259,10 +273,11 @@ export function SearchPage() {
             {showShared && shared.length > 0 && (
               <ResultSection title="Shared links" count={shared.length}>
                 {shared.map((s) => (
-                  <div
+                  <button
+                    type="button"
                     key={s.link_id}
                     onClick={() => navigate("/shared")}
-                    className="flex cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 transition-colors hover:bg-[var(--color-bg-secondary)]"
+                    className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-bg-secondary)]"
                   >
                     <Link2 size={18} className="shrink-0 text-[var(--color-text-muted)]" />
                     <div className="min-w-0 flex-1">
@@ -295,7 +310,7 @@ export function SearchPage() {
                     >
                       {s.status}
                     </span>
-                  </div>
+                  </button>
                 ))}
               </ResultSection>
             )}
@@ -304,9 +319,11 @@ export function SearchPage() {
             {showRequests && requests.length > 0 && (
               <ResultSection title="File requests" count={requests.length}>
                 {requests.map((r) => (
-                  <div
+                  <button
+                    type="button"
                     key={r.id}
-                    className="flex cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 transition-colors hover:bg-[var(--color-bg-secondary)]"
+                    onClick={() => navigate("/file-requests")}
+                    className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-bg-secondary)]"
                   >
                     <Mail size={18} className="shrink-0 text-[var(--color-text-muted)]" />
                     <div className="min-w-0 flex-1">
@@ -318,7 +335,7 @@ export function SearchPage() {
                     <span className="text-xs text-[var(--color-text-muted)]">
                       {formatRelative(r.created_at)}
                     </span>
-                  </div>
+                  </button>
                 ))}
               </ResultSection>
             )}

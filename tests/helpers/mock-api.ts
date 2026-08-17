@@ -139,8 +139,15 @@ export async function startMockServer(
     if (path === "/api/me/api-keys" && method === "GET") return json({ ok: true, keys: [] });
     if (path === "/api/me/change-password" && method === "POST") return json({ ok: true });
     if (path === "/api/me/avatar") {
+      // A real (1x1 transparent) PNG, not an empty body: an invalid image
+      // fires the renderer's onError fallback and hides the <img>, which is
+      // graceful degradation in the app but a lie in a fixture - the real API
+      // serves decodable bytes.
       res.writeHead(200, { "Content-Type": "image/png", ...corsHeaders });
-      return res.end(Buffer.from([]));
+      return res.end(Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+        "base64",
+      ));
     }
     if (path === "/api/auth/login" && method === "POST") return json({ ok: true, user: data.mockUser });
     if (path === "/api/auth/signup" && method === "POST") return json({ ok: true });

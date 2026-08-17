@@ -9,9 +9,9 @@ export function Modal({
   maxWidth?: number;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+    <div className="anim-modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div
-        className="w-full rounded-xl bg-[var(--color-bg)] p-6 shadow-xl"
+        className="anim-modal-panel w-full rounded-xl bg-[var(--color-bg)] p-6 shadow-xl"
         style={{ maxWidth }}
         onClick={(e) => e.stopPropagation()}
       >

@@ -921,12 +921,18 @@ export function FileBrowserPage() {
           <div className="flex rounded-lg border" style={{ borderColor: "var(--color-border)" }}>
             <button
               onClick={() => setViewMode("table")}
+              aria-label="List view"
+              aria-pressed={viewMode === "table"}
+              title="List view"
               className={`p-1.5 ${viewMode === "table" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
             >
               <LayoutList size={16} />
             </button>
             <button
               onClick={() => setViewMode("card")}
+              aria-label="Grid view"
+              aria-pressed={viewMode === "card"}
+              title="Grid view"
               className={`p-1.5 ${viewMode === "card" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
             >
               <LayoutGrid size={16} />
@@ -1147,6 +1153,7 @@ export function FileBrowserPage() {
                 <th className="w-8 py-2 pl-3">
                   <input
                     type="checkbox"
+                    aria-label="Select all"
                     checked={totalSelected > 0 && selected.size >= selectableFiles.length && selectedFolders.size >= folders.length && (selectableFiles.length + folders.length) > 0}
                     onChange={(e) => {
                       if (e.target.checked) selectAll();
@@ -1175,6 +1182,7 @@ export function FileBrowserPage() {
                   <td className="py-2 pl-3" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
+                      aria-label={`Select ${folder.name}`}
                       checked={selectedFolders.has(folder.id)}
                       onChange={() => toggleSelectFolder(folder.id)}
                     />
@@ -1190,8 +1198,8 @@ export function FileBrowserPage() {
                             </span>
                             <span className="truncate font-medium" title={folder.name}>{folder.name}</span>
                             <span className="shrink-0 text-xs text-[var(--color-text-muted)]">{folder.file_count} files</span>
-                            {folder.lock_mode !== "none" && (
-                              <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />
+                            {!!folder.lock_mode && folder.lock_mode !== "none" && (
+                              <span title="Locked" className="inline-flex shrink-0"><Lock size={12} className="text-[var(--color-text-muted)]" /></span>
                             )}
                             {!!folder.is_hidden && (
                               <span title={hiddenTitle(folder.hidden_mode)} className="inline-flex shrink-0"><EyeOff size={12} className="text-[var(--color-text-muted)]" /></span>
@@ -1212,6 +1220,7 @@ export function FileBrowserPage() {
                         e.stopPropagation();
                         setContextMenu({ x: e.clientX, y: e.clientY, item: { id: folder.id, name: folder.name, kind: "folder" } });
                       }}
+                      aria-label={`Actions for ${folder.name}`}
                       className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]"
                     >
                       <MoreHorizontal size={14} />
@@ -1240,6 +1249,7 @@ export function FileBrowserPage() {
                     <td className="py-2 pl-3" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
+                        aria-label={`Select ${file.name}`}
                         checked={isSel}
                         onChange={() => toggleSelect(file.id)}
                       />
@@ -1261,8 +1271,8 @@ export function FileBrowserPage() {
                               {(file.current_version ?? 1) > 1 && (
                                 <span className="shrink-0 rounded bg-[var(--color-bg-tertiary)] px-1 text-[9px] font-medium">v{file.current_version}</span>
                               )}
-                              {file.lock_mode !== "none" && (
-                                <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />
+                              {!!file.lock_mode && file.lock_mode !== "none" && (
+                                <span title="Locked" className="inline-flex shrink-0"><Lock size={12} className="text-[var(--color-text-muted)]" /></span>
                               )}
                               {!!file.is_hidden && (
                                 <span title={hiddenTitle(file.hidden_mode)} className="inline-flex shrink-0"><EyeOff size={12} className="text-[var(--color-text-muted)]" /></span>
@@ -1292,6 +1302,7 @@ export function FileBrowserPage() {
                           e.stopPropagation();
                           setContextMenu({ x: e.clientX, y: e.clientY, item: { id: file.id, name: file.name, kind: "file" } });
                         }}
+                        aria-label={`Actions for ${file.name}`}
                         className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]"
                       >
                         <MoreHorizontal size={14} />

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { FileIcon } from "@/components/files/FileIcon";
 import { useNavigate } from "react-router-dom";
+import { actionLabel } from "@/lib/activity-labels";
 import { api } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useSyncPairs } from "@/lib/sync-store";
@@ -308,7 +309,7 @@ export function DashboardPage() {
                       <p className="text-sm">
                         <span className="font-medium">{a.user_name}</span>{" "}
                         <span className="text-[var(--color-text-secondary)]">
-                          {a.action}
+                          {actionLabel(a.action)}
                         </span>
                       </p>
                       <p className="text-xs text-[var(--color-text-muted)]">

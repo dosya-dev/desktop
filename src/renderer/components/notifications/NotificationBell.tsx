@@ -97,8 +97,8 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
       {open && (
         <div
           data-testid="notification-dropdown"
-          className={`absolute ${align === "left" ? "left-0" : "right-0"} top-full z-50 mt-2 flex max-h-[70vh] w-80 flex-col overflow-hidden rounded-xl border shadow-xl`}
-          style={{ background: "var(--color-bg)", borderColor: "var(--color-border)" }}
+          className={`anim-pop-in absolute ${align === "left" ? "left-0" : "right-0"} top-full z-50 mt-2 flex max-h-[70vh] w-80 flex-col overflow-hidden rounded-xl border shadow-xl`}
+          style={{ background: "var(--color-bg)", borderColor: "var(--color-border)", transformOrigin: align === "left" ? "top left" : "top right" }}
         >
           <div className="flex items-center justify-between border-b px-3 py-2" style={{ borderColor: "var(--color-border)" }}>
             <span className="text-sm font-semibold">Notifications</span>

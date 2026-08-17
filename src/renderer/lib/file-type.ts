@@ -1,3 +1,5 @@
+import { formatBytes, formatRelative } from "./format";
+
 // Ported from apps/web/src/lib/helpers.ts (subset) - keep in sync with the web copy.
 // File-type detection + small formatting helpers used by the files surfaces.
 
@@ -107,22 +109,16 @@ export function isOfficeFile(name: string): boolean {
   return OFFICE_EXTS.has(extOf(name));
 }
 
-export function humanSize(b: number): string {
-  if (b < 1024) return b + " B";
-  if (b < 1048576) return (b / 1024).toFixed(0) + " KB";
-  if (b < 1073741824) return (b / 1048576).toFixed(1) + " MB";
-  return (b / 1073741824).toFixed(2) + " GB";
+export function humanSize(b: number | null | undefined): string {
+  if (typeof b !== "number" || !Number.isFinite(b)) return "-";
+  return formatBytes(b);
 }
 
-export function timeAgo(ts: number): string {
-  const diff = Math.floor(Date.now() / 1000) - ts;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-  if (diff < 604800) return Math.floor(diff / 86400) + "d ago";
-  const d = new Date(ts * 1000);
-  const m = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${m[d.getMonth()]} ${d.getDate()}`;
+export function timeAgo(ts: number | string | null | undefined): string {
+  if (ts == null) return "-";
+  const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
+  if (Number.isNaN(d.getTime())) return "-";
+  return formatRelative(ts);
 }
 
 export function initials(name: string | null | undefined): string {

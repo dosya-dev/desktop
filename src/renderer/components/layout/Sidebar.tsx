@@ -499,6 +499,7 @@ export function Sidebar() {
             bottom: 42,
           }}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           {collapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
         </button>
@@ -682,11 +683,12 @@ export function Sidebar() {
           <div className="fixed inset-0 z-40" onClick={() => setFlyout(null)} />
           <div
             data-testid="nav-files-flyout"
-            className="fixed z-50 w-52 overflow-y-auto rounded-lg border p-1.5 shadow-lg"
+            className="anim-pop-in fixed z-50 w-52 overflow-y-auto rounded-lg border p-1.5 shadow-lg"
             style={{
               top: flyout.top,
               left: flyout.left,
               maxHeight: FLYOUT_MAX_H,
+              transformOrigin: "top left",
               borderColor: "var(--color-border)",
               background: "var(--color-bg)",
             }}
@@ -739,11 +741,10 @@ export function Sidebar() {
             title={collapsed ? user?.name || "Profile" : "View profile"}
           >
             {user?.avatar_url ? (
-              <img
-                key={user.id}
+              <SidebarAvatar
+                key={`${user.id}-${avatarVersion}`}
                 src={avatarUrl(apiBase, user.id, avatarVersion)}
-                alt={user.name}
-                className="h-8 w-8 shrink-0 rounded-full object-cover"
+                name={user.name}
               />
             ) : (
               <div
@@ -844,5 +845,29 @@ export function Sidebar() {
       </div>{/* end inner scrollable */}
     </aside>
     </>
+  );
+}
+
+// A failed avatar fetch must degrade to initials, not to the browser's
+// broken-image glyph; keyed by user+version so a new upload retries the image.
+function SidebarAvatar({ src, name }: { src: string; name: string | undefined }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <div
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-medium text-white"
+        style={{ background: "var(--color-primary)" }}
+      >
+        {name?.charAt(0).toUpperCase() || "?"}
+      </div>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={name ?? "Profile"}
+      className="h-8 w-8 shrink-0 rounded-full object-cover"
+      onError={() => setFailed(true)}
+    />
   );
 }

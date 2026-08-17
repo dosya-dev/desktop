@@ -201,6 +201,13 @@ export function TeamPage() {
                   </tr>
                 </thead>
                 <tbody>
+                  {members.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-10 text-center text-sm text-[var(--color-text-muted)]">
+                        No members yet. Invite teammates by email to give them access.
+                      </td>
+                    </tr>
+                  )}
                   {members.map((m) => {
                     const role = ROLE_LABELS[m.role_id] ?? { label: m.role_id, color: "#6b7280", icon: null };
                     return (

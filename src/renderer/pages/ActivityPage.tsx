@@ -5,6 +5,8 @@ import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { formatRelative } from "@/lib/format";
+import { actionLabel, actionColor } from "@/lib/activity-labels";
+import { ErrorPanel } from "@/components/ErrorPanel";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Activity {
@@ -38,46 +40,6 @@ interface ActivityResponse {
   };
 }
 
-const ACTION_LABELS: Record<string, string> = {
-  file_uploaded: "uploaded a file",
-  file_deleted: "deleted a file",
-  file_permanently_deleted: "permanently deleted a file",
-  file_restored: "restored a file",
-  file_renamed: "renamed a file",
-  file_moved: "moved a file",
-  file_copied: "copied a file",
-  file_shared: "shared a file",
-  file_shared_email: "shared a file via email",
-  file_request_created: "created a file request",
-  file_request_uploaded: "received a file via request",
-  folder_renamed: "renamed a folder",
-  folder_moved: "moved a folder",
-  folder_created: "created a folder",
-  member_invited: "invited a member",
-  member_joined: "joined the workspace",
-  member_removed: "removed a member",
-};
-
-const ACTION_COLORS: Record<string, string> = {
-  file_uploaded: "#22c55e",
-  file_deleted: "#ef4444",
-  file_permanently_deleted: "#991b1b",
-  file_restored: "#2563EB",
-  file_shared: "#7C3AED",
-  file_shared_email: "#7C3AED",
-  file_request_created: "#D97706",
-  file_request_uploaded: "#16a34a",
-  folder_created: "#22c55e",
-  folder_renamed: "#706e69",
-  folder_moved: "#706e69",
-  file_renamed: "#706e69",
-  file_moved: "#706e69",
-  file_copied: "#3b82f6",
-  member_invited: "#D97706",
-  member_joined: "#16a34a",
-  member_removed: "#ef4444",
-};
-
 function getInitials(name: string | null): string {
   if (!name) return "?";
   const parts = name.trim().split(/\s+/);
@@ -96,7 +58,7 @@ export function ActivityPage() {
     window.electronAPI.getApiBase().then(setApiBase);
   }, []);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["activity", active?.id, page],
     queryFn: () =>
       api.get<ActivityResponse>(
@@ -114,9 +76,15 @@ export function ActivityPage() {
       <div>
         <h1 className="text-2xl font-semibold">Activity log</h1>
         <p className="text-sm text-[var(--color-text-muted)]">
-          {pagination
-            ? `${pagination.total} activities in this workspace`
-            : "Loading..."}
+          {isLoading
+            ? "Loading..."
+            : isError
+              ? "Couldn't load activity. Check your connection and try again."
+              : pagination
+                ? `${pagination.total} activities in this workspace`
+                : activities.length > 0
+                  ? `${activities.length} activities`
+                  : "No activity yet"}
         </p>
       </div>
 
@@ -141,14 +109,16 @@ export function ActivityPage() {
               </div>
             ))}
           </div>
+        ) : isError ? (
+          <ErrorPanel message="Couldn't load activity." onRetry={() => refetch()} />
         ) : activities.length === 0 ? (
           <div className="py-16 text-center text-sm text-[var(--color-text-muted)]">
             No activity yet.
           </div>
         ) : (
           activities.map((a, i) => {
-            const label = ACTION_LABELS[a.action] ?? a.action.replace(/_/g, " ");
-            const color = ACTION_COLORS[a.action] ?? "#706e69";
+            const label = actionLabel(a.action);
+            const color = actionColor(a.action);
             const initials = getInitials(a.user_name);
             const userName = a.user_name ?? "Someone";
 

@@ -224,6 +224,26 @@ body {
   }
 }
 
+/* Anchored surfaces (dropdowns, flyouts) enter with ctx-in; set
+   transform-origin at the trigger so the surface grows from where the user
+   clicked. Dialogs get their own slightly softer pair. The reduced-motion
+   block below zeroes all of these. */
+.anim-pop-in {
+  animation: ctx-in 150ms ease-out;
+}
+.anim-modal-overlay {
+  animation: modal-fade 150ms ease-out;
+}
+.anim-modal-panel {
+  animation: modal-in 200ms ease-out;
+}
+@keyframes modal-fade {
+  from { opacity: 0; }
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.96); }
+}
+
 /* ── Accessibility: reduced motion ──────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {

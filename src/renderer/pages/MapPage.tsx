@@ -356,6 +356,12 @@ export function MapPage() {
         </div>
       )}
 
+      {!loading && !hasBasemap && (
+        <div className="absolute bottom-4 left-4 z-10 rounded-lg border bg-[var(--color-bg)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] shadow-sm" style={{ borderColor: "var(--color-border)" }}>
+          Map background unavailable right now. Your pins still work.
+        </div>
+      )}
+
       {!loading && visiblePins.length === 0 && (
         pins.length === 0 && counts.pending === 0 ? (
           // Genuinely no located items anywhere - distinct from the two cases

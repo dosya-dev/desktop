@@ -427,7 +427,7 @@ export function UploadPage() {
           <p className="text-sm text-[var(--color-text-muted)]">
             {selectedFolder.id
               ? <>Uploading to <strong className="text-[var(--color-text)]">{selectedFolder.name}</strong> · encrypted in transit</>
-              : "Files are end-to-end encrypted in transit. You pick the region."}
+              : "Files are encrypted in transit (TLS 1.3). You pick the region."}
           </p>
         </div>
 
@@ -620,23 +620,34 @@ export function UploadPage() {
                 {regions.length} available
               </span>
             </p>
-            <div className="grid grid-cols-1 gap-1.5 max-h-60 overflow-y-auto">
+            <div role="radiogroup" aria-label="Storage region" className="grid grid-cols-1 gap-1.5 max-h-60 overflow-y-auto">
               {sortedRegions.map((r) => (
                 <button
                   key={r.code}
+                  role="radio"
+                  aria-checked={(!!r.code && selectedRegion === r.code)}
                   onClick={() => setSelectedRegion(r.code)}
                   className={`flex items-start rounded-lg border px-3 py-2 text-left transition-colors ${
-                    selectedRegion === r.code
+                    (!!r.code && selectedRegion === r.code)
                       ? "border-[var(--color-primary)] bg-[var(--color-primary)]/5"
                       : "hover:bg-[var(--color-bg-secondary)]"
                   }`}
                   style={{
                     borderColor:
-                      selectedRegion === r.code ? "var(--color-primary)" : "var(--color-border)",
+                      (!!r.code && selectedRegion === r.code) ? "var(--color-primary)" : "var(--color-border)",
                   }}
                 >
+                  <span
+                    aria-hidden="true"
+                    className="mr-2 mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border"
+                    style={{ borderColor: (!!r.code && selectedRegion === r.code) ? "var(--color-primary)" : "var(--color-border)" }}
+                  >
+                    {(!!r.code && selectedRegion === r.code) && (
+                      <span className="h-2 w-2 rounded-full" style={{ background: "var(--color-primary)" }} />
+                    )}
+                  </span>
                   <div>
-                    <p className={`text-xs font-medium ${selectedRegion === r.code ? "text-[var(--color-primary)]" : ""}`}>
+                    <p className={`text-xs font-medium ${(!!r.code && selectedRegion === r.code) ? "text-[var(--color-primary)]" : ""}`}>
                       {r.city}, {r.country}
                     </p>
                     <p className="text-[10px] text-[var(--color-text-muted)]">{r.code}</p>

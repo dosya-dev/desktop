@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { ErrorPanel } from "@/components/ErrorPanel";
 import { useNavigate } from "react-router-dom";
 import { api, apiBase } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -12,7 +13,7 @@ export function WorkspaceDashboardPage() {
   const navigate = useNavigate();
   const { workspaces, active, setActive } = useWorkspace();
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["workspace-dashboard"],
     queryFn: () => api.get<{ ok: boolean } & WorkspaceDashboardData>("/api/workspace-dashboard"),
     staleTime: 60_000,
@@ -25,12 +26,8 @@ export function WorkspaceDashboardPage() {
   };
 
   if (isLoading) return <WorkspaceDashboardSkeleton />;
-  if (isError || !data) {
-    return (
-      <div className="py-10 text-center text-sm text-[var(--color-text-secondary)]">
-        Failed to load your workspace dashboard.
-      </div>
-    );
+  if (isError || !data?.total) {
+    return <ErrorPanel message="Couldn't load your workspace dashboard." onRetry={() => refetch()} />;
   }
 
   const { total, sources, owned, shared } = data;

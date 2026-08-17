@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-17T00:00:00Z",
+  "title": "Design System: dosya.dev Desktop",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Brand Green",
+        "canonical": "oklch(0.6236 0.1833 147.4139)",
+        "tonalRamp": ["oklch(0.15 0.05 147)", "oklch(0.28 0.09 147)", "oklch(0.40 0.13 147)", "oklch(0.52 0.16 147)", "oklch(0.6236 0.1833 147.4139)", "oklch(0.7007 0.1804 148.9872)", "oklch(0.82 0.12 148)", "oklch(0.95 0.05 148)"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Cool Blue-Grey (light set)",
+        "canonical": "oklch(0.9813 0.0100 238.5069)",
+        "tonalRamp": ["oklch(0.1807 0.0207 239.8394)", "oklch(0.4501 0.0191 239.4931)", "oklch(0.8999 0.0196 240.7516)", "oklch(0.9396 0.0204 243.4220)", "oklch(0.9813 0.0100 238.5069)"]
+      },
+      "surface-dark": {
+        "role": "neutral",
+        "displayName": "Cool Blue-Grey (dark set)",
+        "canonical": "oklch(0.1289 0.0199 238.9108)",
+        "tonalRamp": ["oklch(0.1289 0.0199 238.9108)", "oklch(0.2414 0.0196 239.1401)", "oklch(0.2791 0.0203 242.6079)", "oklch(0.6499 0.0194 240.1577)", "oklch(0.9513 0.0101 238.5127)"]
+      },
+      "workspace-accents": {
+        "role": "tertiary",
+        "displayName": "Workspace Accent Set (categorical, theme-independent)",
+        "canonical": "#22c55e",
+        "tonalRamp": ["#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#14b8a6"]
+      },
+      "viewer-charcoal": {
+        "role": "neutral",
+        "displayName": "Code Viewer Island (fixed dark, both modes)",
+        "canonical": "#1e1e1e",
+        "tonalRamp": ["#0a0a0a", "#1e1e1e", "#d4d4d4"]
+      },
+      "map-pin-neutrals": {
+        "role": "neutral",
+        "displayName": "Map Pin Fixed Neutrals (MapLibre DOM markers)",
+        "canonical": "#dfe3e8",
+        "tonalRamp": ["#64748b", "#d9dee4", "#dfe3e8", "#eef2f6", "#eef2f7", "#ffffff"]
+      },
+      "find-highlight": {
+        "role": "tertiary",
+        "displayName": "In-File Find Amber (fixed for visibility)",
+        "canonical": "rgba(255, 153, 0, 0.85)",
+        "tonalRamp": ["rgba(255, 213, 0, 0.35)", "rgba(255, 153, 0, 0.85)", "#1a1a1a"]
+      },
+      "boot-fallback-grey": {
+        "role": "neutral",
+        "displayName": "Boot Failure Fallback Grey",
+        "canonical": "#666666"
+      },
+      "role-badges": {
+        "role": "tertiary",
+        "displayName": "Role Badge Set (owner/admin/member/viewer)",
+        "canonical": "#6b7280",
+        "tonalRamp": ["#22c55e", "#3b82f6", "#6b7280", "#a16207"]
+      },
+      "danger-tint": {
+        "role": "tertiary",
+        "displayName": "Danger Tint (red-50 wash behind deletion banner, paused chip)",
+        "canonical": "rgb(254 242 242)",
+        "tonalRamp": ["rgb(254 242 242)", "#ef4444"]
+      }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Headline", "purpose": "Page titles (Settings, Sync)." },
+      "title": { "displayName": "Title", "purpose": "Section headers, modal titles, empty-state headings." },
+      "body": { "displayName": "Body", "purpose": "The 14px default for all UI text: rows, inputs, buttons, nav." },
+      "label": { "displayName": "Label", "purpose": "12px metadata, table headers, badges; uppercase + tracking-wide for group headers." },
+      "mono": { "displayName": "Mono", "purpose": "Filenames in viewer chrome, code/text content, hashes, kbd hints." }
+    },
+    "shadows": [
+      { "name": "overlay", "value": "0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)", "purpose": "Modals and dialogs (Tailwind shadow-xl), always over a bg-black/30 scrim." },
+      { "name": "popover", "value": "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)", "purpose": "Dropdowns, context menus, sidebar flyouts (Tailwind shadow-lg)." },
+      { "name": "whisper", "value": "0 1px 2px 0 rgb(0 0 0 / 0.05)", "purpose": "Rare small raised affordances (Tailwind shadow-sm). Never on cards at rest." },
+      { "name": "pin", "value": "drop-shadow(0 2px 3px rgba(0,0,0,.35))", "purpose": "Map photo pins floating over the map canvas (filter, not box-shadow)." }
+    ],
+    "motion": [
+      { "name": "theme-sweep", "value": "520ms cubic-bezier(0.65, 0, 0.35, 1)", "purpose": "Left-to-right clip-path wipe on user-initiated theme changes (View Transitions API); instant under reduced motion." },
+      { "name": "pill-travel", "value": "top,height,left,width 200ms ease-out", "purpose": "The sidebar's single active pill travelling between nav rows; motion-reduce drops the travel." },
+      { "name": "ctx-in", "value": "opacity + scale(0.95)/translateY(-4px) to rest", "purpose": "Context menu / popover entry." },
+      { "name": "pin-shimmer", "value": "1.15s ease-in-out infinite", "purpose": "Loading skeleton sweep on map pin photos." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single affirmative action on a surface; solid brand green.",
+      "html": "<button class=\"ds-btn-primary\">Sign in</button>",
+      "css": ".ds-btn-primary { background: var(--color-primary, oklch(0.6236 0.1833 147.4139)); color: #fff; padding: 10px 16px; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; font-family: system-ui, sans-serif; cursor: pointer; transition: background 0.15s; } .ds-btn-primary:hover { background: color-mix(in oklab, var(--color-primary, oklch(0.6236 0.1833 147.4139)) 85%, #1a2b33); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--color-primary, oklch(0.6236 0.1833 147.4139)); } .ds-btn-primary:disabled { opacity: 0.5; cursor: default; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Bordered neutral action; hover fills one surface step up.",
+      "html": "<button class=\"ds-btn-secondary\">Cancel</button>",
+      "css": ".ds-btn-secondary { background: transparent; color: var(--color-text, oklch(0.1807 0.0207 239.8394)); padding: 8px 16px; border: 1px solid var(--color-border, oklch(0.8999 0.0196 240.7516)); border-radius: 8px; font-size: 14px; font-weight: 500; font-family: system-ui, sans-serif; cursor: pointer; transition: background 0.15s; } .ds-btn-secondary:hover { background: var(--color-bg-secondary, oklch(0.9396 0.0204 243.4220)); } .ds-btn-secondary:focus-visible { outline: none; border-color: var(--color-primary, oklch(0.6236 0.1833 147.4139)); box-shadow: 0 0 0 1px var(--color-primary, oklch(0.6236 0.1833 147.4139)); }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Hairline-bordered field; focus shifts border and a hugging 1px ring to primary.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"you@example.com\" />",
+      "css": ".ds-input { width: 100%; background: var(--color-bg, oklch(0.9813 0.0100 238.5069)); color: var(--color-text, oklch(0.1807 0.0207 239.8394)); border: 1px solid var(--color-border, oklch(0.8999 0.0196 240.7516)); border-radius: 8px; padding: 8px 12px; font-size: 14px; font-family: system-ui, sans-serif; outline: none; } .ds-input::placeholder { color: var(--color-text-muted, oklch(0.65 0.015 240)); } .ds-input:focus { border-color: var(--color-primary, oklch(0.6236 0.1833 147.4139)); box-shadow: 0 0 0 1px var(--color-primary, oklch(0.6236 0.1833 147.4139)); }"
+    },
+    {
+      "name": "Sidebar Nav Item",
+      "kind": "nav",
+      "refersTo": "sidebar-item",
+      "description": "Compact nav row; the active state is a 10%-alpha green pill (in the app, one absolutely-positioned pill travels between rows).",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item ds-nav-item--active\" href=\"#\">Files</a><a class=\"ds-nav-item\" href=\"#\">Sync</a><a class=\"ds-nav-item\" href=\"#\">Activity</a></nav>",
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 4px; width: 200px; font-family: system-ui, sans-serif; } .ds-nav-item { display: block; padding: 8px 12px; border-radius: 8px; font-size: 14px; font-weight: 500; color: var(--color-text-secondary, oklch(0.4501 0.0191 239.4931)); text-decoration: none; transition: background 0.15s; } .ds-nav-item:hover { background: var(--color-bg-secondary, oklch(0.9396 0.0204 243.4220)); } .ds-nav-item--active { background: color-mix(in oklab, var(--color-primary, oklch(0.6236 0.1833 147.4139)) 10%, transparent); color: var(--color-primary, oklch(0.6236 0.1833 147.4139)); }"
+    },
+    {
+      "name": "Toggle Switch",
+      "kind": "custom",
+      "description": "24x44 pill switch; green track when on, hairline track when off.",
+      "html": "<button class=\"ds-toggle ds-toggle--on\" role=\"switch\" aria-checked=\"true\"><span class=\"ds-toggle-thumb\"></span></button>",
+      "css": ".ds-toggle { position: relative; width: 44px; height: 24px; border: none; border-radius: 9999px; background: var(--color-border, oklch(0.8999 0.0196 240.7516)); cursor: pointer; transition: background 0.15s; } .ds-toggle--on { background: var(--color-primary, oklch(0.6236 0.1833 147.4139)); } .ds-toggle-thumb { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 9999px; background: #fff; transition: transform 0.15s; } .ds-toggle--on .ds-toggle-thumb { transform: translateX(20px); } .ds-toggle:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--color-primary, oklch(0.6236 0.1833 147.4139)); }"
+    },
+    {
+      "name": "Sync Status Chip",
+      "kind": "chip",
+      "description": "TitleBar micro pill whose tint is the status code: green idle, blue syncing, red paused.",
+      "html": "<span class=\"ds-chip ds-chip--idle\">Pause sync</span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 8px; font-size: 12px; font-weight: 500; font-family: system-ui, sans-serif; } .ds-chip--idle { background: color-mix(in oklab, var(--color-primary, oklch(0.6236 0.1833 147.4139)) 10%, transparent); color: var(--color-primary, oklch(0.6236 0.1833 147.4139)); } .ds-chip--idle:hover { background: color-mix(in oklab, var(--color-primary, oklch(0.6236 0.1833 147.4139)) 20%, transparent); }"
+    },
+    {
+      "name": "Modal Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "The shared dialog shell: 12px radius, flat surface, overlay shadow, 24px padding.",
+      "html": "<div class=\"ds-modal\"><h3 class=\"ds-modal-title\">Share file</h3><p class=\"ds-modal-body\">Anyone with the link can view this file.</p></div>",
+      "css": ".ds-modal { max-width: 448px; background: var(--color-bg, oklch(0.9813 0.0100 238.5069)); border-radius: 12px; padding: 24px; box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1); font-family: system-ui, sans-serif; } .ds-modal-title { margin: 0 0 8px; font-size: 18px; font-weight: 600; color: var(--color-text, oklch(0.1807 0.0207 239.8394)); } .ds-modal-body { margin: 0; font-size: 14px; color: var(--color-text-secondary, oklch(0.4501 0.0191 239.4931)); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Native Workbench",
+    "overview": "The desktop app is an Operate-mode work tool: a file manager, sync monitor, and viewer that people keep open all day. It is designed to read as part of the operating system rather than as a website in a frame - system font stack, a custom 52px title bar with a real drag region, overlay scrollbars, user-select: none chrome, and a window body that never scrolls. Visual energy is deliberately low: quiet blue-grey neutral surfaces carry dense information, and a single green accent marks the active and the affirmative. The theme system is a deliberate mirror of the web app: eight selectable themes x light/dark/system defined as [data-theme] blocks whose values are copied verbatim from apps/web/src/index.css; the desktop consumes them through a seven-token subset aliased onto --color-* names, with derived shades computed via color-mix().",
+    "keyCharacteristics": [
+      "Quiet, dense, utilitarian; information first, decoration nowhere",
+      "One green accent (oklch 0.62/0.18/147 light, 0.70/0.18/149 dark - the #22c55e family) on cool blue-grey neutrals",
+      "Native desktop feel: system fonts, custom TitleBar, 6px overlay scrollbars, no text selection in chrome",
+      "Theme-proof components: everything routes through var(--color-*) aliases so all 8 themes and both modes work untouched",
+      "Flat surfaces separated by 1px hairline borders; shadows reserved for overlays",
+      "Full prefers-reduced-motion kill switch on all animation and transitions"
+    ],
+    "rules": [
+      { "name": "The Alias-Only Rule", "body": "Components never touch --background/--primary directly and never hardcode a theme color; they consume only the --color-* aliases (or Tailwind [var(--color-*)] arbitrary values). This is what makes all 8 themes x 2 modes work without per-component changes.", "section": "colors" },
+      { "name": "The One Voice Rule", "body": "Green is the only accent voice in chrome. When a second hue appears it is a status code (blue = in flight, amber = degraded, red = failed/destructive), never decoration.", "section": "colors" },
+      { "name": "The Fixed Islands Exception", "body": "Four surfaces intentionally ignore the theme: the plain-text/code viewer (fixed charcoal #1e1e1e/#d4d4d4 in both modes), MapLibre photo pins (fixed light neutrals with white frames), the per-filetype icon set and provider logos (own brand colors), and the in-file find highlight (fixed amber for visibility against any theme).", "section": "colors" },
+      { "name": "The Fourteen-Pixel Rule", "body": "Body text is text-sm (14px). text-base (16px) is effectively absent from the app - new UI copy defaults to 14px, labels to 12px.", "section": "typography" },
+      { "name": "The Overlay-Only Shadow Rule", "body": "If it doesn't float (modal, menu, flyout, pin), it doesn't cast a shadow. In-flow cards and panels are flat with hairline borders.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do route every color through the --color-* aliases (Tailwind form: text-[var(--color-text-muted)], bg-[var(--color-bg-secondary)]). If a new shade is needed, derive it with color-mix() from existing tokens.",
+      "Do keep green singular: --color-primary marks the active nav item, the affirmative button, the on-state - and nothing decorative.",
+      "Do default new text to 14px (text-sm), metadata to 12px (text-xs), and use the documented micro steps (8-11px) only inside dense chrome.",
+      "Do use the standard focus treatment (primary border + 1px primary ring) on any new focusable control.",
+      "Do keep new surfaces flat with 1px hairline borders; reserve shadow-lg/shadow-xl for things that genuinely float.",
+      "Do respect prefers-reduced-motion on any new animation.",
+      "Do add accent-[var(--color-primary)] to native checkboxes/radios/ranges - the list-view checkboxes that lack it are a known gap, not a pattern to copy."
+    ],
+    "donts": [
+      "Don't hardcode theme-dependent hexes in components - a color that must survive all 8 themes is either a --color-* alias or belongs to the documented Fixed Islands (viewer charcoal, map pin neutrals, file-icon set, provider brand marks, find-highlight amber, workspace accent set).",
+      "Don't import rules from the repo-root DESIGN.md - that file documents the marketing site. This file governs apps/desktop.",
+      "Don't add a second accent hue, gradients, or decorative color to chrome; blue/amber/red are status codes only.",
+      "Don't introduce webfonts; the system stack is the identity.",
+      "Don't put shadows on in-flow cards or grow radii past 12px for containers (16px is reserved for the pin frame and hero tiles).",
+      "Don't edit theme token values in styles/index.css unilaterally - they mirror apps/web/src/index.css and apps/web/src/lib/themes.ts (and the API allow-list in apps/api/src/lib/appearance.ts); parity is the contract."
+    ]
+  }
+}
