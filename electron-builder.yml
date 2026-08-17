@@ -118,6 +118,11 @@ linux:
         - x64
   icon: build/icon.png
   category: Utility
+  # electron-builder 26 derives the default from the scoped npm package name
+  # ("@dosya-dev/desktop" -> "@dosya-devdesktop") and then rejects the "@".
+  # Pin the name v25 used (productName), which is also the binary existing
+  # AppImage/deb installs already have on disk.
+  executableName: dosya
 
 # ── Installer options ──────────────────────────────────────────────
 nsis:
