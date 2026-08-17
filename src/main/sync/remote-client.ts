@@ -88,7 +88,11 @@ class ThrottleStream extends Transform {
 // maxSockets is the real concurrency ceiling per host and the main RAM lever
 // (each socket ~= one in-flight stream). Kept modest on purpose; the engine's
 // worker counts are derived to stay at/under this so workers don't just spin.
-const MAX_SOCKETS_PER_HOST = 32;
+// Sized to admit TINY_TRANSFER_CONCURRENCY_CAP (transfer-concurrency.ts): only
+// the tiny-file upload pipeline ever runs that deep, and 64 in-flight ~64KB
+// streams is ~4MB - the pool is a ceiling, not a driver, so mixed/large
+// phases with their smaller worker counts never open sockets they don't use.
+const MAX_SOCKETS_PER_HOST = 64;
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS_PER_HOST });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS_PER_HOST });
 

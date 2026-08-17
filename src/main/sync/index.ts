@@ -5,7 +5,8 @@ import { toRelPath, normalizeRel, pathKey, absKey, longPath } from "./paths";
 import { loadConfig, saveConfig, loadPairState, savePairState, deletePairState } from "./config";
 import { terminateStateWriter } from "./state-writer";
 import { RemoteClient, RateLimitError } from "./remote-client";
-import { LocalWatcher, type WatchEvent, shouldIgnoreEntry } from "./local-watcher";
+import { directConcurrencyFor } from "./transfer-concurrency";
+import { LocalWatcher, type WatchEvent, shouldIgnoreEntry, ignoreReason } from "./local-watcher";
 import { RemotePoller, type RemoteSnapshot } from "./remote-poller";
 import { reconcile, reconcileRemoteOnly } from "./reconciler";
 import { hashFile } from "./hash";
@@ -80,7 +81,6 @@ const RECENT_DOWNLOAD_TTL_MS = 120_000; // suppress watcher events for 2 min aft
 const STATE_SAVE_INTERVAL = 500; // save state every N file operations
 const SESSION_RECOVERY_MS = 30_000; // check for session recovery every 30s
 const MAX_FILE_RETRIES = 5; // max retry attempts per persistently failing file
-const TRANSFER_CONCURRENCY_CAP = 32; // never exceed the client's per-host socket pool
 /** Rescan interval when live watching was abandoned (tree too big - EMFILE). */
 const DEGRADED_RESCAN_MS = 10 * 60 * 1000;
 
@@ -266,10 +266,11 @@ export class SyncEngine extends EventEmitter {
    * Derived from the user's maxConcurrentTransfers setting, bounded by the
    * client socket pool so surplus workers don't just spin, and capped so
    * memory stays predictable (each in-flight transfer ≈ one 64KB stream).
+   * Size-agnostic form; the small-file upload loop calls
+   * directConcurrencyFor per chunk to run tiny-file chunks deeper.
    */
   private directTransferConcurrency(): number {
-    const base = this.config?.maxConcurrentTransfers || 3;
-    return Math.min(TRANSFER_CONCURRENCY_CAP, Math.max(6, base * 6));
+    return directConcurrencyFor(this.config?.maxConcurrentTransfers || 3, Number.POSITIVE_INFINITY);
   }
 
   private async safeSaveState(state: SyncPairState): Promise<void> {
@@ -676,7 +677,7 @@ export class SyncEngine extends EventEmitter {
 
     // Clean up orphaned .dosya-sync-tmp files from crashed downloads
     try {
-      await this.cleanupTempFiles(pair.localPath);
+      await this.cleanupTempFiles(pair.localPath, pair.excludedPatterns);
     } catch {}
 
     try {
@@ -1427,6 +1428,19 @@ export class SyncEngine extends EventEmitter {
     this.log(pair.id, "Scanning local folder for changes...");
     this.emitStatus();
 
+    // Excluded entries are LOGGED, not silently dropped - a sync that quietly
+    // leaves folders behind reads as data loss. Individually up to the cap
+    // (a node_modules-heavy tree can skip thousands), then summarized.
+    const MAX_SKIP_LOGS = 30;
+    let skipsLogged = 0;
+    let skipsTotal = 0;
+    const logSkip = (relPath: string, isDir: boolean, reason: string): void => {
+      skipsTotal++;
+      if (skipsLogged >= MAX_SKIP_LOGS) return;
+      skipsLogged++;
+      this.log(pair.id, `Skipped ${isDir ? "folder" : "file"} "${relPath}" - ${reason}`);
+    };
+
     const walk = async (dir: string): Promise<void> => {
       if (this.stopped || rt.status === "paused") return;
       let entries;
@@ -1435,10 +1449,19 @@ export class SyncEngine extends EventEmitter {
       const fileEntries: { absPath: string; relPath: string }[] = [];
 
       for (const entry of entries) {
-        if (shouldIgnoreEntry(entry.name, entry.isDirectory(), pair.excludedPatterns)) continue;
-
         const absPath = join(dir, entry.name);
         const relPath = toRelPath(pair.localPath, absPath);
+
+        const skipReason = ignoreReason(entry.name, entry.isDirectory(), pair.excludedPatterns, absPath);
+        if (skipReason) {
+          // Internal temp markers and transient editor artifacts churn
+          // constantly and are nobody's decision - only user-visible
+          // exclusions (patterns, virtual filesystems) belong in Activity.
+          if (skipReason.startsWith("excluded") || skipReason.startsWith("virtual")) {
+            logSkip(relPath, entry.isDirectory(), skipReason);
+          }
+          continue;
+        }
 
         if (entry.isDirectory()) {
           if (!state.folders[relPath]) {
@@ -1496,6 +1519,9 @@ export class SyncEngine extends EventEmitter {
 
     await walk(pair.localPath);
 
+    if (skipsTotal > skipsLogged) {
+      this.log(pair.id, `Skipped ${(skipsTotal - skipsLogged).toLocaleString()} more excluded entries this scan (see the pair's excluded patterns)`);
+    }
     this.log(pair.id, `Scan complete: ${toUpload.filter(f => f.isNew).length.toLocaleString()} new, ${toUpload.filter(f => !f.isNew).length.toLocaleString()} modified, ${needsHash.length.toLocaleString()} to verify, ${newFolders.length.toLocaleString()} new folders`);
 
     // ── Hash phase: check files where mtime changed but size didn't ──
@@ -1668,7 +1694,6 @@ export class SyncEngine extends EventEmitter {
     // Client → Worker (get presigned URLs) → Client → R2 directly (bounded)
     // → Client → Worker (commit DB records). Worker never touches file bytes.
     const MANIFEST_BATCH = 5000; // files per manifest request (Worker CPU limit)
-    const UPLOAD_CONCURRENCY = this.directTransferConcurrency(); // concurrent direct-to-R2 uploads (bounded)
     const COMMIT_BATCH = 5000; // files per commit request
 
     // Build + process manifest chunks LAZILY from smallFiles. The old code
@@ -1778,7 +1803,12 @@ export class SyncEngine extends EventEmitter {
         }
       };
 
-      await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, manifest.uploads.length) }, () => uploadWorker()));
+      // Sized per chunk: uploads are globally sorted by size, so each chunk is
+      // size-homogeneous and a chunk of tiny files runs a deeper pipeline than
+      // one of near-5MB files.
+      const chunkMaxBytes = manifest.uploads.reduce((m, u) => Math.max(m, u.size), 0);
+      const uploadConcurrency = directConcurrencyFor(this.config?.maxConcurrentTransfers || 3, chunkMaxBytes);
+      await Promise.all(Array.from({ length: Math.min(uploadConcurrency, manifest.uploads.length) }, () => uploadWorker()));
       if (uploadFatalErr) throw uploadFatalErr;
 
       // Commit uploaded files to DB in batches
@@ -2065,8 +2095,17 @@ export class SyncEngine extends EventEmitter {
         // Skip events already handled as moves
         if (handledPaths.has(relPath)) continue;
 
-        // Use shared ignore filter
-        if (shouldIgnoreEntry(fileName, event.type === "addDir" || event.type === "unlinkDir", rt.pair.excludedPatterns)) continue;
+        // Use shared ignore filter. Chokidar's own ignored-set already drops
+        // most excluded paths before an event exists, so a hit here is rare
+        // and worth an Activity line - same visibility rule as the scanner.
+        const isDirEvent = event.type === "addDir" || event.type === "unlinkDir";
+        const eventSkipReason = ignoreReason(fileName, isDirEvent, rt.pair.excludedPatterns, event.path);
+        if (eventSkipReason) {
+          if (eventSkipReason.startsWith("excluded") || eventSkipReason.startsWith("virtual")) {
+            this.log(rt.pair.id, `Skipped ${isDirEvent ? "folder" : "file"} "${relPath}" - ${eventSkipReason}`);
+          }
+          continue;
+        }
 
         const mode = rt.pair.syncMode || "push-safe";
 
@@ -3169,16 +3208,20 @@ export class SyncEngine extends EventEmitter {
     }
   }
 
-  /** Clean up orphaned .dosya-sync-tmp files left by crashed downloads. */
-  private async cleanupTempFiles(dir: string): Promise<void> {
+  /**
+   * Clean up orphaned .dosya-sync-tmp files left by crashed downloads.
+   * Skips excluded subtrees (the sync never writes temps there, and walking
+   * a node_modules-sized tree for nothing slows every pair start).
+   */
+  private async cleanupTempFiles(dir: string, excludedPatterns?: string[]): Promise<void> {
     let entries;
     try { entries = await readdir(longPath(dir), { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
       if (entry.isFile() && (entry.name.endsWith(".dosya-sync-tmp") || entry.name.endsWith(".dosya-sync-tmp.meta"))) {
         await unlink(longPath(fullPath)).catch(() => {});
-      } else if (entry.isDirectory() && !shouldIgnoreEntry(entry.name, true)) {
-        await this.cleanupTempFiles(fullPath);
+      } else if (entry.isDirectory() && !shouldIgnoreEntry(entry.name, true, excludedPatterns, fullPath)) {
+        await this.cleanupTempFiles(fullPath, excludedPatterns);
       }
     }
   }

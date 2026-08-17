@@ -92,9 +92,9 @@ async function scanLocal(
     const fileEntries: { fullPath: string; relPath: string }[] = [];
 
     for (const entry of entries) {
-      if (shouldIgnoreEntry(entry.name, entry.isDirectory(), userPatterns)) continue;
-
       const fullPath = join(dir, entry.name);
+      if (shouldIgnoreEntry(entry.name, entry.isDirectory(), userPatterns, fullPath)) continue;
+
       const relPath = toRelPath(rootPath, fullPath);
 
       if (entry.isDirectory()) {

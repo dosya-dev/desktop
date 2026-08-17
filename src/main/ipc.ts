@@ -47,7 +47,12 @@ export function registerIpcHandlers(apiBase: string): void {
     BrowserWindow.fromWebContents(event.sender)?.close();
   });
 
-  ipcMain.handle("app:get-platform", () => process.platform);
+  // DOSYA_E2E_PLATFORM lets Playwright exercise the win32/linux titlebar
+  // layouts from a single OS; honored only under the test runner's env.
+  ipcMain.handle(
+    "app:get-platform",
+    () => (process.env.NODE_ENV === "test" && process.env.DOSYA_E2E_PLATFORM) || process.platform,
+  );
 
   // ── Launch at login ──────────────────────────────────────────────
   ipcMain.handle("app:get-launch-at-login", () => app.getLoginItemSettings().openAtLogin);

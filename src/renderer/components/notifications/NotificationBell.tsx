@@ -13,7 +13,14 @@ export function badgeLabel(unread: number): string {
   return unread > 99 ? "99+" : String(unread);
 }
 
-export function NotificationBell() {
+/**
+ * `align` names which edge of the bell the dropdown pins to. The titlebar
+ * puts the bell in the right cluster on macOS ("right": panel grows leftward,
+ * staying on-screen) but in the LEFT cluster on Windows/Linux, where the
+ * panel must grow rightward instead - right-aligned there, most of its 320px
+ * hangs past the window's left edge.
+ */
+export function NotificationBell({ align = "right" }: { align?: "left" | "right" } = {}) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -90,7 +97,7 @@ export function NotificationBell() {
       {open && (
         <div
           data-testid="notification-dropdown"
-          className="absolute right-0 top-full z-50 mt-2 flex max-h-[70vh] w-80 flex-col overflow-hidden rounded-xl border shadow-xl"
+          className={`absolute ${align === "left" ? "left-0" : "right-0"} top-full z-50 mt-2 flex max-h-[70vh] w-80 flex-col overflow-hidden rounded-xl border shadow-xl`}
           style={{ background: "var(--color-bg)", borderColor: "var(--color-border)" }}
         >
           <div className="flex items-center justify-between border-b px-3 py-2" style={{ borderColor: "var(--color-border)" }}>

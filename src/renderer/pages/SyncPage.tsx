@@ -1101,6 +1101,13 @@ const DEFAULT_EXCLUDED = [
   ".DS_Store", "Thumbs.db", "__pycache__", ".venv", ".svn", ".hg",
   "*.tmp", "*.swp", "*.swo", "*.log", ".Trash", "$RECYCLE.BIN",
   "desktop.ini", "*.crdownload", "*.part",
+  // Linux system directories - listed here (not buried in the engine) so
+  // skipping them is a decision the user can see and reverse. The leading
+  // slash anchors to the absolute path: only the real /bin matches, never a
+  // project's own bin/ folder. Virtual filesystems (/proc, /sys, /dev, /run)
+  // are always skipped by the engine and deliberately NOT listed as choices.
+  "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/boot",
+  "/tmp", "/snap", "/mnt", "/media", "/srv", "/lost+found",
 ];
 
 function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
@@ -1441,7 +1448,9 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 <label className="mb-1.5 block text-sm font-medium">Excluded files & folders</label>
                 <p className="mb-3 text-xs text-[var(--color-text-muted)]">
                   These patterns will be skipped during sync. You can use folder names (node_modules),
-                  file names (.env), or wildcards (*.log).
+                  file names (.env), wildcards (*.log), or absolute paths (/bin) that only match at the
+                  filesystem root. This is the complete list - remove an entry and it will sync. Only the
+                  virtual filesystems /proc, /sys, /dev and /run are always skipped.
                 </p>
               </div>
 
