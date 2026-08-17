@@ -1712,9 +1712,25 @@ export class SyncEngine extends EventEmitter {
         if (err?.permanent) continue;
         if (err && err.retryCount >= MAX_FILE_RETRIES) { state.fileErrors[f.relPath].permanent = true; continue; }
         const parentRelPath = f.relPath.split("/").slice(0, -1).join("/");
-        const folderId = parentRelPath
-          ? (state.folders[parentRelPath]?.remoteId ?? pair.remoteFolderId)
-          : pair.remoteFolderId;
+        // A parent with no recorded remote id means folder creation failed or
+        // was skipped for it. This used to fall back to the PAIR ROOT, which
+        // filed the whole tree's same-named files (every locale dir's
+        // XLC_LOCALE...) into one folder - the duplicate factory behind the
+        // commit FK bomb, and a silently wrong tree even when it worked.
+        // Defer the file instead: the error ladder retries it after the next
+        // scan's folder phase, and gives up visibly if the parent never comes.
+        if (parentRelPath && !state.folders[parentRelPath]) {
+          const existing = state.fileErrors[f.relPath];
+          state.fileErrors[f.relPath] = {
+            filePath: f.relPath,
+            error: `Parent folder "${parentRelPath}" was not created on the server`,
+            retryCount: (existing?.retryCount ?? 0) + 1,
+            lastAttemptAt: Date.now(),
+            permanent: false,
+          };
+          continue;
+        }
+        const folderId = parentRelPath ? state.folders[parentRelPath].remoteId : pair.remoteFolderId;
         mChunk.push({ relPath: f.relPath, name: basename(f.absPath), size: f.sizeBytes, folder_id: folderId, absPath: f.absPath });
       }
       if (mChunk.length === 0) continue;
@@ -1834,6 +1850,22 @@ export class SyncEngine extends EventEmitter {
 
             // Update local state (prefer server-authoritative version/updated_at)
             for (const u of cChunk) {
+              // A refused file did NOT land (oversized, or the name is already
+              // taken in that folder) - marking it synced here is how refusals
+              // used to become phantoms that never retried and never surfaced.
+              const refusal = commitRes.refused.get(u.fileId);
+              if (refusal) {
+                this.log(pair.id, `Server refused "${u.relPath}" - ${refusal}`);
+                const existing = state.fileErrors[u.relPath];
+                state.fileErrors[u.relPath] = {
+                  filePath: u.relPath,
+                  error: refusal,
+                  retryCount: (existing?.retryCount ?? 0) + 1,
+                  lastAttemptAt: Date.now(),
+                  permanent: false,
+                };
+                continue;
+              }
               const entry = mChunkByPath.get(u.relPath);
               const s = entry ? await stat(entry.absPath).catch(() => null) : null;
               const srv = commitRes.results.get(u.fileId);

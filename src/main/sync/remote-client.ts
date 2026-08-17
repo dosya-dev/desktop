@@ -1584,7 +1584,7 @@ export class RemoteClient {
     workspaceId: string,
     region: string,
     files: { file_id: string; r2_key: string; name: string; size: number; folder_id: string | null; content_type: string; ext: string | null }[],
-  ): Promise<{ committed: number; results: Map<string, { version: number; updatedAt: number }> }> {
+  ): Promise<{ committed: number; results: Map<string, { version: number; updatedAt: number }>; refused: Map<string, string> }> {
     const res = await this.fetch("/api/sync/commit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1602,7 +1602,16 @@ export class RemoteClient {
       const id = r?.id ?? r?.file_id;
       if (id) results.set(id, { version: r.current_version ?? r.version ?? 1, updatedAt: r.updated_at ?? r.updatedAt ?? Math.floor(Date.now() / 1000) });
     }
-    return { committed: data.committed ?? 0, results };
+    // Per-file refusals (oversized, name collisions). The caller must NOT mark
+    // these synced - dropping them here is how refused files used to be
+    // recorded as synced phantoms and re-uploaded forever.
+    const refused = new Map<string, string>();
+    if (Array.isArray(data.refused)) {
+      for (const r of data.refused) {
+        if (r?.file_id) refused.set(r.file_id, String(r.error ?? "Refused by server"));
+      }
+    }
+    return { committed: data.committed ?? 0, results, refused };
   }
 
   // ── Block-level delta sync (feature #3) ───────────────────────────
