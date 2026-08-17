@@ -391,6 +391,20 @@ function createWindow(): void {
   // every other case - packaged builds AND the built-but-unpackaged case (test
   // harness / `electron-vite preview`) - loads from app://bundle, so a bare
   // `app.isPackaged` check on this side used to wrongly block reload() there.
+  // Surface renderer errors in the main process log.
+  //
+  // A packaged build has no DevTools (see menu.ts), so a renderer exception was
+  // invisible: the CSP violation that blanked the map page printed only to a
+  // console nobody could open, while the terminal output a user can actually
+  // copy showed nothing at all. Errors and warnings only - forwarding every
+  // log line would bury the sync output this log exists for.
+  win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    // Electron levels: 0 verbose, 1 info, 2 warning, 3 error.
+    if (level < 2) return;
+    const tag = level === 3 ? "error" : "warn";
+    console.error(`[renderer:${tag}] ${message}  (${sourceId}:${line})`);
+  });
+
   win.webContents.on("will-navigate", (event, url) => {
     const devServerUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined;
     const allowed = devServerUrl

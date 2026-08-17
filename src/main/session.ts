@@ -57,6 +57,13 @@ export function setupSession(apiBase: string): void {
           [
             "default-src 'self'",
             `script-src 'self' ${docsBase}`,
+            // MapLibre builds its render worker from a blob: URL. worker-src
+            // has no policy of its own here, so it falls back to script-src,
+            // which does not allow blob: - the worker was refused, MapLibre
+            // threw inside a React effect, and the whole renderer unmounted to
+            // a white window. Kept separate from script-src on purpose: this
+            // permits a worker built from a blob, not inline script anywhere.
+            "worker-src 'self' blob:",
             // blob: throughout for the ebook reader: foliate-js renders the
             // book inside a blob iframe and hands it the book's OWN stylesheets,
             // fonts and media as blob/data URLs. Without these the reader loads
@@ -79,6 +86,8 @@ export function setupSession(apiBase: string): void {
           [
             "default-src 'self' http://localhost:* ws://localhost:*",
             `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${docsBase}`,
+            // Same as the packaged policy: the map's worker comes from a blob.
+            "worker-src 'self' blob: http://localhost:*",
             "style-src 'self' 'unsafe-inline' blob:",
             `img-src 'self' data: blob: http://localhost:* ${apiBase} ${docsBase}`,
             `connect-src 'self' http://localhost:* ws://localhost:* ${apiBase} ${docsBase}`,

@@ -13,6 +13,7 @@ import { OnboardingPage } from "./pages/OnboardingPage";
 
 // Layout (needed by every protected page - keep eager)
 import { AppShell } from "./components/layout/AppShell";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Everything else is code-split into its own chunk and loaded on demand.
 // This keeps the initial bundle small - the heavy pages (FileBrowser, Sync,
@@ -133,9 +134,18 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function ProtectedPage({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
   return (
     <ProtectedRoute>
-      <AppShell>{children}</AppShell>
+      <AppShell>
+        {/* Inside the shell, so a page that throws leaves the sidebar standing
+            and the user can simply go somewhere else. Keyed on the route: a
+            boundary holds its error until it remounts, so without this a single
+            bad page would keep showing its error after navigating away. */}
+        <ErrorBoundary key={location.pathname} where="this page">
+          {children}
+        </ErrorBoundary>
+      </AppShell>
     </ProtectedRoute>
   );
 }
@@ -199,9 +209,14 @@ export function App() {
           <WorkspaceProvider>
           <RouteMemory />
           <IdlePrefetch />
-          <Suspense fallback={<PageFallback />}>
-            <AppRoutes />
-          </Suspense>
+          {/* Backstop for everything the per-page boundary cannot reach: the
+              bare pages (editor, login, onboarding) and any throw from the
+              shell itself. Without one, those still take the window white. */}
+          <ErrorBoundary where="the app">
+            <Suspense fallback={<PageFallback />}>
+              <AppRoutes />
+            </Suspense>
+          </ErrorBoundary>
           </WorkspaceProvider>
           <Toaster
             position="bottom-right"
