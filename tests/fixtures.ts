@@ -28,6 +28,15 @@ export async function launchApp(apiBase: string, extraEnv: Record<string, string
     args: [
       path.join(__dirname, "../out/main/index.js"),
       `--user-data-dir=${userDataDir}`,
+      // GitHub's Linux runners have no GPU, and Electron 43's Chromium both
+      // fails to bring up a context on Mesa's llvmpipe ("Failed to initialize
+      // WebGL ... BindToCurrentSequence failed", which kills every map spec)
+      // and gates the SwiftShader software fallback behind an opt-in flag.
+      // Route WebGL through the bundled SwiftShader on CI; local runs keep
+      // the real GPU so the specs still measure what users get.
+      ...(process.env.CI
+        ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+        : []),
     ],
     env: {
       ...process.env,

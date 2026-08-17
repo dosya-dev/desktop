@@ -67,8 +67,11 @@ win:
       arch:
         - x64
   icon: build/icon.png
-  signingHashAlgorithms:
-    - sha256
+  # electron-builder 26 moved signtool options out of `win` (leaving the old
+  # key a schema error that fails all three platform builds, not just Windows).
+  signtoolOptions:
+    signingHashAlgorithms:
+      - sha256
 
 # ── Microsoft Store (MSIX/AppX) ────────────────────────────────────
 # Do NOT sign this target. Microsoft re-signs Store packages, and a package
