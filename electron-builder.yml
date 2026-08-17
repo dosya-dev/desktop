@@ -7,14 +7,31 @@ directories:
   output: release
   buildResources: build
 
+# Ship exactly the bundles. The renderer is fully bundled and the main
+# process bundles its last runtime deps (see externalizeDepsPlugin exclude
+# list), so node_modules has no business in the asar - it was 56 MB of dead
+# weight and about to double when maplibre entered dependencies.
 files:
-  - "out/**/*"
+  - "out/main/**/*"
+  - "out/preload/**/*"
+  - "out/renderer/**/*"
   - "build/*.png"
-  - "node_modules/**/*"
-  - "!node_modules/*/{test,tests,__tests__,__mocks__,.github}/**"
-  - "!node_modules/*/{CHANGELOG,README,readme,changelog}*"
-  - "!node_modules/**/*.{ts,map,md}"
-  - "!node_modules/**/{.eslintrc,.prettier*,tsconfig}*"
+  - "!out/**/*.tsbuildinfo"
+  - "!out/src/**"
+  - "!out/apps/**"
+  - "!out/packages/**"
+  - "!out/electron.vite.config.*"
+
+# Close the packaged binary's generic-Node-runtime and tamper surfaces.
+# enableCookieEncryption invalidates existing session cookies once: users
+# re-login on first launch after this ships.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  enableCookieEncryption: true
 
 # Disable auto-update publish - we upload to R2 via our own API
 publish: []

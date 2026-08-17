@@ -435,7 +435,7 @@ function createWindow(): void {
 }
 
 // Single instance lock (skip in test mode so Playwright can launch multiple instances)
-const gotTheLock = process.env.NODE_ENV === "test" || app.requestSingleInstanceLock();
+const gotTheLock = (!app.isPackaged && process.env.NODE_ENV === "test") || app.requestSingleInstanceLock();
 
 if (!gotTheLock) {
   app.quit();
@@ -467,7 +467,7 @@ if (!gotTheLock) {
       try {
         const { nativeImage } = await import("electron");
         const dockIcon = nativeImage.createFromPath(iconPath);
-        if (!dockIcon.isEmpty()) app.dock.setIcon(dockIcon);
+        if (!dockIcon.isEmpty()) app.dock?.setIcon(dockIcon);
       } catch {}
     }
 
