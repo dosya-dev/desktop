@@ -7,7 +7,8 @@ import {
   MessageCircle, Send, CornerDownRight, Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api, ApiError } from "@/lib/api-client";
+import { api, ApiError, apiBase } from "@/lib/api-client";
+import { useAvatarVersion, userAvatarUrl } from "@/lib/avatar-version";
 import { usePermissions } from "@/lib/use-permissions";
 import { fileRawUrl } from "@/lib/file-url";
 import { humanSize, timeAgo, extOf, isImage, isVideo, isText, isAudio, colorFor, regionLabel, originLabel } from "@/lib/file-type";
@@ -698,6 +699,34 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
   );
 }
 
+// user_avatar is an R2 object key, not a URL - it flags that a photo exists,
+// and the bytes stream through the authenticated API. A failed fetch degrades
+// to initials; failedAt is compared to the avatar version so a new upload by
+// the signed-in user retries instead of staying stuck on initials.
+function CommentAvatar({ comment }: { comment: Comment }) {
+  const version = useAvatarVersion((s) => s.version);
+  const [failedAt, setFailedAt] = useState<number | null>(null);
+  if (!comment.user_avatar || failedAt === version) {
+    return (
+      <div
+        className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-medium text-white"
+        style={{ background: "var(--color-primary)" }}
+      >
+        {comment.user_name?.charAt(0).toUpperCase() || "?"}
+      </div>
+    );
+  }
+  return (
+    <img
+      key={`${comment.user_id}-${version}`}
+      src={userAvatarUrl(apiBase(), comment.user_id, version)}
+      alt=""
+      className="h-5 w-5 rounded-full object-cover"
+      onError={() => setFailedAt(version)}
+    />
+  );
+}
+
 function CommentBubble(props: {
   comment: Comment;
   canEdit: boolean;
@@ -720,16 +749,7 @@ function CommentBubble(props: {
     >
       <div className="mb-1 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          {comment.user_avatar ? (
-            <img src={comment.user_avatar} alt="" className="h-5 w-5 rounded-full object-cover" />
-          ) : (
-            <div
-              className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-medium text-white"
-              style={{ background: "var(--color-primary)" }}
-            >
-              {comment.user_name?.charAt(0).toUpperCase() || "?"}
-            </div>
-          )}
+          <CommentAvatar comment={comment} />
           <span className="text-xs font-medium">{comment.user_name}</span>
           <span className="text-[10px] text-[var(--color-text-muted)]">
             {timeAgo(comment.created_at)}

@@ -20,3 +20,15 @@ export const useAvatarVersion = create<AvatarVersionState>((set) => ({
 export function avatarUrl(apiBase: string, userId: string, version: number): string {
   return `${apiBase}/api/me/avatar?u=${encodeURIComponent(userId)}&v=${version}`;
 }
+
+/**
+ * Any user's photo, for comment and activity rows. The user_avatar field on
+ * those rows is an R2 object key ("avatars/<id>/avatar.png"), not a fetchable
+ * URL - treat it as a "has photo" flag and stream the image through the
+ * cookie-authenticated API instead. The user id lives in the path, so caching
+ * is already per-account; the version still busts the cache when the signed-in
+ * user replaces their own photo.
+ */
+export function userAvatarUrl(apiBase: string, userId: string, version: number): string {
+  return `${apiBase}/api/users/${encodeURIComponent(userId)}/avatar?v=${version}`;
+}

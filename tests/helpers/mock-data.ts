@@ -400,7 +400,9 @@ export const mockComments = [
     id: "cmt_2", file_id: "file_1", folder_id: null, workspace_id: "ws_test_1",
     user_id: "user_other", parent_id: "cmt_1", body: "Agreed, shipping it.",
     is_edited: 0, created_at: 1_740_000_100, updated_at: 1_740_000_100,
-    user_name: "Grace Hopper", user_email: "grace@example.com", user_avatar: null,
+    // An R2 object key, exactly what the real API returns - NOT a fetchable
+    // URL. The renderer must treat it as a "has photo" flag.
+    user_name: "Grace Hopper", user_email: "grace@example.com", user_avatar: "avatars/user_other/avatar.png",
   },
   {
     id: "cmt_3", file_id: "file_1", folder_id: null, workspace_id: "ws_test_1",

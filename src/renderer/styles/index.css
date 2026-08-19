@@ -244,6 +244,31 @@ body {
   from { opacity: 0; transform: scale(0.96); }
 }
 
+/* ── Viewer versions panel collapse ─────────────────────────────── */
+
+/* Width, not transform: the file content has to reflow as the panel opens,
+   and there is no transform equivalent for that - kept short because width
+   costs layout on every frame. A transition (not keyframes) so a second
+   click mid-flight retargets instead of restarting. Visibility rides along
+   discretely - flipped only after the width finishes closing - so the
+   collapsed panel is untabbable and invisible to assistive tech without
+   its content blinking out before the shrink. The inner w-52 wrapper keeps
+   the content at full width throughout, sliding out of the clip instead of
+   squishing. The reduced-motion block below collapses the timings. */
+.viewer-versions-panel {
+  overflow: hidden;
+  width: 0;
+  visibility: hidden;
+  transition:
+    width 200ms cubic-bezier(0.23, 1, 0.32, 1),
+    visibility 0s 200ms;
+}
+.viewer-versions-panel[data-open] {
+  width: 13rem; /* w-52, the inner wrapper's fixed width */
+  visibility: visible;
+  transition-delay: 0s;
+}
+
 /* ── Accessibility: reduced motion ──────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {

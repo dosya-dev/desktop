@@ -275,19 +275,20 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
           <FileContent file={file} files={files} rawUrl={rawUrl} version={previewVersion} onDownload={onDownload} onNavigate={onNavigate} />
         </div>
 
-        {/* Version sidebar. Only mounted when opened from the header toggle -
-            a file with a single version has nothing to show here, and the empty
-            panel was taking a fifth of the viewer from the file itself. */}
-        {/* Conditionally rendered rather than hidden with an attribute: the
-            `md:flex` below sets display:flex, which wins over the user-agent
-            rule behind the `hidden` attribute, so the panel would still have
-            shown at md and up. */}
-        {versionsOpen && versions.length > 1 && (
+        {/* Version sidebar. Mounted whenever the file has history - a file
+            with a single version has nothing to show, so it gets neither the
+            panel nor the header toggle. Open/collapsed is a width transition
+            on the aside (.viewer-versions-panel in index.css), which needs
+            the element in the tree in both states; the inner w-52 wrapper
+            carries the border and keeps the content full-width while the
+            clip slides. */}
+        {versions.length > 1 && (
         <aside
           data-testid="viewer-versions-panel"
-          className="hidden w-52 shrink-0 flex-col border-l bg-[var(--color-bg)] md:flex"
-          style={{ borderColor: "var(--color-border)" }}
+          data-open={versionsOpen || undefined}
+          className="viewer-versions-panel flex shrink-0"
         >
+          <div className="flex w-52 shrink-0 flex-col border-l bg-[var(--color-bg)]" style={{ borderColor: "var(--color-border)" }}>
           <div className="flex shrink-0 items-center gap-1.5 border-b px-3.5 py-2.5 text-xs font-semibold" style={{ borderColor: "var(--color-border)" }}>
             <button
               onClick={toggleVersions}
@@ -335,6 +336,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
                 );
               })
             )}
+          </div>
           </div>
         </aside>
         )}

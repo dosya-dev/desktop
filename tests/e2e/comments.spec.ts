@@ -39,6 +39,22 @@ test.describe("comments", () => {
     await expect(page.getByTestId("comment-cmt_3")).toBeVisible();
   });
 
+  test("a commenter's photo loads through the API, not the raw R2 key", async ({ appPage: page }) => {
+    // cmt_2's user_avatar is "avatars/user_other/avatar.png" - an R2 object
+    // key, which is what the real API returns. Rendered directly as <img src>
+    // it resolves against the renderer origin and 404s, so the photo must
+    // stream through the cookie-authenticated /api/users/:id/avatar endpoint.
+    await openComments(page);
+    const img = page.getByTestId("comment-cmt_2").locator("img");
+    await expect(img).toBeVisible();
+    expect(await img.getAttribute("src")).toContain("/api/users/user_other/avatar");
+    // And it actually decoded - proves the request carried the session cookie
+    // and got real image bytes back, not just that a URL was formatted.
+    await expect
+      .poll(() => img.evaluate((el) => (el as HTMLImageElement).naturalWidth))
+      .toBeGreaterThan(0);
+  });
+
   test("a reply carries the parent it was written against", async ({ appPage: page }) => {
     await openComments(page);
     await page.getByTestId("comment-cmt_1-reply").click();

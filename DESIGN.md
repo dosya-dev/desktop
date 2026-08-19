@@ -262,6 +262,9 @@ Soft-rectangle language on a tight radius ramp; circles only for status and iden
 ### Theme Sweep
 - User-initiated theme changes paint the new theme over the old with a left-to-right `clip-path` wipe (520ms, `cubic-bezier(0.65, 0, 0.35, 1)`) via the View Transitions API; boot and login reconciliation apply instantly; reduced-motion users always get the instant swap.
 
+### Viewer Versions Panel
+- The viewer's version-history sidebar (208px, right edge) collapses via a width transition (200ms, `cubic-bezier(0.23, 1, 0.32, 1)`) on `.viewer-versions-panel[data-open]`; visibility flips discretely after the close so the collapsed panel is untabbable, and the fixed-width inner wrapper slides out of the clip instead of squishing. The global reduced-motion kill switch makes it instant.
+
 ## Do's and Don'ts
 
 ### Do:

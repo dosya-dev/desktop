@@ -1,4 +1,4 @@
-import { test, expect, navigateTo } from "../fixtures";
+import { test, expect, navigateTo, resizeWindow } from "../fixtures";
 import type { Page } from "@playwright/test";
 
 /**
@@ -10,7 +10,9 @@ import type { Page } from "@playwright/test";
  * so the name rendered underneath the window buttons.
  *
  * The version panel was a permanent 208px column, shown even for files with a
- * single version.
+ * single version. It then collapsed behind a header toggle, but carried a
+ * `hidden md:flex` gate - on a window narrower than 768px (the app allows 700)
+ * the toggle rendered and the panel never did, so clicking it did nothing.
  */
 
 async function openViewer(page: Page): Promise<void> {
@@ -47,15 +49,31 @@ test.describe("viewer chrome", () => {
     await expect(toggle).toBeVisible();
     await expect(toggle).toHaveText("3");
 
-    await expect(page.getByTestId("viewer-versions-panel")).toHaveCount(0);
+    // Mounted but hidden, not absent: the panel stays in the tree so the
+    // open/collapse is a width transition rather than a teleport.
+    await expect(page.getByTestId("viewer-versions-panel")).toBeAttached();
+    await expect(page.getByTestId("viewer-versions-panel")).toBeHidden();
     await toggle.click();
     await expect(page.getByTestId("viewer-versions-panel")).toBeVisible();
 
     // Collapsing from inside the panel works too, and the choice sticks.
     await page.getByRole("button", { name: "Collapse versions" }).click();
-    await expect(page.getByTestId("viewer-versions-panel")).toHaveCount(0);
+    await expect(page.getByTestId("viewer-versions-panel")).toBeHidden();
     expect(
       await page.evaluate(() => localStorage.getItem("dosya_viewer_versions_open")),
     ).toBe("0");
+  });
+
+  test("the version panel opens on a narrow window too", async ({ appPage: page }) => {
+    // Regression: the panel was gated behind `hidden md:flex`, so below 768px
+    // the header toggle appeared to do nothing.
+    await resizeWindow(page, 700, 600);
+    await navigateTo(page, "/files?view=file_v1");
+
+    await page.getByTestId("viewer-versions-toggle").click();
+    const panel = page.getByTestId("viewer-versions-panel");
+    await expect(panel).toBeVisible();
+    const box = await panel.boundingBox();
+    expect(box!.width).toBeGreaterThan(180);
   });
 });
