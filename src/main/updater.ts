@@ -1,6 +1,8 @@
 import { app, Notification, BrowserWindow, ipcMain, shell } from "electron";
 import { join } from "path";
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { execFile } from "child_process";
+import { discardStaleShipItState } from "./shipit-cleanup";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -13,29 +15,6 @@ export type UpdateStatus =
   | { state: "store-managed" };
 
 let updateStatus: UpdateStatus = { state: "idle" };
-
-// Squirrel.Mac never clears a failed pending install, and ShipIt resumes it
-// forever - force-moving the stale staged bundle over whatever is in
-// /Applications (the "2.4.9 keeps coming back" incident). If this app is
-// running, any surviving pending state is by definition stale: a successful
-// install consumes it before relaunch. Discard it; a real update re-stages
-// on demand. The directory name is the appId from electron-builder.yml.
-function discardStaleShipItState(): void {
-  if (process.platform !== "darwin" || !app.isPackaged) return;
-  try {
-    const shipItDir = join(app.getPath("home"), "Library", "Caches", "dev.dosya.desktop.ShipIt");
-    if (!existsSync(shipItDir)) return;
-    const state = join(shipItDir, "ShipItState.plist");
-    if (existsSync(state)) rmSync(state, { force: true });
-    for (const entry of readdirSync(shipItDir)) {
-      if (entry.startsWith("update.")) {
-        rmSync(join(shipItDir, entry), { recursive: true, force: true });
-      }
-    }
-  } catch {
-    // Cache cleanup must never block startup.
-  }
-}
 
 // ── Microsoft Store builds ──────────────────────────────────────────
 // A Store build must not update itself. Store policy forbids an app fetching
@@ -264,7 +243,14 @@ export async function initAutoUpdater(): Promise<void> {
       }
     });
 
-    discardStaleShipItState();
+    discardStaleShipItState({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      cachesDir: join(app.getPath("home"), "Library", "Caches"),
+      uid: process.getuid?.() ?? null,
+      // Fire-and-forget: a non-loaded job answers "Bad request", which is fine.
+      bootoutJob: (target) => void execFile("launchctl", ["bootout", target], () => {}),
+    });
 
     // Check for updates after a short delay to avoid blocking startup
     setTimeout(() => {

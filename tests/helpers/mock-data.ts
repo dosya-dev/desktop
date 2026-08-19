@@ -109,6 +109,27 @@ export const mockFiles = [
     created_at: "2025-03-01T12:00:00Z",
     updated_at: "2025-03-01T12:00:00Z",
   },
+  // A versioned OFFICE file: its preview goes through /preview-pdf conversion
+  // rather than /raw, which is the path that silently ignored the selected
+  // version. The file_v prefix opts it into mock version history.
+  {
+    id: "file_v2",
+    name: "Versioned Notes.docx",
+    kind: "file",
+    size_bytes: 524_288,
+    mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    extension: "docx",
+    region: "eu-west",
+    uploaded_by: "user_test_1",
+    uploader_name: "Test User",
+    folder_id: null,
+    workspace_id: "ws_test_1",
+    is_favourite: 0,
+    is_locked: 0,
+    is_hidden: 0,
+    created_at: "2025-03-01T12:00:00Z",
+    updated_at: "2025-03-01T12:00:00Z",
+  },
   {
     id: "file_2",
     name: "Photo.png",

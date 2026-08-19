@@ -28,4 +28,32 @@ test.describe("office preview", () => {
     await page.getByText("huge.pptx").first().dblclick();
     await expect(page.getByTestId("office-too-large")).toBeVisible();
   });
+
+  test("selecting an old version converts THAT version, not the latest", async ({ appPage: page }) => {
+    // file_v2 is a docx with three versions. Office previews render through
+    // /preview-pdf conversion instead of /raw - the path that used to ignore
+    // the version picked in the panel, so clicking v1 changed nothing.
+    await navigateTo(page, "/files");
+    await page.getByText("Versioned Notes.docx").first().dblclick();
+    await expect(page.getByTestId("office-frame")).toBeVisible();
+
+    await page.getByTestId("viewer-versions-toggle").click();
+    const panel = page.getByTestId("viewer-versions-panel");
+    await expect(panel).toBeVisible();
+    await panel.getByText("v1", { exact: true }).click();
+
+    // The preview is a blob URL, so the mock's request log is the only place
+    // the chosen version is observable.
+    await expect(async () => {
+      const requests = await page.evaluate(async () => {
+        const apiBase = await (window as any).electronAPI.getApiBase();
+        const res = await fetch(`${apiBase}/__test/preview-pdf-requests`);
+        return (await res.json()).requests as string[];
+      });
+      expect(requests).toContain("file_v2?version=1");
+    }).toPass({ timeout: 5000 });
+
+    // And the frame is still up, now showing the old version's rendition.
+    await expect(page.getByTestId("office-frame")).toBeVisible();
+  });
 });

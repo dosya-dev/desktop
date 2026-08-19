@@ -428,7 +428,7 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
   // them and this shows the resulting PDF. Placed after isPdf so a real .pdf
   // never takes the conversion path.
   if (isOfficeFile(file.name)) {
-    return <OfficePreview file={file} />;
+    return <OfficePreview file={file} version={version} />;
   }
 
   // Before the text check: an .epub is a zip, so isTextReadable could not claim

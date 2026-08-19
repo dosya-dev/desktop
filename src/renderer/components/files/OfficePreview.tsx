@@ -34,13 +34,16 @@ type State =
   | { kind: "unsupported" }
   | { kind: "failed"; message: string };
 
-export function OfficePreview({ file }: { file: { id: string; name: string } }) {
+export function OfficePreview({ file, version }: { file: { id: string; name: string }; version?: number }) {
   const [state, setState] = useState<State>({ kind: "preparing" });
   const objectUrl = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    const url = `${apiBase()}/api/files/${file.id}/preview-pdf`;
+    // `version` undefined means current - the cached conversion. An explicit
+    // version asks the server to convert THAT rendition (supported, uncached
+    // server-side); without it the panel's version picker changed nothing.
+    const url = `${apiBase()}/api/files/${file.id}/preview-pdf${version ? `?version=${version}` : ""}`;
     setState({ kind: "preparing" });
 
     (async () => {
@@ -96,7 +99,7 @@ export function OfficePreview({ file }: { file: { id: string; name: string } }) 
         objectUrl.current = null;
       }
     };
-  }, [file.id]);
+  }, [file.id, version]);
 
   if (state.kind === "ready") {
     return (

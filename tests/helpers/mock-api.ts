@@ -92,6 +92,11 @@ export async function startMockServer(
   const notifGroups: typeof data.mockNotificationGroups = JSON.parse(JSON.stringify(data.mockNotificationGroups));
   const notifPrefWrites: Record<string, boolean>[] = [];
 
+  // Test-only: every /preview-pdf request as `<fileId><search>`, so a spec can
+  // assert WHICH version the viewer asked to convert - the office preview
+  // renders a blob URL, so the request is the only observable trace of it.
+  const previewPdfRequests: string[] = [];
+
   const readBody = (req: http.IncomingMessage): Promise<any> =>
     new Promise((resolve) => {
       let raw = "";
@@ -367,6 +372,7 @@ export async function startMockServer(
     // is the non-200 answers. json(body, status, extraHeaders) - see above.
     if (path.startsWith("/api/files/") && path.endsWith("/preview-pdf") && method === "GET") {
       const id = path.split("/")[3];
+      previewPdfRequests.push(`${id}${url.search}`);
       if (id === "file_converting") {
         return json({ error: "Converting" }, 503, { "Retry-After": "3" });
       }
@@ -697,6 +703,9 @@ export async function startMockServer(
     }
     if (path === "/__test/comments" && method === "GET") {
       return json({ comments: [...commentStore.values()] });
+    }
+    if (path === "/__test/preview-pdf-requests" && method === "GET") {
+      return json({ requests: previewPdfRequests });
     }
     if (path === "/__test/file-requests" && method === "GET") {
       return json({
