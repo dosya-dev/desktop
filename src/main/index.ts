@@ -5,7 +5,8 @@ gracefulify(fs);
 
 import { app, BrowserWindow, shell, powerMonitor, session, crashReporter, ipcMain, protocol, net, screen } from "electron";
 import { randomUUID } from "crypto";
-import { join, resolve, sep } from "path";
+import { execFile } from "child_process";
+import { dirname, join, resolve, sep } from "path";
 import { pathToFileURL } from "url";
 
 // Enable crash reporter for native crashes (GPU, renderer, main).
@@ -22,6 +23,7 @@ import { createWindowReclaimer } from "./window-reclaim";
 import { captureWindowState, readWindowState, resolveWindowState, writeWindowState } from "./window-state";
 import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
+import { linuxProtocolInstallPlan } from "./linux-protocol";
 import { setupSession } from "./session";
 import { createMenu } from "./menu";
 import { createTray } from "./tray";
@@ -267,6 +269,48 @@ function registerProtocolClient(): void {
   }
 }
 
+/**
+ * AppImage runs are the one distribution with no install step, so nothing ever
+ * puts a desktop entry with the dosya:// MimeType where xdg can see it and the
+ * setAsDefaultProtocolClient call above fails (its xdg-settings backend needs
+ * an installed entry to point at). Materialise the entry ourselves on every
+ * launch - idempotent, and it follows the AppImage when the user moves it.
+ * See linux-protocol.ts for the full background.
+ */
+async function installLinuxProtocolHandler(): Promise<void> {
+  try {
+    const plan = linuxProtocolInstallPlan({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      env: process.env,
+      home: app.getPath("home"),
+      argv: process.argv,
+    });
+    if (!plan) return;
+
+    await fs.promises.mkdir(plan.desktopDir, { recursive: true });
+    const entry = await fs.promises.readFile(plan.desktopPath, "utf8").catch(() => null);
+    if (entry !== plan.desktopContent) {
+      await fs.promises.writeFile(plan.desktopPath, plan.desktopContent);
+    }
+
+    const mimeapps = await fs.promises.readFile(plan.mimeappsPath, "utf8").catch(() => null);
+    const merged = plan.mergeMimeapps(mimeapps);
+    if (merged !== mimeapps) {
+      await fs.promises.mkdir(dirname(plan.mimeappsPath), { recursive: true });
+      await fs.promises.writeFile(plan.mimeappsPath, merged);
+    }
+
+    for (const { cmd, args } of plan.postCommands) {
+      // Best-effort cache refresh: the mimeapps.list default above already
+      // registers the handler, and not every distro ships desktop-file-utils.
+      execFile(cmd, args, { timeout: 5000 }, () => {});
+    }
+  } catch (err) {
+    console.error("[deep-link] Failed to install AppImage protocol handler:", err);
+  }
+}
+
 function createWindow(): void {
   // Reopen where the user left the window - reclaim recreates windows, so
   // without this every reopen-from-tray snapped back to 1200x800 centered.
@@ -486,6 +530,7 @@ if (!gotTheLock) {
     });
 
     registerProtocolClient();
+    void installLinuxProtocolHandler();
 
     // Cold start: on Windows/Linux the OS launches the app with the URL in
     // argv, and neither open-url (macOS only) nor second-instance (needs an
