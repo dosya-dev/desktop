@@ -3,7 +3,7 @@ import { gracefulify } from "graceful-fs";
 import fs, { statSync } from "fs";
 gracefulify(fs);
 
-import { app, BrowserWindow, shell, powerMonitor, session, crashReporter, ipcMain, protocol, net, screen } from "electron";
+import { app, BrowserWindow, shell, powerMonitor, powerSaveBlocker, session, crashReporter, ipcMain, protocol, net, screen } from "electron";
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { dirname, join, resolve, sep } from "path";
@@ -18,6 +18,7 @@ crashReporter.start({
   compress: true,
 });
 import { registerIpcHandlers } from "./ipc";
+import { installFileLogger } from "./file-logger";
 import { isQuitting, markQuitting } from "./quit-state";
 import { createWindowReclaimer } from "./window-reclaim";
 import { captureWindowState, readWindowState, resolveWindowState, writeWindowState } from "./window-state";
@@ -25,19 +26,40 @@ import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { linuxProtocolInstallPlan } from "./linux-protocol";
 import { setupSession } from "./session";
+import { originAllowed } from "./trusted-origins";
 import { createMenu } from "./menu";
 import { createTray } from "./tray";
 import { SyncEngine } from "./sync";
+import { SyncEngineHost, type SyncEngineHandle } from "./sync/engine-host";
 import { registerSyncIpcHandlers } from "./sync/ipc-handlers";
 import { initAutoUpdater } from "./updater";
 import { installQuickAction } from "./macos-services";
 
+// ── File logging ────────────────────────────────────────────────────
+// Every console line also lands in <userData>/logs/main.log. A packaged
+// app's console goes nowhere - the 2026-08-20 stress-test crash left zero
+// retrievable evidence.
+const fileLog = installFileLogger(join(app.getPath("userData"), "logs"));
+
 // ── Global crash handlers ───────────────────────────────────────────
-// After an uncaught exception the process is in an undefined state.
-// Log the error and exit to avoid silent data corruption.
+// After an uncaught exception the process is in an undefined state - but
+// app.exit() skips before-quit, so the old bare exit dropped up to 499 file
+// operations of unsaved sync state AND the only log line describing why.
+// Flush both (bounded), then exit.
+let crashExitStarted = false;
+async function crashExit(err: unknown): Promise<void> {
+  if (crashExitStarted) return;
+  crashExitStarted = true;
+  console.error("[crash] Uncaught exception - shutting down:", err);
+  try {
+    const stop = syncEngine?.stop().catch(() => {});
+    await Promise.race([stop, new Promise((r) => setTimeout(r, 3000))]);
+  } catch {}
+  await fileLog.flush().catch(() => {});
+  app.exit(1);
+}
 process.on("uncaughtException", (err) => {
-  console.error("[crash] Uncaught exception - exiting:", err);
-  setTimeout(() => app.exit(1), 2000);
+  void crashExit(err);
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[crash] Unhandled rejection:", reason);
@@ -92,7 +114,7 @@ function registerAppProtocol(): void {
 let mainWindow: BrowserWindow | null = null;
 // Hoisted to module scope so the per-window listeners createWindow attaches
 // (visibility → poller cadence, reclaim) can reach the engine.
-let syncEngine: SyncEngine | undefined;
+let syncEngine: SyncEngineHandle | undefined;
 
 // ── Window memory reclaim ──────────────────────────────────────────
 // The app lives in the tray: "closing" the window only hides it, which kept a
@@ -401,6 +423,12 @@ function createWindow(): void {
   // window gets the same visibility → sync-cadence and reclaim behavior.
   const reclaimer = createWindowReclaimer({
     delayMs: WINDOW_RECLAIM_MS,
+    // Electron does not reliably emit "hide" - on macOS 24.6 / Electron 43,
+    // win.hide() flips isVisible() to false and sends nothing, even with the
+    // app frontmost. Without this backstop the destroy timer is never armed
+    // and the renderer's memory is never returned, silently. Checking once per
+    // delay period costs one wakeup every five minutes in production.
+    verifyIntervalMs: WINDOW_RECLAIM_MS,
     isQuitting,
     isHidden: () => !win.isDestroyed() && !win.isVisible(),
     destroy: () => {
@@ -449,11 +477,35 @@ function createWindow(): void {
     console.error(`[renderer:${tag}] ${message}  (${sourceId}:${line})`);
   });
 
+  // A dead renderer (OOM, GPU fault) used to leave a permanently blank window
+  // - and destroying it on Linux quit the whole app via window-all-closed,
+  // taking sync with it (the 2026-08-20 blank-screen symptom). Recreate it
+  // instead, reusing the reclaim flag so the quit path knows this is
+  // intentional.
+  win.webContents.on("render-process-gone", (_event, details) => {
+    // Destroying a window kills its renderer, so this fires for INTENTIONAL
+    // teardown too - memory reclaim and quit both land here. Recreating the
+    // window then would undo the reclaim the moment it happened, which is the
+    // whole feature: a hidden window's renderer is 150-300 MB that reclaim
+    // exists to give back. Only an unplanned death is a crash.
+    if (windowReclaimed || isQuitting()) return;
+    console.error("[crash] Renderer process gone:", details.reason, "exitCode:", details.exitCode);
+    if (details.reason === "clean-exit") return;
+    const wasVisible = !win.isDestroyed() && win.isVisible();
+    windowReclaimed = true;
+    if (!win.isDestroyed()) win.destroy();
+    if (wasVisible) showMainWindow();
+    // Hidden window: stay in the reclaimed state - the tray/dock recreates it
+    // on demand, exactly like a memory reclaim.
+  });
+
   win.webContents.on("will-navigate", (event, url) => {
     const devServerUrl = !app.isPackaged ? process.env.ELECTRON_RENDERER_URL : undefined;
-    const allowed = devServerUrl
-      ? url.startsWith(devServerUrl)
-      : url.startsWith(`${APP_ORIGIN}/`);
+    // Compare parsed origins. This was a `startsWith` pair, which was only safe
+    // in the packaged branch by accident - the trailing slash on `${APP_ORIGIN}/`
+    // happened to stop `app://bundle.evil`, while the dev branch had no such
+    // slash and would have accepted `http://localhost:5174.evil.example`.
+    const allowed = originAllowed(url, [devServerUrl ?? APP_ORIGIN]);
     if (!allowed) {
       event.preventDefault();
     }
@@ -560,9 +612,47 @@ if (!gotTheLock) {
     // Initialize sync engine (non-critical - app works without it).
     // The engine checks for a valid session cookie before starting.
     // If the user is not logged in, it skips and waits for a login event.
+    // GPU / utility process deaths were invisible; at least leave a log line.
+    app.on("child-process-gone", (_e, details) => {
+      console.error("[crash] Child process gone:", details.type, details.reason);
+    });
+
     try {
-      syncEngine = new SyncEngine(API_BASE);
+      // The engine runs in its own utilityProcess so a crash, hang or OOM
+      // inside it costs a re-fork instead of the whole app. Sync resumes from
+      // the persistent ops queue, so a restart is invisible apart from a gap.
+      //
+      // The escape hatch is not dead weight: when a sync bug needs a debugger,
+      // DOSYA_SYNC_IN_PROCESS=1 puts the engine back in the process the
+      // inspector is already attached to.
+      syncEngine =
+        process.env.DOSYA_SYNC_IN_PROCESS === "1"
+          ? new SyncEngine(API_BASE)
+          : new SyncEngineHost(API_BASE, join(__dirname, "engine.js"));
       registerSyncIpcHandlers(syncEngine);
+
+      // Keep the OS from suspending the app mid-transfer (App Nap, timer
+      // coalescing). Display sleep stays allowed - this only prevents app
+      // suspension, so an unattended 12-hour sync actually runs for 12 hours.
+      // Stopped 30s after the last transfer so brief gaps between batches
+      // don't flap the blocker.
+      let psbId: number | null = null;
+      let psbStopTimer: ReturnType<typeof setTimeout> | null = null;
+      syncEngine.on("status-changed", (status: { pairs: { status: string }[]; activeTransfers: unknown[] }) => {
+        const active = status.pairs.some((p) => p.status === "syncing") || status.activeTransfers.length > 0;
+        if (active) {
+          if (psbStopTimer) { clearTimeout(psbStopTimer); psbStopTimer = null; }
+          if (psbId === null || !powerSaveBlocker.isStarted(psbId)) {
+            psbId = powerSaveBlocker.start("prevent-app-suspension");
+          }
+        } else if (psbId !== null && psbStopTimer === null) {
+          psbStopTimer = setTimeout(() => {
+            psbStopTimer = null;
+            if (psbId !== null && powerSaveBlocker.isStarted(psbId)) powerSaveBlocker.stop(psbId);
+            psbId = null;
+          }, 30_000);
+        }
+      });
       // The tray outlives any window generation, so it gets accessors that
       // recreate a reclaimed window instead of a reference that can go stale.
       createTray({ showWindow: showMainWindow, sendToWindow }, syncEngine);
@@ -619,12 +709,15 @@ if (!gotTheLock) {
       if (!syncEngine) return;
       const cfg = await syncEngine.getConfig();
       if (!cfg.pauseOnBattery) return;
-      if (onBattery && !cfg.pausedGlobally) {
+      // Transient pause: never persists pausedGlobally. If the app dies on
+      // battery before the resume, the next launch must not come up wedged
+      // in a paused state nobody chose (the 2026-08-20 empty-Sync-tab trap).
+      if (onBattery && !syncEngine.getStatus().globalPaused) {
         batteryPaused = true;
-        syncEngine.pauseAll().catch(() => {});
+        syncEngine.pauseAllTransient().catch(() => {});
       } else if (!onBattery && batteryPaused) {
         batteryPaused = false;
-        syncEngine.resumeAll().catch(() => {});
+        syncEngine.resumeAllTransient().catch(() => {});
       }
     };
     powerMonitor.on("on-battery", () => applyBatteryState(true));
@@ -636,13 +729,15 @@ if (!gotTheLock) {
     powerMonitor.on("suspend", () => {
       wasPausedBeforeSleep = syncEngine?.getStatus().globalPaused ?? false;
       if (!wasPausedBeforeSleep) {
-        syncEngine?.pauseAll().catch(() => {});
+        // Transient: a crash while asleep must not leave pausedGlobally
+        // persisted on disk with no resume handler left to clear it.
+        syncEngine?.pauseAllTransient().catch(() => {});
       }
     });
     powerMonitor.on("resume", async () => {
       // Only auto-resume if the user hadn't manually paused before sleep.
       if (syncEngine && !wasPausedBeforeSleep) {
-        await syncEngine.resumeAll().catch(() => {});
+        await syncEngine.resumeAllTransient().catch(() => {});
       }
       // The power source may have changed during sleep (e.g. unplugged), and
       // on-battery/on-ac only fire on live transitions - so reconcile battery

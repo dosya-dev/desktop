@@ -1,13 +1,13 @@
 import { app } from "electron";
 import { join } from "path";
+import { mkdirSync } from "fs";
 import { open, readFile, mkdir, rename, unlink } from "fs/promises";
 import {
   type SyncConfig,
   type SyncPairState,
   DEFAULT_SYNC_CONFIG,
-  EMPTY_PAIR_STATE,
 } from "./types";
-import { stringifyOffThread } from "./state-writer";
+import { SyncIndex } from "./index-db";
 import { absKey } from "./paths";
 
 /**
@@ -17,16 +17,25 @@ import { absKey } from "./paths";
  * `electron` itself, which is what keeps it testable outside an Electron
  * process.
  */
+/**
+ * Where the engine's data lives. Normally Electron's userData directory, but
+ * settable so the engine can run somewhere Electron's `app` does not exist -
+ * a utilityProcess, or a test. The Electron fallback stays until the engine
+ * actually moves, so no call site has to be initialised in a particular order
+ * today; removing it is the last step of that move.
+ */
+let dataDirOverride: string | null = null;
+
+export function setSyncDataDir(dir: string): void {
+  dataDirOverride = dir || null;
+}
+
 export function syncDir(): string {
-  return join(app.getPath("userData"), "sync");
+  return join(dataDirOverride ?? app.getPath("userData"), "sync");
 }
 
 function configPath(): string {
   return join(syncDir(), "sync-config.json");
-}
-
-function statePath(pairId: string): string {
-  return join(syncDir(), "sync-state", `${pairId}.json`);
 }
 
 async function ensureDir(dir: string): Promise<void> {
@@ -116,44 +125,62 @@ export function saveConfig(config: SyncConfig): Promise<void> {
   return run;
 }
 
-// ── Per-Pair State ──────────────────────────────────────────────────
+// ── Per-Pair State (SQLite index) ───────────────────────────────────
 
-export async function loadPairState(pairId: string): Promise<SyncPairState> {
-  try {
-    const raw = await readFile(statePath(pairId), "utf-8");
-    const parsed = JSON.parse(raw);
-    return {
-      ...EMPTY_PAIR_STATE(pairId),
-      ...parsed,
-      files: typeof parsed.files === "object" && parsed.files !== null ? parsed.files : {},
-      folders: typeof parsed.folders === "object" && parsed.folders !== null ? parsed.folders : {},
-      fileErrors: typeof parsed.fileErrors === "object" && parsed.fileErrors !== null ? parsed.fileErrors : {},
-    };
-  } catch {
-    return EMPTY_PAIR_STATE(pairId);
-  }
+/** Directory holding the retired pre-SQLite JSON state files. */
+export function syncStateDir(): string {
+  return join(syncDir(), "sync-state");
 }
 
-export async function savePairState(state: SyncPairState): Promise<void> {
-  const dir = join(syncDir(), "sync-state");
-  await ensureDir(dir);
-  // Serialize off the main thread - JSON.stringify on 50K entries blocks
-  // the event loop for 50-200ms. The worker thread handles it so IPC,
-  // watcher events, and UI updates keep flowing.
-  const json = await stringifyOffThread(state);
-  await atomicWriteFile(statePath(state.pairId), json);
+let indexSingleton: SyncIndex | null = null;
+
+/**
+ * The process-wide sync index. One connection, one writer - which is what
+ * SQLite wants and what the engine already is.
+ */
+export function openSyncIndex(): SyncIndex {
+  if (!indexSingleton) {
+    // SQLite will not create the directory for us, and this runs before any
+    // async path has had a chance to.
+    mkdirSync(syncDir(), { recursive: true });
+    indexSingleton = SyncIndex.open(join(syncDir(), "index.db"));
+  }
+  return indexSingleton;
+}
+
+/** Close the index (engine teardown / tests). Reopens on next use. */
+export function closeSyncIndex(): void {
+  indexSingleton?.close();
+  indexSingleton = null;
+}
+
+/**
+ * Hydrate a pair's in-memory working state from the index.
+ *
+ * Same shape the engine has always consumed - what changed is where it comes
+ * from and what it costs: rows stream out of SQLite instead of a whole JSON
+ * blob being parsed, and writes no longer rewrite the world (see the
+ * write-through helpers in index.ts). Phase 3 removes these maps entirely and
+ * reads straight from the index.
+ */
+export async function loadPairState(pairId: string): Promise<SyncPairState> {
+  // Only the pair-level markers are held in memory now. The files, folders
+  // and error maps used to be hydrated here - hundreds of thousands of
+  // records per pair, held for the life of the process, which is most of what
+  // made a large sync fatal. Everything reads through SyncIndex instead, so
+  // engine memory is bounded by the work queue rather than by tree size.
+  const meta = openSyncIndex().getPairMeta(pairId);
+  return {
+    pairId,
+    lastRemotePollAt: meta.lastRemotePollAt,
+    lastFullSyncAt: meta.lastFullSyncAt,
+    rootFolderCreated: meta.rootFolderCreated,
+    files: {},
+    folders: {},
+    fileErrors: {},
+  };
 }
 
 export async function deletePairState(pairId: string): Promise<void> {
-  try {
-    await unlink(statePath(pairId));
-  } catch {
-    // ignore if doesn't exist
-  }
-  // Also clean up any leftover tmp file
-  try {
-    await unlink(`${statePath(pairId)}.tmp`);
-  } catch {
-    // ignore
-  }
+  openSyncIndex().deletePair(pairId);
 }

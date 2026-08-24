@@ -1,7 +1,8 @@
 import { ipcMain, dialog, shell, BrowserWindow } from "electron";
 import { isAbsolute } from "path";
-import type { SyncEngine } from "./index";
+import type { SyncEngineHandle } from "./engine-host";
 import type { SyncPair, SyncMode } from "./types";
+import { estimateFolder } from "./folder-estimate";
 
 const VALID_SYNC_MODES: SyncMode[] = ["two-way", "push", "push-safe", "pull", "pull-safe"];
 const VALID_CONFLICT_STRATEGIES = ["last-write-wins", "keep-both"];
@@ -13,7 +14,7 @@ function assertString(val: unknown, name: string): asserts val is string {
   }
 }
 
-export function registerSyncIpcHandlers(engine: SyncEngine): void {
+export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
   ipcMain.handle("sync:get-config", () => engine.getConfig());
 
   ipcMain.handle("sync:save-config", (_e, updates) => {
@@ -65,7 +66,11 @@ export function registerSyncIpcHandlers(engine: SyncEngine): void {
       createdAt: Date.now(),
       pollIntervalMs: pollInterval,
       syncMode: opts.syncMode || "push-safe",
-      conflictStrategy: opts.conflictStrategy || "last-write-wins",
+      // keep-both for NEW pairs: when both sides changed the same file,
+      // last-write-wins silently discards one of them. Keeping both costs a
+      // second file in the folder; the alternative costs somebody's work.
+      // Existing pairs keep whatever they were configured with.
+      conflictStrategy: opts.conflictStrategy || "keep-both",
       selectiveFolders: Array.isArray(opts.selectiveFolders) ? opts.selectiveFolders : [],
       excludedPatterns,
       enabled: opts.enabled !== false,
@@ -97,6 +102,14 @@ export function registerSyncIpcHandlers(engine: SyncEngine): void {
     return engine.updatePair(pairId, updates);
   });
 
+  // Cheap file/folder count so the Add-folder modal can warn about huge trees
+  // before the user commits to syncing one.
+  ipcMain.handle("sync:estimate-local-folder", async (_e, { path }) => {
+    assertString(path, "path");
+    if (!isAbsolute(path)) throw new Error("path must be absolute");
+    return estimateFolder(path);
+  });
+
   ipcMain.handle("sync:pick-local-folder", async () => {
     const win = BrowserWindow.getFocusedWindow();
     if (!win) return null;
@@ -109,8 +122,7 @@ export function registerSyncIpcHandlers(engine: SyncEngine): void {
 
   ipcMain.handle("sync:get-folder-tree", async (_e, { workspaceId }) => {
     assertString(workspaceId, "workspaceId");
-    const client = engine.getClient();
-    return client.getFolderTree(workspaceId);
+    return engine.getFolderTree(workspaceId);
   });
 
   ipcMain.handle("sync:pause-pair", (_e, { pairId }) => {

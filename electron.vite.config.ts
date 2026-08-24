@@ -9,7 +9,15 @@ export default defineConfig({
     build: {
       outDir: "out/main",
       rollupOptions: {
-        input: { index: resolve(__dirname, "src/main/index.ts") },
+        // Two entries: the main process, and the sync engine that main forks
+        // into a utilityProcess. They share the main build because they share
+        // a runtime (Electron's Node) and most of the sync sources; only the
+        // entry differs. `engine.js` must exist next to `index.js` - main
+        // resolves it with join(__dirname, "engine.js").
+        input: {
+          index: resolve(__dirname, "src/main/index.ts"),
+          engine: resolve(__dirname, "src/engine/main.ts"),
+        },
       },
     },
   },

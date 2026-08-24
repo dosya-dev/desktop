@@ -8,7 +8,6 @@ export const ipc = {
   maximize: () => window.electronAPI.maximize(),
   close: () => window.electronAPI.close(),
   clearSession: () => window.electronAPI.clearSession(),
-  oauth: (provider: string) => window.electronAPI.oauth(provider),
   openFileDialog: (options?: Electron.OpenDialogOptions) =>
     window.electronAPI.openFileDialog(options),
   saveFileDialog: (options?: Electron.SaveDialogOptions) =>

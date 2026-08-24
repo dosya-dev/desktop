@@ -14,6 +14,13 @@ import type {
   SyncPair,
 } from "./types";
 import type { RemoteSnapshot } from "./remote-poller";
+import {
+  plan,
+  type BaseView as PlannerBaseView,
+  type LocalView as PlannerLocalView,
+  type RemoteFile as PlannerRemoteFile,
+  type RemoteView as PlannerRemoteView,
+} from "./planner";
 
 function genId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -22,16 +29,16 @@ function genId(): string {
 const MAX_FOLDER_DEPTH = 50;
 
 /**
- * The single definition of "the bytes on disk are no longer the bytes we last
- * synced". Every path that can destroy a local file routes through this, so
- * there is exactly one notion of "locally changed" in the engine: reconcile()
- * case 4 (remote gone, file on disk), reconcile() case 5 (present on both
- * sides) and reconcileRemoteOnly()'s delete guard.
+ * "The bytes on disk are no longer the bytes we last synced", for the ONE
+ * caller still left here: reconcileRemoteOnly()'s delete guard (the pull-only
+ * path, which has not moved to the planner yet).
  *
- * Note what it does NOT do: adopt the localMtimeMs === 0 pre-population
- * sentinel. That adoption is case 5's, and it stays there - it needs the
- * remote record to prove the local copy is the synced one, which is exactly
- * what the delete paths do not have.
+ * reconcile() no longer uses this - its copy of the rule now lives in
+ * planner.ts, which owns every decision the three-way path makes. Until
+ * reconcileRemoteOnly() moves too, these two definitions must be kept in
+ * step: planner.ts's version additionally adopts the localMtimeMs === 0
+ * pre-population sentinel, which this one deliberately does not, because a
+ * delete guard has no remote record to prove the local copy is the synced one.
  */
 function isLocallyChanged(stored: SyncFileRecord, localStat: LocalFileStat): boolean {
   return (
@@ -268,269 +275,221 @@ export async function reconcile(
     }
   }
 
-  // ── File reconciliation (three-way) ────────────────────────────
+  // ── File reconciliation: ONE call to the pure planner ──────────
+  //
+  // The case analysis that used to live here (six cases plus a follow-up pass
+  // for brand-new local files) now lives in planner.ts, where it is pure and
+  // therefore property-testable: 300 randomized histories per run assert that
+  // it converges, never destroys unconfirmed local bytes, and respects mode
+  // safety. Moving it there is also what found the case the analysis was
+  // MISSING - a file present on both sides with no shared history, which used
+  // to produce no action at all and leave the two copies different forever.
+  //
+  // What stays here is translation: the planner speaks in relative paths and
+  // ids, while the executors still want absolute paths and record objects.
 
-  const allFileIds = new Set([
-    ...remote.files.keys(),
-    ...Object.keys(storedState.files),
-  ]);
+  const plannerLocal: PlannerLocalView = {
+    files: new Map(
+      [...localFiles].map(([relPath, s]) => [relPath, { relPath, sizeBytes: s.sizeBytes, mtimeMs: s.mtimeMs }]),
+    ),
+    folders: localDirs,
+  };
 
-  // Also check local-only files (O(1) via reverse index instead of O(n) find)
-  for (const [relPath] of localFiles) {
-    if (!pathToRemoteFile.has(relPath)) {
-      const storedId = storedPathToId.get(relPath);
-      const storedByPath = storedId ? storedState.files[storedId] : undefined;
-      if (storedByPath) {
-        allFileIds.add(storedByPath.remoteId);
-      }
-    }
-  }
-
-  // Track which stored IDs we've processed, so we can clean up stale ones
-  const processedIds = new Set<string>();
-  let reconcileCount = 0;
-
-  for (const remoteId of allFileIds) {
-    // Yield to event loop every 500 entries to prevent UI freeze on large trees
-    if (++reconcileCount % 500 === 0) {
-      await new Promise<void>(r => setImmediate(r));
-    }
-    processedIds.add(remoteId);
-    const remoteFile = remote.files.get(remoteId);
-    const stored = storedState.files[remoteId];
-    const relPath = remoteFile ? filePathMap.get(remoteId) : stored?.localPath;
-    const localStat = relPath ? localFiles.get(relPath) : undefined;
-
-    // Case 1: In remote, NOT stored, NOT local → download-new
-    if (remoteFile && !stored && !localStat) {
-      const dir = remoteFile.folder_id
-        ? folderPathMap.get(remoteFile.folder_id) ?? ""
-        : "";
-      actions.push({
-        type: "download-new",
-        remoteFile,
-        localDir: dir ? join(pair.localPath, dir) : pair.localPath,
-      });
-      continue;
-    }
-
-    // Case 2: NOT remote, NOT stored, In local → upload-new
-    if (!remoteFile && !stored && localStat && relPath) {
-      const parts = relPath.split("/");
-      const dirPath = parts.slice(0, -1).join("/");
-      const remoteFolderId = dirPath ? (pathToRemoteFolder.get(dirPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
-      actions.push({
-        type: "upload-new",
-        localPath: join(pair.localPath, relPath),
-        remoteFolderId,
-        stat: localStat,
-        fileName: parts[parts.length - 1],
-      });
-      continue;
-    }
-
-    // Case 3: In remote, In stored, NOT local → locally deleted
-    if (remoteFile && stored && !localStat) {
-      const remoteChanged =
-        remoteFile.updated_at !== stored.remoteUpdatedAt ||
-        remoteFile.size_bytes !== stored.remoteSizeBytes ||
-        remoteFile.current_version !== stored.remoteVersion;
-      if (remoteChanged) {
-        const dir = remoteFile.folder_id
-          ? folderPathMap.get(remoteFile.folder_id) ?? ""
-          : "";
-        actions.push({
-          type: "download-new",
-          remoteFile,
-          localDir: dir ? join(pair.localPath, dir) : pair.localPath,
-        });
-      } else {
-        actions.push({ type: "delete-remote", remoteId, record: stored });
-      }
-      continue;
-    }
-
-    // Case 4: NOT remote, In stored, In local → remotely deleted
-    if (!remoteFile && stored && localStat && relPath) {
-      const localChanged = isLocallyChanged(stored, localStat);
-      if (localChanged) {
-        const parts = relPath.split("/");
-        const dirPath = parts.slice(0, -1).join("/");
-        // undefined here means exactly one thing: the file sat in a subfolder,
-        // and that subfolder is no longer in the snapshot either.
-        const remoteFolderId = dirPath ? pathToRemoteFolder.get(dirPath) : pair.remoteFolderId;
-        if (remoteFolderId === undefined) {
-          // The file AND its folder both vanished from the snapshot. That is
-          // what the server does when access is withdrawn - a hidden,
-          // permission-restricted or locked subtree simply stops being listed -
-          // and it is indistinguishable from a real remote deletion. Uploading
-          // would re-create the file at the sync root as a brand-new, unhidden,
-          // unlocked object: the protections that removed it, stripped off.
-          // Raise a conflict instead. Nothing is written on either side, the
-          // local edit is left untouched, and the user picks: keep-remote drops
-          // the local copy, keep-local/keep-both re-uploads it deliberately.
-          actions.push({
-            type: "conflict",
-            conflict: {
-              id: genId(),
-              pairId: pair.id,
-              localPath: join(pair.localPath, relPath),
-              remoteName: stored.remoteName,
-              remoteId: stored.remoteId,
-              localMtimeMs: localStat.mtimeMs,
-              remoteUpdatedAt: stored.remoteUpdatedAt,
-              localSizeBytes: localStat.sizeBytes,
-              remoteSizeBytes: stored.remoteSizeBytes,
-              detectedAt: Date.now(),
-            },
-          });
-        } else {
-          actions.push({
-            type: "upload-new",
-            localPath: join(pair.localPath, relPath),
-            remoteFolderId,
-            stat: localStat,
-            fileName: parts[parts.length - 1],
-          });
-        }
-      } else {
-        actions.push({
-          type: "delete-local",
-          localPath: join(pair.localPath, relPath),
-          record: stored,
-        });
-      }
-      continue;
-    }
-
-    // Case 4.5: Remote file moved (different path from stored)
-    // Detect by comparing remote relPath vs stored localPath. If they differ
-    // but the remoteId is the same, the file was moved/renamed on the server.
-    if (remoteFile && stored && relPath && stored.localPath !== relPath) {
-      const oldAbsPath = join(pair.localPath, stored.localPath);
-      const newAbsPath = join(pair.localPath, relPath);
-      actions.push({
-        type: "move-local",
-        oldLocalPath: oldAbsPath,
-        newLocalPath: newAbsPath,
-        remoteFile,
-        record: stored,
-      });
-      continue;
-    }
-
-    // Case 5: In remote, In stored, In local → check for changes
-    if (remoteFile && stored && localStat && relPath) {
-      const remoteChanged =
-        remoteFile.updated_at !== stored.remoteUpdatedAt ||
-        remoteFile.size_bytes !== stored.remoteSizeBytes ||
-        remoteFile.current_version !== stored.remoteVersion;
-
-      // Pre-populated from a remote snapshot (reinstall): localMtimeMs === 0 is
-      // a "match by size on next scan" sentinel. When the size matches, the
-      // local file is byte-identical to what we recorded, so adopt its real
-      // mtime into state and treat it as unchanged - otherwise every already-
-      // identical file gets a spurious upload-update. Mirrors the same handling
-      // in the engine's scanAndUpload.
-      if (stored.localMtimeMs === 0 && localStat.sizeBytes === stored.localSizeBytes) {
-        stored.localMtimeMs = localStat.mtimeMs;
-      }
-
-      const localChanged = isLocallyChanged(stored, localStat);
-
-      if (!remoteChanged && !localChanged) continue;
-
-      if (remoteChanged && !localChanged) {
-        actions.push({
-          type: "download-update",
-          remoteFile,
-          localPath: join(pair.localPath, relPath),
-          existingRecord: stored,
-        });
-      } else if (!remoteChanged && localChanged) {
-        actions.push({
-          type: "upload-update",
-          localPath: join(pair.localPath, relPath),
-          existingRecord: stored,
-          stat: localStat,
-        });
-      } else {
-        // Both changed → conflict
-        if (pair.conflictStrategy === "last-write-wins") {
-          const remoteTime = remoteFile.updated_at;
-          const localTime = localStat.mtimeMs / 1000;
-          if (remoteTime > localTime) {
-            actions.push({
-              type: "download-update",
-              remoteFile,
-              localPath: join(pair.localPath, relPath),
-              existingRecord: stored,
-            });
-          } else {
-            actions.push({
-              type: "upload-update",
-              localPath: join(pair.localPath, relPath),
-              existingRecord: stored,
-              stat: localStat,
-            });
-          }
-        } else {
-          actions.push({
-            type: "conflict",
-            conflict: {
-              id: genId(),
-              pairId: pair.id,
-              localPath: join(pair.localPath, relPath),
-              remoteName: remoteFile.name,
-              remoteId: remoteFile.id,
-              localMtimeMs: localStat.mtimeMs,
-              remoteUpdatedAt: remoteFile.updated_at,
-              localSizeBytes: localStat.sizeBytes,
-              remoteSizeBytes: remoteFile.size_bytes,
-              detectedAt: Date.now(),
-            },
-          });
-        }
-      }
-      continue;
-    }
-
-    // Case 6: NOT remote, In stored, NOT local → both deleted, clean up state
-    // (no action needed - will be cleaned below)
-  }
-
-  // ── Brand-new local files (no remote id, no stored record) ─────────
-  // The id-based loop above is keyed on remote ids ∪ stored records, so a
-  // genuinely new local file - one with neither a remote id nor a stored
-  // record - is never visited and the upload-new branch (Case 2) never fires
-  // for it. Walk localFiles directly to catch these and queue them for upload.
-  // Paths already covered by the loop (present in pathToRemoteFile or
-  // storedPathToId) are skipped, so nothing is double-processed.
-  let newLocalCount = 0;
-  for (const [relPath, localStat] of localFiles) {
-    // Yield to the event loop periodically, same as the main loop.
-    if (++newLocalCount % 500 === 0) {
-      await new Promise<void>(r => setImmediate(r));
-    }
-    if (pathToRemoteFile.has(relPath) || storedPathToId.has(relPath)) continue;
-    const parts = relPath.split("/");
-    const dirPath = parts.slice(0, -1).join("/");
-    const remoteFolderId = dirPath ? (pathToRemoteFolder.get(dirPath) ?? pair.remoteFolderId) : pair.remoteFolderId;
-    actions.push({
-      type: "upload-new",
-      localPath: join(pair.localPath, relPath),
-      remoteFolderId,
-      stat: localStat,
-      fileName: parts[parts.length - 1],
+  const plannerRemoteFiles: PlannerRemoteFile[] = [];
+  for (const [id, info] of remote.files) {
+    const relPath = filePathMap.get(id);
+    if (!relPath) continue;
+    plannerRemoteFiles.push({
+      remoteId: id,
+      relPath,
+      name: info.name,
+      folderId: info.folder_id,
+      sizeBytes: info.size_bytes,
+      updatedAt: info.updated_at,
+      version: info.current_version,
     });
   }
+  const plannerRemote: PlannerRemoteView = {
+    filesByPath: new Map(plannerRemoteFiles.map((f) => [f.relPath, f])),
+    filesById: new Map(plannerRemoteFiles.map((f) => [f.remoteId, f])),
+    foldersByPath: new Map(
+      [...pathToRemoteFolder].map(([relPath, id]) => [
+        relPath,
+        { remoteId: id, relPath, name: relPath.split("/").pop() ?? relPath, parentId: null },
+      ]),
+    ),
+  };
+
+  const baseFiles = Object.values(storedState.files);
+  const baseByPath = new Map(baseFiles.map((r) => [r.localPath, r]));
+  const baseFolders = Object.values(storedState.folders);
+  const plannerBase: PlannerBaseView = {
+    fileByPath: (key) => baseByPath.get(key),
+    fileById: (id) => storedState.files[id],
+    files: () => baseFiles,
+    folderByPath: (key) => storedState.folders[key],
+    folders: () => baseFolders,
+  };
+
+  const ops = plan({
+    local: plannerLocal,
+    remote: plannerRemote,
+    base: plannerBase,
+    conflictStrategy: pair.conflictStrategy || "last-write-wins",
+    localScanIncomplete,
+  });
+
+  const abs = (relPath: string): string => join(pair.localPath, relPath);
+  const raiseConflict = (
+    relPath: string,
+    remoteId: string,
+    remoteName: string,
+    localMtimeMs: number,
+    localSizeBytes: number,
+    remoteUpdatedAt: number,
+    remoteSizeBytes: number,
+  ): void => {
+    actions.push({
+      type: "conflict",
+      conflict: {
+        id: genId(),
+        pairId: pair.id,
+        localPath: abs(relPath),
+        remoteName,
+        remoteId,
+        localMtimeMs,
+        remoteUpdatedAt,
+        localSizeBytes,
+        remoteSizeBytes,
+        detectedAt: Date.now(),
+      },
+    });
+  };
+
+  for (const op of ops) {
+    switch (op.kind) {
+      // Folder work is handled above, where parent ids are resolved.
+      case "create-remote-folder":
+      case "create-local-folder":
+        break;
+
+      // Only the push path (no remote snapshot) defers content checks.
+      case "check-content":
+        break;
+
+      case "download-new": {
+        const info = remote.files.get(op.remoteId);
+        if (!info) break;
+        const dir = info.folder_id ? folderPathMap.get(info.folder_id) ?? "" : "";
+        actions.push({
+          type: "download-new",
+          remoteFile: info,
+          localDir: dir ? join(pair.localPath, dir) : pair.localPath,
+        });
+        break;
+      }
+
+      case "download-update": {
+        const info = remote.files.get(op.remoteId);
+        const record = storedState.files[op.remoteId];
+        if (!info) break;
+        if (!record) {
+          // Both sides hold this path with no shared history, and the server
+          // copy is the newer one. The legacy action shape cannot express
+          // "adopt this" (it needs a base record), so rather than guess, tell
+          // the user. Nothing is written on either side.
+          raiseConflict(op.relPath, op.remoteId, info.name, op.sizeBytes, op.sizeBytes, info.updated_at, info.size_bytes);
+          break;
+        }
+        actions.push({ type: "download-update", remoteFile: info, localPath: abs(op.relPath), existingRecord: record });
+        break;
+      }
+
+      case "upload-new": {
+        const stat = localFiles.get(op.relPath);
+        if (!stat) break;
+        const parts = op.relPath.split("/");
+        const dirPath = parts.slice(0, -1).join("/");
+        const remoteFolderId = dirPath
+          ? (pathToRemoteFolder.get(dirPath) ?? pair.remoteFolderId)
+          : pair.remoteFolderId;
+        actions.push({
+          type: "upload-new",
+          localPath: abs(op.relPath),
+          remoteFolderId,
+          stat,
+          fileName: parts[parts.length - 1],
+        });
+        break;
+      }
+
+      case "upload-update": {
+        const stat = localFiles.get(op.relPath);
+        if (!stat) break;
+        const record = storedState.files[op.baseRemoteId];
+        if (!record) {
+          // Same no-shared-history case as above, local side newer. Uploading
+          // "new" here would create a duplicate name in the same folder, so
+          // surface it instead.
+          const info = remote.files.get(op.baseRemoteId);
+          raiseConflict(
+            op.relPath, op.baseRemoteId, info?.name ?? op.relPath,
+            stat.mtimeMs, stat.sizeBytes,
+            info?.updated_at ?? 0, info?.size_bytes ?? 0,
+          );
+          break;
+        }
+        actions.push({ type: "upload-update", localPath: abs(op.relPath), existingRecord: record, stat });
+        break;
+      }
+
+      case "delete-local": {
+        const record = storedState.files[op.baseRemoteId];
+        if (!record) break;
+        actions.push({ type: "delete-local", localPath: abs(op.relPath), record });
+        break;
+      }
+
+      case "delete-remote": {
+        const record = storedState.files[op.remoteId];
+        if (!record) break;
+        actions.push({ type: "delete-remote", remoteId: op.remoteId, record });
+        break;
+      }
+
+      case "move-local": {
+        const info = remote.files.get(op.remoteId);
+        const record = storedState.files[op.remoteId];
+        if (!info || !record) break;
+        actions.push({
+          type: "move-local",
+          oldLocalPath: abs(op.fromRelPath),
+          newLocalPath: abs(op.toRelPath),
+          remoteFile: info,
+          record,
+        });
+        break;
+      }
+
+      case "conflict":
+        raiseConflict(
+          op.relPath, op.remoteId, op.remoteName,
+          op.localMtimeMs, op.localSizeBytes,
+          op.remoteUpdatedAt, op.remoteSizeBytes,
+        );
+        break;
+    }
+  }
+
 
   // Clean up stale records: files that exist in stored state but are gone from both
   // remote and local (Case 6). Skip when the local scan was incomplete - a file
   // that only *looks* absent this pass must not have its tracking dropped.
   if (!localScanIncomplete) {
     for (const id of Object.keys(storedState.files)) {
-      if (!processedIds.has(id)) continue;
+      // (The old loop tracked which ids it had visited and skipped the rest,
+      // but it always visited every stored id, so the check never excluded
+      // anything.)
       const stored = storedState.files[id];
       const remoteFile = remote.files.get(id);
       const localStat = stored.localPath ? localFiles.get(stored.localPath) : undefined;

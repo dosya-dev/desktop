@@ -22,8 +22,6 @@ const electronAPI = {
   getApiBase: (): Promise<string> => ipcRenderer.invoke("auth:get-api-base"),
   clearSession: (): Promise<void> => ipcRenderer.invoke("auth:clear-session"),
   waitForSession: (): Promise<void> => ipcRenderer.invoke("auth:wait-for-session"),
-  oauth: (provider: string): Promise<{ ok: boolean; redirectedTo?: string; error?: string }> =>
-    ipcRenderer.invoke("auth:oauth", provider),
   // Begin system-browser OAuth: returns the provider URL carrying a single-use
   // login nonce that the dosya:// callback must echo back to be accepted.
   beginOAuth: (provider: string): Promise<string> =>
@@ -106,6 +104,8 @@ const electronAPI = {
   removeSyncPair: (pairId: string) => ipcRenderer.invoke("sync:remove-pair", { pairId }),
   updateSyncPair: (pairId: string, updates: any) => ipcRenderer.invoke("sync:update-pair", { pairId, updates }),
   pickLocalFolder: (): Promise<string | null> => ipcRenderer.invoke("sync:pick-local-folder"),
+  estimateLocalFolder: (path: string): Promise<{ files: number; folders: number; truncated: boolean }> =>
+    ipcRenderer.invoke("sync:estimate-local-folder", { path }),
   getSyncFolderTree: (workspaceId: string) => ipcRenderer.invoke("sync:get-folder-tree", { workspaceId }),
   pauseSyncPair: (pairId: string) => ipcRenderer.invoke("sync:pause-pair", { pairId }),
   resumeSyncPair: (pairId: string) => ipcRenderer.invoke("sync:resume-pair", { pairId }),

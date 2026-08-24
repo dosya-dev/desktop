@@ -1,15 +1,28 @@
 import { EventEmitter } from "events";
 import { access, readdir, stat, statfs, unlink, mkdir } from "fs/promises";
 import { join, resolve, sep, basename, dirname } from "path";
-import { toRelPath, normalizeRel, pathKey, absKey, longPath } from "./paths";
-import { loadConfig, saveConfig, loadPairState, savePairState, deletePairState } from "./config";
-import { terminateStateWriter } from "./state-writer";
+import { toRelPath, normalizeRel, pathKey, absKey, longPath, isPathWithinRoot } from "./paths";
+import { loadConfig, saveConfig, loadPairState, deletePairState, openSyncIndex, syncStateDir, setSyncDataDir } from "./config";
+import type { SyncIndex, PairMeta } from "./index-db";
+import { migrateJsonStateIfNeeded } from "./index-migrate";
+import { mergeStatusPairs } from "./status-merge";
+import { plan, filterOpsForMode, type BaseView, type LocalFile, type PlanOp } from "./planner";
+import { Backpressure } from "./async-queue";
+import type { QueuedOp } from "./index-db";
+import { forbiddenSyncRootReason } from "./system-paths";
+import { homedir, tmpdir, hostname } from "os";
 import { RemoteClient, RateLimitError } from "./remote-client";
 import { directConcurrencyFor } from "./transfer-concurrency";
 import { LocalWatcher, type WatchEvent, shouldIgnoreEntry, ignoreReason } from "./local-watcher";
 import { RemotePoller, type RemoteSnapshot } from "./remote-poller";
 import { reconcile, reconcileRemoteOnly } from "./reconciler";
 import { hashFile } from "./hash";
+import { chunkFile } from "./chunker";
+import { blockTrackingApplies, shouldAttemptDelta, deltaIsWorthIt } from "./delta-eligibility";
+import { conflictCopyName } from "./conflict-name";
+import type { EnvProvider } from "./env-provider";
+import { createElectronEnv } from "./electron-env";
+import { existsSync } from "fs";
 import type {
   SyncConfig,
   SyncPair,
@@ -23,6 +36,9 @@ import type {
   SyncAction,
   SyncMode,
   RemoteFileInfo,
+  SyncFileRecord,
+  SyncFolderRecord,
+  SyncFileError,
 } from "./types";
 
 // ── Concurrency semaphore ───��───────────────────────────────────────
@@ -58,28 +74,19 @@ class Semaphore {
   }
 }
 
-// ── Path index ──────────────────────────────────────────────────────
-//
-// localPath (relative) → remoteId, with O(1) lookup. Keys are normalized
-// (NFC + case-folded on case-insensitive filesystems) via pathKey() so that
-// macOS NFD/NFC differences and "Foo.txt"/"foo.txt" collisions map to a
-// single entry - matching how the OS treats them on disk. The real,
-// case/NFC-preserving path stays in the file record; this index only maps.
-// Same API surface as Map so call sites are unchanged.
-class PathIndex {
-  private m = new Map<string, string>();
-  set(relPath: string, remoteId: string): void { this.m.set(pathKey(relPath), remoteId); }
-  get(relPath: string): string | undefined { return this.m.get(pathKey(relPath)); }
-  delete(relPath: string): boolean { return this.m.delete(pathKey(relPath)); }
-  clear(): void { this.m.clear(); }
-  get size(): number { return this.m.size; }
-}
-
 // ── Constants ───────��────────────────────────────────���──────────────
 
 const RECENT_DOWNLOAD_TTL_MS = 120_000; // suppress watcher events for 2 min after download (large files can take >10s)
-const STATE_SAVE_INTERVAL = 500; // save state every N file operations
 const SESSION_RECOVERY_MS = 30_000; // check for session recovery every 30s
+/** Scanner stops enqueueing at this depth and resumes once drained to LOW. */
+const OPS_QUEUE_HIGH_WATER = 20_000;
+const OPS_QUEUE_LOW_WATER = 5_000;
+/** Ops claimed per drain cycle. */
+const OPS_BATCH = 200;
+/** Completed ops are kept this long for resume clarity, then swept. */
+const OPS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** Files given a content hash per idle pass. Bounded so it never competes. */
+const HASH_BACKFILL_BATCH = 500;
 const MAX_FILE_RETRIES = 5; // max retry attempts per persistently failing file
 /** Rescan interval when live watching was abandoned (tree too big - EMFILE). */
 const DEGRADED_RESCAN_MS = 10 * 60 * 1000;
@@ -132,8 +139,6 @@ interface PairRuntime {
   queuedEvents: Map<string, WatchEvent>;
   /** Set when queuedEvents overflowed and we fell back to a full rescan. */
   queuedOverflow: boolean;
-  /** O(1) lookup: localPath → remoteId (normalized keys - see PathIndex) */
-  pathIndex: PathIndex;
   /** Timer for auto-resuming after rate limit pause */
   rateLimitResumeTimer: ReturnType<typeof setTimeout> | null;
   /** Periodic rescan timer used when the watcher degraded (tree too large). */
@@ -170,6 +175,11 @@ interface PairRuntime {
   /** Throttle for periodic "still scanning/fetching…" progress logs. */
   lastProgressLogAt: number;
 }
+
+/** One file the push scan queued for upload. */
+type UploadEntry = { absPath: string; relPath: string; isNew: boolean; sizeBytes: number };
+/** A tracked file whose mtime changed but size didn't - hash to decide. */
+type NeedsHashEntry = { absPath: string; relPath: string; sizeBytes: number; record: import("./types").SyncFileRecord };
 
 /**
  * Helper: check if an error is a rate limit error.
@@ -227,12 +237,6 @@ export class SyncEngine extends EventEmitter {
   /** File IDs that need sync-flag set after a batch upload completes. */
   private pendingSyncFlagIds: string[] = [];
 
-  /** Per-pair save lock to prevent concurrent writes to the same state file. */
-  private saveLocks = new Set<string>();
-
-  /** Pairs whose state changed while a save was in flight - re-saved on completion. */
-  private saveDirty = new Set<string>();
-
   /**
    * Serializes config-mutating operations (add/remove/update pair).
    * Each of those does load → check → save, and `this.config` is shared
@@ -273,36 +277,99 @@ export class SyncEngine extends EventEmitter {
     return directConcurrencyFor(this.config?.maxConcurrentTransfers || 3, Number.POSITIVE_INFINITY);
   }
 
-  private async safeSaveState(state: SyncPairState): Promise<void> {
-    const key = state.pairId;
-    // If a save is already in progress for this pair, don't drop this request:
-    // the in-flight save snapshotted state at postMessage time (structured
-    // clone in the writer worker) and won't include mutations made since. Mark
-    // the pair dirty so the in-flight save re-runs once more when it finishes.
-    if (this.saveLocks.has(key)) {
-      this.saveDirty.add(key);
-      return;
-    }
-    this.saveLocks.add(key);
-    try {
-      // Loop so a mutation that lands mid-save is flushed once more. Any number
-      // of skipped saves during a single write coalesce into one follow-up.
-      do {
-        this.saveDirty.delete(key);
-        try {
-          await savePairState(state);
-        } catch {
-          // Swallow - state save should never break sync operations
-        }
-      } while (this.saveDirty.has(key));
-    } finally {
-      this.saveLocks.delete(key);
-    }
+  // ── Write-through persistence ─────────────────────────────────────
+  //
+  // Every mutation of a pair's base tree goes through one of these helpers:
+  // they update the in-memory working copy AND the durable index together,
+  // in one place. Before this, state lived only in RAM until a periodic
+  // whole-blob save, so a crash lost up to 500 file operations - and the save
+  // itself was the memory spike that made a 500K-file sync fatal
+  // (2026-08-20 stress test).
+  //
+  // Phase 3 deletes the in-memory maps entirely and reads straight from the
+  // index; these helpers are the seam that makes that a small change.
+
+  /** The process-wide index. Lazily resolved so construction order is free. */
+  private get index(): SyncIndex {
+    return openSyncIndex();
   }
 
-  constructor(private apiBase: string) {
+  private putFile(rt: PairRuntime, record: SyncFileRecord): void {
+    this.index.upsertFile(rt.pair.id, record);
+  }
+
+  private dropFile(rt: PairRuntime, remoteId: string): void {
+    this.index.deleteFileById(rt.pair.id, remoteId);
+  }
+
+  private putFolder(rt: PairRuntime, record: SyncFolderRecord): void {
+    this.index.upsertFolder(rt.pair.id, record);
+  }
+
+  private dropFolder(rt: PairRuntime, relPath: string): void {
+    this.index.deleteFolder(rt.pair.id, relPath);
+  }
+
+  private putError(rt: PairRuntime, err: SyncFileError): void {
+    this.index.upsertError(rt.pair.id, err);
+  }
+
+  private dropError(rt: PairRuntime, relPath: string): void {
+    this.index.clearError(rt.pair.id, relPath);
+  }
+
+  /**
+   * Per-pair brake between the scanner and the executors. The scanner can
+   * enumerate far faster than the uplink can transfer, so without this the
+   * ops table grows without bound while the first batch is still uploading.
+   */
+  private backpressures = new Map<string, Backpressure>();
+  private backpressure(rt: PairRuntime): Backpressure {
+    let bp = this.backpressures.get(rt.pair.id);
+    if (!bp) {
+      bp = new Backpressure({ high: OPS_QUEUE_HIGH_WATER, low: OPS_QUEUE_LOW_WATER });
+      this.backpressures.set(rt.pair.id, bp);
+    }
+    return bp;
+  }
+
+  /**
+   * A read-only window over this pair's base tree, for the planner. Backed
+   * straight by the index - no in-memory copy, which is what lets a plan be
+   * made without holding the tree in RAM.
+   */
+  private baseViewFor(rt: PairRuntime): BaseView {
+    const pairId = rt.pair.id;
+    const idx = this.index;
+    return {
+      fileByPath: (key) => idx.getFileByPath(pairId, key),
+      fileById: (remoteId) => idx.getFileById(pairId, remoteId),
+      files: () => idx.iterFiles(pairId),
+      folderByPath: (key) => idx.getFolder(pairId, key),
+      folders: () => idx.iterFolders(pairId),
+    };
+  }
+
+  /** Update pair-level markers in both the working copy and the index. */
+  private putPairMeta(rt: PairRuntime, meta: Partial<PairMeta>): void {
+    if (meta.lastRemotePollAt !== undefined) rt.state.lastRemotePollAt = meta.lastRemotePollAt;
+    if (meta.lastFullSyncAt !== undefined) rt.state.lastFullSyncAt = meta.lastFullSyncAt;
+    if (meta.rootFolderCreated !== undefined) rt.state.rootFolderCreated = meta.rootFolderCreated;
+    this.index.setPairMeta(rt.pair.id, meta);
+  }
+
+  /**
+   * `env` supplies the three things the transport needs from its host: the
+   * session cookie, the system proxy, and the dev flag. It defaults to the
+   * Electron-backed implementation, so nothing changes today - but it is what
+   * lets the engine eventually run somewhere Electron's APIs do not exist.
+   */
+  constructor(private apiBase: string, env: EnvProvider = createElectronEnv()) {
     super();
-    this.client = new RemoteClient(apiBase);
+    // Point persistence at the host's data directory before anything opens a
+    // file under it.
+    if (env.userDataDir) setSyncDataDir(env.userDataDir);
+    this.client = new RemoteClient(apiBase, env);
     this.transferSemaphore = new Semaphore(3);
   }
 
@@ -315,6 +382,46 @@ export class SyncEngine extends EventEmitter {
   private async startLocked(): Promise<void> {
     if (this.started) return;
 
+    // One-way import of the pre-SQLite JSON state files. Runs once per
+    // installation; a pair whose state cannot be read is reported loudly
+    // rather than silently starting from an empty base tree (which would
+    // re-derive - and in two-way mode, re-delete - everything).
+    try {
+      const migration = await migrateJsonStateIfNeeded(this.index, syncStateDir());
+      if (migration.migrated.length > 0) {
+        console.log(`[sync] Imported ${migration.migrated.length} pair state file(s) into the index.`);
+      }
+      for (const failure of migration.failed) {
+        console.error(`[sync] State import FAILED for pair ${failure.pairId}: ${failure.error}. Its backup was kept as .corrupt.bak; this pair will re-scan from an empty base.`);
+      }
+    } catch (err: any) {
+      console.error("[sync] State migration could not run:", err?.message ?? err);
+    }
+
+    // Load the config BEFORE the session check: getStatus() merges configured
+    // pairs into the UI list, and a no-session boot must still show them
+    // (the 2026-08-20 crash left an empty Sync tab that still refused
+    // re-adding the folder because only the duplicate check saw the config).
+    this.config = await loadConfig();
+
+    // A timed pause ("snooze") persists its deadline. Expired while the app
+    // was closed → clear it; still in the future → re-arm the auto-resume a
+    // crash would otherwise have lost forever.
+    if (this.config.pausedUntil) {
+      if (this.config.pausedUntil <= Date.now()) {
+        this.config.pausedGlobally = false;
+        delete this.config.pausedUntil;
+        await saveConfig(this.config);
+      } else {
+        const remaining = this.config.pausedUntil - Date.now();
+        if (this.pauseResumeTimer) clearTimeout(this.pauseResumeTimer);
+        this.pauseResumeTimer = setTimeout(() => {
+          this.pauseResumeTimer = null;
+          this.resumeAll().catch(() => {});
+        }, remaining);
+      }
+    }
+
     // Don't start sync if user is not logged in.
     // The app should call start() again after login.
     // Cookie cache was cleared on the last stop(), so this read is fresh.
@@ -325,7 +432,6 @@ export class SyncEngine extends EventEmitter {
     }
 
     this.started = true;
-    this.config = await loadConfig();
     this.transferSemaphore.updateMax(this.config.maxConcurrentTransfers || 3);
     this.client.setBandwidthLimits(this.config.maxUploadBytesPerSec || 0, this.config.maxDownloadBytesPerSec || 0);
 
@@ -369,11 +475,36 @@ export class SyncEngine extends EventEmitter {
       }
     }, 5 * 60 * 1000); // every 5 minutes
 
+    // Completed ops are kept briefly so a resume can show what happened, then
+    // dropped - without this the table grows forever.
+    try {
+      this.index.sweepDoneOps(Date.now() - OPS_RETENTION_MS);
+    } catch (err: any) {
+      console.error("[sync] Ops sweep failed:", err?.message ?? err);
+    }
+
     for (const pair of this.config.pairs) {
+      // Anything left "running" belongs to a process that is gone. Return it
+      // to the queue so a kill mid-sync resumes rather than rescanning.
+      try {
+        const requeued = this.index.resetRunningOps(pair.id, Date.now());
+        if (requeued > 0) {
+          console.log(`[sync] Resuming ${requeued} interrupted operation(s) for pair ${pair.id}.`);
+        }
+      } catch (err: any) {
+        console.error("[sync] Could not requeue interrupted ops:", err?.message ?? err);
+      }
       if (pair.enabled && !this.config.pausedGlobally) {
-        await this.startPair(pair);
+        // Per-pair guard: one pair failing to start must not strand every
+        // pair after it in the list with no runtime and no error surfaced.
+        try {
+          await this.startPair(pair);
+        } catch (err: any) {
+          console.error(`[sync] startPair failed for ${pair.id} (${pair.localPath}):`, err?.message ?? err);
+        }
       }
     }
+    this.emitStatus();
   }
 
   async stop(): Promise<void> {
@@ -403,6 +534,11 @@ export class SyncEngine extends EventEmitter {
       this.statusDirty = false;
     }
 
+    // Release every brake first: a scanner waiting on a queue nothing will
+    // drain would hold the shutdown open until its timeout.
+    for (const bp of this.backpressures.values()) bp.release();
+    this.backpressures.clear();
+
     // Phase 1: Signal all pairs to stop. In-flight workers check rt.status
     // and this.stopped - both must be set before we do anything destructive.
     for (const [, rt] of this.runtimes) {
@@ -417,29 +553,17 @@ export class SyncEngine extends EventEmitter {
     }
 
     // Phase 2: Let the event loop tick so in-flight workers see the paused
-    // status and bail out before we save state and clear runtimes.
+    // status and bail out before we clear runtimes.
     await new Promise<void>(r => setTimeout(r, 100));
 
-    // Phase 3: Persist state with a hard timeout.
-    // If any state save hangs (disk I/O stall, full disk, network drive),
-    // we abandon after 4s to avoid blocking shutdown indefinitely.
-    const SAVE_TIMEOUT_MS = 4000;
-    const saveAll = Promise.all(
-      Array.from(this.runtimes.values()).map((rt) =>
-        this.safeSaveState(rt.state).catch(() => {}),
-      ),
-    );
-    await Promise.race([
-      saveAll,
-      new Promise<void>((r) => setTimeout(r, SAVE_TIMEOUT_MS)),
-    ]);
-
+    // No "persist state before quitting" phase any more: every mutation was
+    // already written through to the index as it happened, so there is
+    // nothing buffered to lose and nothing to race a shutdown timeout.
     this.runtimes.clear();
     this.activeTransfers.clear();
     this.conflicts = [];
     this.pendingSyncFlagIds = [];
     this.recentDownloads.clear();
-    terminateStateWriter();
     try { this.emitStatus(); } catch {}
   }
 
@@ -621,27 +745,25 @@ export class SyncEngine extends EventEmitter {
   /**
    * Returns true if relPath resolves inside syncRoot.
    * Prevents path traversal attacks from malicious remote file names.
+   *
+   * Delegates to paths.ts so the rule is one exported, directly tested function
+   * rather than a private method no test can reach.
    */
   private isPathSafe(syncRoot: string, relPath: string): boolean {
-    const resolved = resolve(syncRoot, relPath);
-    const normalizedRoot = resolve(syncRoot);
-    return resolved === normalizedRoot || resolved.startsWith(normalizedRoot + sep);
+    return isPathWithinRoot(syncRoot, relPath);
   }
 
   // ── Path index helpers (O(1) lookups) ─────────────────────────────
 
-  private rebuildPathIndex(rt: PairRuntime): void {
-    rt.pathIndex.clear();
-    for (const [remoteId, record] of Object.entries(rt.state.files)) {
-      rt.pathIndex.set(record.localPath, remoteId);
-    }
-  }
-
-  private lookupByPath(rt: PairRuntime, relPath: string): { remoteId: string; record: import("./types").SyncFileRecord } | undefined {
-    const remoteId = rt.pathIndex.get(relPath);
-    if (!remoteId) return undefined;
-    const record = rt.state.files[remoteId];
-    return record ? { remoteId, record } : undefined;
+  /**
+   * Path lookup now goes to the index: `files_by_path` replaces the old
+   * in-memory PathIndex, and `getFileByPath` applies the same NFC +
+   * case-folded key. Holding a second copy of every path in RAM was a
+   * meaningful share of the memory that killed a 500K-file sync.
+   */
+  private lookupByPath(rt: PairRuntime, relPath: string): { remoteId: string; record: SyncFileRecord } | undefined {
+    const record = this.index.getFileByPath(rt.pair.id, relPath);
+    return record ? { remoteId: record.remoteId, record } : undefined;
   }
 
   // ── Recent download tracking (prevents re-upload loop) ────────────
@@ -694,7 +816,6 @@ export class SyncEngine extends EventEmitter {
         queuedSync: false,
         queuedEvents: new Map(),
         queuedOverflow: false,
-        pathIndex: new PathIndex(),
         rateLimitResumeTimer: null,
       rescanTimer: null,
       notices: new Map(),
@@ -747,7 +868,10 @@ export class SyncEngine extends EventEmitter {
           null,
         );
         pair.remoteFolderId = folderId;
+        // No runtime exists yet at this point in startPair, so this writes
+        // through to the index directly rather than via putPairMeta.
         state.rootFolderCreated = true;
+        this.index.setPairMeta(pair.id, { rootFolderCreated: true });
         console.log(`[sync] Created root folder on server: "${folderName}" → ${folderId}`);
 
         try {
@@ -763,7 +887,6 @@ export class SyncEngine extends EventEmitter {
             await saveConfig(this.config);
           }
         }
-        await this.safeSaveState(state);
       } catch (err: any) {
         console.error("[sync] Failed to create root folder:", err.message);
       }
@@ -778,19 +901,13 @@ export class SyncEngine extends EventEmitter {
 
     if (needsLocalWatch) {
       // Adaptive debounce: large trees get longer debounce to reduce CPU churn
-      const trackedFiles = Object.keys(state.files).length;
+      const trackedFiles = this.index.countFiles(pair.id);
       const debounceMs = trackedFiles > 5000 ? 2000 : 1000;
       const maxWaitMs = trackedFiles > 5000 ? 8000 : 5000;
       watcher = new LocalWatcher(pair.localPath, debounceMs, maxWaitMs, pair.excludedPatterns);
     }
     if (needsRemotePoll) {
       poller = new RemotePoller(this.client, pair);
-    }
-
-    // Build path index from stored state
-    const pathIndex = new PathIndex();
-    for (const [remoteId, record] of Object.entries(state.files)) {
-      pathIndex.set(record.localPath, remoteId);
     }
 
     const rt: PairRuntime = {
@@ -801,7 +918,6 @@ export class SyncEngine extends EventEmitter {
       queuedSync: false,
       queuedEvents: new Map(),
       queuedOverflow: false,
-      pathIndex,
       rateLimitResumeTimer: null,
       rescanTimer: null,
       notices: new Map(),
@@ -946,7 +1062,6 @@ export class SyncEngine extends EventEmitter {
     }
     // Let workers see the paused status and bail out
     await new Promise<void>(r => setTimeout(r, 100));
-    try { await this.safeSaveState(rt.state); } catch {}
     this.runtimes.delete(pairId);
   }
 
@@ -994,9 +1109,7 @@ export class SyncEngine extends EventEmitter {
       await this.flushSyncFlags();
 
       rt.status = "idle";
-      rt.state.lastFullSyncAt = Date.now();
-      rt.state.lastRemotePollAt = Date.now();
-      await this.safeSaveState(rt.state);
+      this.putPairMeta(rt, { lastFullSyncAt: Date.now(), lastRemotePollAt: Date.now() });
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
@@ -1014,7 +1127,6 @@ export class SyncEngine extends EventEmitter {
   }
 
   private async executeActions(rt: PairRuntime, actions: SyncAction[]): Promise<void> {
-    let opCount = 0;
 
     // Count file transfer actions and compute total bytes for progress UI
     const fileActions = actions.filter(a =>
@@ -1117,9 +1229,9 @@ export class SyncEngine extends EventEmitter {
           } else continue;
 
           if (!this.isPathSafe(rt.pair.localPath, relPath)) continue;
-          const dlErr = rt.state.fileErrors[relPath];
+          const dlErr = this.index.getError(rt.pair.id, relPath);
           if (dlErr?.permanent) continue;
-          if (dlErr && dlErr.retryCount >= MAX_FILE_RETRIES) { dlErr.permanent = true; continue; }
+          if (dlErr && dlErr.retryCount >= MAX_FILE_RETRIES) { this.putError(rt, { ...dlErr, permanent: true }); continue; }
 
           try {
             await mkdir(longPath(dirname(absPath)), { recursive: true });
@@ -1132,7 +1244,7 @@ export class SyncEngine extends EventEmitter {
               // Update state
               const s = await stat(longPath(absPath));
               this.markRecentDownload(absPath);
-              rt.state.files[action.remoteFile.id] = {
+              this.putFile(rt, {
                 remoteId: action.remoteFile.id,
                 remoteName: action.remoteFile.name,
                 remoteFolderId: action.remoteFile.folder_id,
@@ -1143,27 +1255,25 @@ export class SyncEngine extends EventEmitter {
                 localSizeBytes: s.size,
                 localMtimeMs: s.mtimeMs,
                 syncedAt: Date.now(),
-              };
-              rt.pathIndex.set(relPath, action.remoteFile.id);
+              });
             } else {
               // Fallback: download through Worker
               await this.downloadRemoteFile(rt, action.remoteFile, absPath, relPath);
             }
-            delete rt.state.fileErrors[relPath];
+            this.dropError(rt, relPath);
           } catch (dlE: any) {
             if (dlE.message === "SESSION_EXPIRED") { dlFatalErr = dlE; return; }
             if (isRateLimitError(dlE)) { dlFatalErr = dlE; return; }
-            const prev = rt.state.fileErrors[relPath];
-            rt.state.fileErrors[relPath] = {
+            const prev = this.index.getError(rt.pair.id, relPath);
+            this.putError(rt, {
               filePath: relPath, error: dlE.message,
               retryCount: (prev?.retryCount ?? 0) + 1, lastAttemptAt: Date.now(),
               permanent: dlE.message.includes("404") || dlE.message.includes("not found"),
-            };
+            });
           }
           rt.completedFilesInBatch++;
           rt.completedBytesInBatch += action.remoteFile.size_bytes;
           this.markProgress(rt);
-          if (++opCount % STATE_SAVE_INTERVAL === 0) await this.safeSaveState(rt.state);
           this.emitStatus();
         }
       };
@@ -1204,18 +1314,17 @@ export class SyncEngine extends EventEmitter {
           if (upErr.message === "SESSION_EXPIRED") throw upErr;
           if (isRateLimitError(upErr)) throw upErr;
           console.error(`[sync] upload failed for ${relPath}:`, upErr.message);
-          const existing = rt.state.fileErrors[relPath];
-          rt.state.fileErrors[relPath] = {
+          const existing = this.index.getError(rt.pair.id, relPath);
+          this.putError(rt, {
             filePath: relPath,
             error: upErr.message,
             retryCount: (existing?.retryCount ?? 0) + 1,
             lastAttemptAt: Date.now(),
             permanent: isPermanentUploadError(upErr.message),
-          };
+          });
         }
         rt.completedFilesInBatch++;
         rt.completedBytesInBatch += action.type === "upload-new" ? action.stat.sizeBytes : action.stat.sizeBytes;
-        if (++opCount % STATE_SAVE_INTERVAL === 0) await this.safeSaveState(rt.state);
         this.emitStatus();
       }
     }
@@ -1227,15 +1336,23 @@ export class SyncEngine extends EventEmitter {
         switch (action.type) {
           case "move-local": {
             const newRelPath = toRelPath(rt.pair.localPath, action.newLocalPath);
+            // newLocalPath is built from the REMOTE name (planner.ts's
+            // toRelPath: remoteFile.relPath), so it carries the same traversal
+            // risk as a download target and needs the same guard the other
+            // sinks already apply. Without it a remote rename to ".." moves a
+            // synced file out of the root - and the catch below would DOWNLOAD
+            // the remote file to that escaped path.
+            if (!this.isPathSafe(rt.pair.localPath, newRelPath)) {
+              this.log(rt.pair.id, `Skipped move to unsafe path: ${newRelPath}`);
+              break;
+            }
             try {
               await mkdir(longPath(dirname(action.newLocalPath)), { recursive: true });
               const { rename: fsRename } = await import("fs/promises");
               await fsRename(longPath(action.oldLocalPath), longPath(action.newLocalPath));
-              rt.pathIndex.delete(action.record.localPath);
               action.record.localPath = newRelPath;
               action.record.remoteName = action.remoteFile.name;
               action.record.remoteFolderId = action.remoteFile.folder_id;
-              rt.pathIndex.set(newRelPath, action.record.remoteId);
               this.markRecentDownload(action.newLocalPath);
             } catch {
               await mkdir(longPath(dirname(action.newLocalPath)), { recursive: true });
@@ -1245,14 +1362,12 @@ export class SyncEngine extends EventEmitter {
           }
           case "delete-local": {
             await unlink(longPath(action.localPath)).catch(() => {});
-            delete rt.state.files[action.record.remoteId];
-            rt.pathIndex.delete(action.record.localPath);
+            this.dropFile(rt, action.record.remoteId);
             break;
           }
           case "delete-remote": {
             await this.client.deleteFile(action.remoteId).catch(() => {});
-            delete rt.state.files[action.remoteId];
-            rt.pathIndex.delete(action.record.localPath);
+            this.dropFile(rt, action.remoteId);
             console.log(`[sync] Deleted remote: ${action.record.localPath}`);
             break;
           }
@@ -1269,15 +1384,32 @@ export class SyncEngine extends EventEmitter {
             this.conflicts.push(action.conflict);
             this.emit("conflict-detected", action.conflict);
             console.log(`[sync] Conflict detected: ${action.conflict.remoteName}`);
+
+            // keep-both resolves itself: the local version is renamed to a
+            // conflict copy and uploaded alongside, and the server's version
+            // comes back down to the original path on the next cycle. Waiting
+            // for the user to click would leave the two versions diverging in
+            // the meantime, and the whole point of keep-both is that neither
+            // is thrown away. What happened is reported as a notice, so the
+            // second file in the folder is never a mystery.
+            if ((rt.pair.conflictStrategy || "keep-both") === "keep-both") {
+              const original = basename(action.conflict.localPath);
+              try {
+                await this.resolveConflict(action.conflict.id, "keep-both");
+                this.addNotice(rt, "conflict-copy",
+                  `"${original}" was changed in two places. Both versions were kept - look for a "conflict copy" beside it and delete the one you do not want.`);
+                this.log(rt.pair.id, `Kept both versions of "${original}" - it changed here and on the server`);
+              } catch (err: any) {
+                // resolveConflict re-queues the conflict on failure, so the
+                // user can still resolve it by hand.
+                console.error(`[sync] Automatic conflict copy failed for ${original}:`, err?.message ?? err);
+              }
+            }
             break;
           }
         }
 
         // Save state periodically (not just at end of batch)
-        opCount++;
-        if (opCount % STATE_SAVE_INTERVAL === 0) {
-          await this.safeSaveState(rt.state);
-        }
       } catch (err: any) {
         if (err.message === "SESSION_EXPIRED") throw err;
         // Propagate rate limit errors to break out of the action loop
@@ -1329,6 +1461,17 @@ export class SyncEngine extends EventEmitter {
     this.emitStatus();
 
     try {
+      // Work left over from a previous run is already decided. Execute it
+      // before walking: re-planning half a million files to reach conclusions
+      // that are sitting in the queue is exactly the waste this avoids.
+      const pending = this.index.countOpsByState(pairId, "pending");
+      if (pending > 0) {
+        this.log(pairId, `Resuming ${pending.toLocaleString()} operation(s) from the last run`);
+        rt.phase = "transferring";
+        rt.statusText = `Resuming ${pending.toLocaleString()} operations...`;
+        this.emitStatus();
+        await this.drainOps(rt, () => true);
+      }
       await this.scanAndUpload(rt);
 
       // If the pair was paused/stopped while we were scanning, don't
@@ -1354,13 +1497,12 @@ export class SyncEngine extends EventEmitter {
       rt.scannedFiles = 0;
       // Prune stale file errors older than 7 days to prevent unbounded growth
       const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-      for (const [path, err] of Object.entries(rt.state.fileErrors)) {
-        if (err.lastAttemptAt < weekAgo) delete rt.state.fileErrors[path];
+      for (const [path, err] of [...this.index.iterErrors(rt.pair.id)].map((e) => [e.filePath, e] as const)) {
+        if (err.lastAttemptAt < weekAgo) this.dropError(rt, path);
       }
       rt.scannedFolders = 0;
       rt.statusText = "";
-      rt.state.lastFullSyncAt = Date.now();
-      await this.safeSaveState(rt.state);
+      this.putPairMeta(rt, { lastFullSyncAt: Date.now() });
       this.log(pairId, "Sync complete");
     } catch (err: any) {
       // If paused/stopped during sync, don't set error state
@@ -1397,7 +1539,9 @@ export class SyncEngine extends EventEmitter {
   }
 
   private async scanAndUpload(rt: PairRuntime): Promise<void> {
-    const { pair, state } = rt;
+    // The base tree is read through the index (baseViewFor), not the in-memory
+    // maps - this method no longer needs rt.state at all.
+    const { pair } = rt;
 
     // NOTE: no disk-space check here - this is the UPLOAD path and uploads
     // don't consume local disk. Backing up from a nearly-full disk must work.
@@ -1411,17 +1555,42 @@ export class SyncEngine extends EventEmitter {
     }
 
     // Phase 1: Walk the tree and collect files + new directories.
-    // No API calls here - just filesystem reads. Yields to the event loop
-    // every YIELD_INTERVAL entries to prevent blocking UI/IPC.
+    // No API calls during the walk itself - just filesystem reads. Yields to
+    // the event loop every YIELD_INTERVAL entries to prevent blocking UI/IPC.
+    //
+    // Windowed draining: these arrays are flushed (folders created, hashes
+    // checked, files uploaded) every SCAN_WINDOW files instead of after the
+    // whole walk. Materializing the entire tree first meant 500K-entry arrays
+    // held for hours - the 2026-08-20 stress test's OOM. DFS order guarantees
+    // a file's ancestor folders were discovered no later than the file
+    // itself, so per-window folder creation preserves the parent-before-child
+    // invariant the manifest phase depends on.
     const YIELD_INTERVAL = 200;
     const STAT_BATCH_SIZE = 50;
-    const toUpload: { absPath: string; relPath: string; isNew: boolean; sizeBytes: number }[] = [];
-    const needsHash: { absPath: string; relPath: string; sizeBytes: number; record: import("./types").SyncFileRecord }[] = [];
-    const newFolders: string[] = [];
+    const SCAN_WINDOW = 5000; // matches MANIFEST_BATCH in uploadSmallFiles
+    const MAX_WALK_DEPTH = 50; // matches reconciler.ts MAX_FOLDER_DEPTH
+    // The walk only OBSERVES: it collects what is on disk into a window and
+    // decides nothing. What to do about each file is the planner's call, made
+    // once per window in drainWindow.
+    const windowFiles = new Map<string, LocalFile>();
+    const windowFolders = new Set<string>();
+    const windowAbsPaths = new Map<string, string>();
     let walkCount = 0;
+    let deniedDirs = 0;
+    let symlinksSkipped = 0;
+    let depthSkipped = 0;
+    // Running totals for the scan-complete log - the arrays above are cleared
+    // every window, so they can't be counted at the end anymore.
+    let totalNew = 0;
+    let totalModified = 0;
+    let totalToVerify = 0;
+    let totalNewFolders = 0;
 
     // ── Scanning phase: walk the tree, report discovered counts to the UI ──
     rt.phase = "scanning";
+    // Fresh scan, fresh skip report - the pieces (too-large files, unreadable
+    // folders, symlinks) re-add themselves below if they still apply.
+    rt.notices.delete("files-skipped");
     rt.scannedFiles = 0;
     rt.scannedFolders = 0;
     rt.statusText = "Scanning local files...";
@@ -1441,10 +1610,100 @@ export class SyncEngine extends EventEmitter {
       this.log(pair.id, `Skipped ${isDir ? "folder" : "file"} "${relPath}" - ${reason}`);
     };
 
-    const walk = async (dir: string): Promise<void> => {
+    // Flush the current window: create the folders discovered so far, hash
+    // the maybe-changed files, then upload. Called mid-walk whenever the
+    // window fills, and once after the walk for the final partial window.
+    const drainWindow = async (): Promise<void> => {
+      if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+      if (windowFiles.size === 0 && windowFolders.size === 0) return;
+
+      // Snapshot and clear first, so the walk can keep filling the next window
+      // while this one is decided and uploaded.
+      const files = new Map(windowFiles);
+      const folders = new Set(windowFolders);
+      const absPaths = new Map(windowAbsPaths);
+      windowFiles.clear();
+      windowFolders.clear();
+      windowAbsPaths.clear();
+      const absOf = (relPath: string): string => absPaths.get(relPath) ?? join(pair.localPath, relPath);
+
+      // Rename candidates: a local file with no base record whose SIZE matches
+      // a base row that is no longer at its own path. Only those get hashed -
+      // a handful of files, not the tree - and the hash is what lets the
+      // planner turn a 2 GB rename into a server-side move instead of a 2 GB
+      // upload. Skipped entirely when the pair has no hashed history to match.
+      await this.markRenameCandidates(rt, files);
+
+      // State repair, not a decision: a record pre-populated from a remote
+      // snapshot (reinstall) carries localMtimeMs === 0 as "match by size".
+      // Adopt the real mtime once the size confirms it, or the sentinel sticks
+      // forever and a later same-size edit becomes invisible.
+      for (const [relPath, file] of files) {
+        const record = this.index.getFileByPath(pair.id, relPath);
+        if (record && record.localMtimeMs === 0 && record.localSizeBytes === file.sizeBytes) {
+          this.putFile(rt, { ...record, localMtimeMs: file.mtimeMs });
+        }
+      }
+
+      // ONE decision point for the whole engine. localScanIncomplete is true by
+      // construction here: a window is a slice of the tree, so "absent locally"
+      // cannot be concluded from it - without this the planner would read every
+      // file outside the current window as deleted.
+      const ops = filterOpsForMode(
+        plan({
+          local: { files, folders },
+          remote: null,
+          base: this.baseViewFor(rt),
+          conflictStrategy: pair.conflictStrategy || "last-write-wins",
+          localScanIncomplete: true,
+        }),
+        pair.syncMode || "push-safe",
+      );
+
+      // The window's decisions are PERSISTED rather than executed inline. A
+      // crash now resumes from these rows instead of re-walking the tree to
+      // reach the same conclusions - three hours of decided work used to die
+      // with the process (2026-08-20 stress test).
+      if (ops.length > 0) {
+        for (const op of ops) {
+          if (op.kind === "create-remote-folder") totalNewFolders++;
+          else if (op.kind === "check-content") totalToVerify++;
+          else if (op.kind === "upload-new") totalNew++;
+          else if (op.kind === "upload-update") totalModified++;
+          if (op.kind === "upload-new" || op.kind === "upload-update") {
+            rt.totalBytesInBatch += op.sizeBytes;
+          }
+        }
+        // Absolute paths are resolvable from the pair root, so the queued op
+        // stays a plain PlanOp and survives a restart with no side table.
+        this.index.enqueueOps(pair.id, ops.map((op) => ({ kind: op.kind, payload: op })), Date.now());
+        if (!rt.batchStartedAt) rt.batchStartedAt = Date.now();
+        this.backpressure(rt).add(ops.length);
+      }
+      void absOf; // paths are rebuilt from the pair root at execution time
+
+      // Wait here if the executors are behind. This is not a stall: it means
+      // uploads are running at full speed, which is the only way to reach the
+      // high-water mark.
+      const bp = this.backpressure(rt);
+      if (bp.paused) {
+        this.markProgress(rt, `Scanned ${rt.scannedFiles.toLocaleString()} files - waiting for uploads to catch up`);
+        this.emitStatus();
+        await bp.waitUntilDrained();
+      }
+    };
+
+    const walk = async (dir: string, depth: number): Promise<void> => {
       if (this.stopped || rt.status === "paused") return;
+      // Bind-mount / hardlinked-directory cycles recurse forever without a
+      // cap; the reconciler and chokidar both stop at 50, the push walk
+      // didn't.
+      if (depth > MAX_WALK_DEPTH) { depthSkipped++; return; }
       let entries;
-      try { entries = await readdir(longPath(dir), { withFileTypes: true }); } catch { return; }
+      // An unreadable directory is COUNTED now, not silently dropped - a sync
+      // that quietly leaves whole subtrees behind reads as data loss (the
+      // /usr stress test produced a silently truncated backup).
+      try { entries = await readdir(longPath(dir), { withFileTypes: true }); } catch { deniedDirs++; return; }
 
       const fileEntries: { absPath: string; relPath: string }[] = [];
 
@@ -1464,21 +1723,25 @@ export class SyncEngine extends EventEmitter {
         }
 
         if (entry.isDirectory()) {
-          if (!state.folders[relPath]) {
-            newFolders.push(relPath);
-          }
+          // Observed, not judged: the planner decides which of these the
+          // server is missing.
+          windowFolders.add(relPath);
           rt.scannedFolders++;
           if (++walkCount % YIELD_INTERVAL === 0) {
             this.markProgress(rt, `Scanned ${rt.scannedFiles.toLocaleString()} local files, ${rt.scannedFolders.toLocaleString()} folders...`);
             this.emitStatus();
             await new Promise<void>(r => setImmediate(r));
           }
-          await walk(absPath);
+          await walk(absPath, depth + 1);
         } else if (entry.isFile()) {
           fileEntries.push({ absPath, relPath });
+        } else if (entry.isSymbolicLink()) {
+          // Symlinks are never followed - but count them so the scan summary
+          // can say so instead of silently omitting them from the backup.
+          symlinksSkipped++;
         }
-        // Symlinks, sockets, FIFOs, device nodes, and FUSE/snap entries
-        // that misreport their type are silently skipped.
+        // Sockets, FIFOs, device nodes, and FUSE/snap entries that misreport
+        // their type are silently skipped.
       }
 
       for (let i = 0; i < fileEntries.length; i += STAT_BATCH_SIZE) {
@@ -1493,88 +1756,462 @@ export class SyncEngine extends EventEmitter {
           if (!s || !s.isFile() || s.size > 100 * 1024 * 1024 * 1024) continue;
           const { relPath, absPath } = batch[j];
           rt.scannedFiles++;
-          const existing = this.lookupByPath(rt, relPath);
-          if (!existing) {
-            toUpload.push({ absPath, relPath, isNew: true, sizeBytes: s.size });
-          } else if (existing.record.localMtimeMs === 0 && s.size === existing.record.localSizeBytes) {
-            // Pre-populated from remote snapshot (reinstall). Size matches.
-            existing.record.localMtimeMs = s.mtimeMs;
-            existing.record.localSizeBytes = s.size;
-          } else if (s.size !== existing.record.localSizeBytes) {
-            // Size changed - definitely modified, no need to hash
-            toUpload.push({ absPath, relPath, isNew: false, sizeBytes: s.size });
-          } else if (s.mtimeMs !== existing.record.localMtimeMs) {
-            // mtime changed but size same - hash to check if content actually changed.
-            // This catches editors that touch mtime without modifying content,
-            // git checkout, rsync --times, backup restores, etc.
-            needsHash.push({ absPath, relPath, sizeBytes: s.size, record: existing.record });
-          }
+          windowFiles.set(relPath, { relPath, sizeBytes: s.size, mtimeMs: s.mtimeMs });
+          windowAbsPaths.set(relPath, absPath);
         }
         // Yield between stat batches
         if (++walkCount % YIELD_INTERVAL === 0) {
           await new Promise<void>(r => setImmediate(r));
         }
+        // Window full - decide and upload it before scanning further.
+        if (windowFiles.size >= SCAN_WINDOW) await drainWindow();
       }
     };
 
-    await walk(pair.localPath);
+    // The executors run alongside the walk: transfers start on the first
+    // window instead of waiting for the whole tree to be enumerated.
+    let scanFinished = false;
+    const executor = this.drainOps(rt, () => scanFinished);
+
+    try {
+      await walk(pair.localPath, 0);
+      // Final partial window.
+      await drainWindow();
+    } finally {
+      scanFinished = true;
+      // Never leave the executor waiting on a scan that threw.
+      this.backpressure(rt).release();
+    }
+    await executor;
 
     if (skipsTotal > skipsLogged) {
       this.log(pair.id, `Skipped ${(skipsTotal - skipsLogged).toLocaleString()} more excluded entries this scan (see the pair's excluded patterns)`);
     }
-    this.log(pair.id, `Scan complete: ${toUpload.filter(f => f.isNew).length.toLocaleString()} new, ${toUpload.filter(f => !f.isNew).length.toLocaleString()} modified, ${needsHash.length.toLocaleString()} to verify, ${newFolders.length.toLocaleString()} new folders`);
-
-    // ── Hash phase: check files where mtime changed but size didn't ──
-    // Only these files get hashed - not all 150K. Typically ~1-2% of files.
-    if (needsHash.length > 0) {
-      this.log(pair.id, `Verifying ${needsHash.length.toLocaleString()} files (mtime changed, checking content)...`);
-      rt.statusText = `Checking ${needsHash.length} changed files...`;
-      this.emitStatus();
-      const HASH_CONCURRENCY = 10;
-      let hashIdx = 0;
-      const hashWorker = async () => {
-        while (hashIdx < needsHash.length) {
-          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
-          const i = hashIdx++;
-          const entry = needsHash[i];
-          try {
-            const hash = await hashFile(longPath(entry.absPath));
-            if (hash !== entry.record.contentHash) {
-              // Content actually changed - queue for upload
-              toUpload.push({ absPath: entry.absPath, relPath: entry.relPath, isNew: false, sizeBytes: entry.sizeBytes });
-            } else {
-              // Content identical - just update mtime in state so we don't re-hash next time
-              const s = await stat(longPath(entry.absPath)).catch(() => null);
-              if (s) entry.record.localMtimeMs = s.mtimeMs;
-            }
-          } catch {
-            // Can't hash (permission error, etc.) - treat as changed to be safe
-            toUpload.push({ absPath: entry.absPath, relPath: entry.relPath, isNew: false, sizeBytes: entry.sizeBytes });
-          }
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, needsHash.length) }, () => hashWorker()));
-      const actuallyChanged = toUpload.filter(f => !f.isNew).length;
-      const skippedByHash = needsHash.length - actuallyChanged;
-      this.log(pair.id, `Verification done: ${actuallyChanged} actually changed, ${skippedByHash} unchanged (content identical)`);
+    this.log(pair.id, `Scan complete: ${totalNew.toLocaleString()} new, ${totalModified.toLocaleString()} modified, ${totalToVerify.toLocaleString()} verified, ${totalNewFolders.toLocaleString()} new folders`);
+    if (totalNew + totalModified === 0) {
+      this.log(pair.id, "Everything up to date - nothing to upload");
     }
 
-    // Phase 2: Create remote folders via batch API, one depth level at a time.
-    // The server assigns IDs only when a batch returns, so a folder can never
-    // share a request with its own parent - the parent's ID wouldn't exist yet
-    // to send. Grouping by depth guarantees every parent was created (and its
-    // ID recorded in state.folders) by an earlier level's request. Chunking
-    // the whole depth-sorted list instead flattens the tree: any folder whose
-    // parent sat in the same chunk of 500 silently fell back to the pair root.
-    // For 29K folders: requests = depth levels + ~58 chunk requests.
+    // Surface what the walk could NOT back up. An unreadable directory or a
+    // skipped symlink used to vanish without a trace, so the user believed
+    // the tree was fully synced (the /usr stress test was silently
+    // truncated).
+    // With the transfer work finished, spend a little idle time giving older
+    // files the content hash they never got. Without this, dedup and rename
+    // detection would only ever cover files uploaded after this shipped -
+    // unchanged files never re-upload, so nothing else would fill them in.
+    this.enqueueHashBackfill(rt);
+
+    if (deniedDirs > 0 || symlinksSkipped > 0 || depthSkipped > 0) {
+      const parts: string[] = [];
+      if (deniedDirs > 0) parts.push(`${deniedDirs.toLocaleString()} folders couldn't be read (permission denied)`);
+      if (symlinksSkipped > 0) parts.push(`${symlinksSkipped.toLocaleString()} symbolic links were skipped`);
+      if (depthSkipped > 0) parts.push(`${depthSkipped.toLocaleString()} folders were deeper than ${MAX_WALK_DEPTH} levels`);
+      const message = `Not everything was synced: ${parts.join(", ")}.`;
+      this.log(pair.id, message);
+      // Merge with a too-large-files notice raised mid-scan (same kind key).
+      const existing = rt.notices.get("files-skipped");
+      this.addNotice(rt, "files-skipped", existing ? `${existing.message} ${message}` : message);
+    }
+  }
+
+  /**
+   * Executes queued ops until the queue is empty and the scan has finished.
+   * Runs concurrently with the walk, which is what lets uploads start while
+   * the rest of the tree is still being enumerated.
+   */
+  private async drainOps(rt: PairRuntime, scanDone: () => boolean): Promise<void> {
+    const pairId = rt.pair.id;
+    while (!this.stopped && (rt.status as SyncPairStatus) !== "paused") {
+      const batch = this.index.popPendingOps(pairId, OPS_BATCH, Date.now());
+      if (batch.length === 0) {
+        if (scanDone()) return;
+        await new Promise<void>((r) => setTimeout(r, 50));
+        continue;
+      }
+      try {
+        await this.executeQueuedOps(rt, batch);
+      } finally {
+        // Release the scanner even if the batch threw, or a failed upload
+        // would park the walk forever.
+        this.backpressure(rt).remove(batch.length);
+        this.refreshQueueProgress(rt);
+        this.emitStatus();
+      }
+    }
+  }
+
+  /**
+   * Run one claimed batch. Folders first (a file's parent must exist before
+   * its manifest entry), then content checks, then transfers.
+   */
+  private async executeQueuedOps(rt: PairRuntime, batch: QueuedOp[]): Promise<void> {
+    const pair = rt.pair;
+    const entries = batch.map((queued) => ({ queued, op: queued.payload as PlanOp }));
+    const absOf = (relPath: string): string => join(pair.localPath, relPath);
+    const now = (): number => Date.now();
+
+    const folderEntries = entries.filter((e) => e.op.kind === "create-remote-folder");
+    if (folderEntries.length > 0) {
+      const relPaths = folderEntries.map((e) => (e.op as Extract<PlanOp, { kind: "create-remote-folder" }>).relPath);
+      await this.createNewFolders(rt, relPaths);
+      for (const e of folderEntries) this.index.completeOp(e.queued.id, now());
+    }
+
+    // check-content: hash, then either drop it (bytes unchanged, adopt the new
+    // mtime) or promote it to an upload. Promotion is inserted in the same
+    // transaction that completes the check, so a crash between the two cannot
+    // lose the follow-up work.
+    const checkEntries = entries.filter((e) => e.op.kind === "check-content");
+    const promoted: UploadEntry[] = [];
+    for (const e of checkEntries) {
+      const op = e.op as Extract<PlanOp, { kind: "check-content" }>;
+      const record = this.index.getFileById(pair.id, op.baseRemoteId);
+      if (!record) { this.index.completeOp(e.queued.id, now()); continue; }
+      const toUpload: UploadEntry[] = [];
+      await this.hashCandidates(rt, [{ absPath: absOf(op.relPath), relPath: op.relPath, sizeBytes: op.sizeBytes, record }], toUpload);
+      if (toUpload.length === 0) {
+        const stat = await this.statOrNull(absOf(op.relPath));
+        this.index.completeOp(e.queued.id, now(), () => {
+          if (stat) this.index.upsertFile(pair.id, { ...record, localMtimeMs: stat.mtimeMs });
+        });
+      } else {
+        promoted.push(...toUpload);
+        this.index.completeOp(e.queued.id, now());
+      }
+    }
+
+    // Backfill: give an older file the content hash it never got, so it can
+    // take part in dedup and rename detection. Pure bookkeeping - it reads
+    // the file and writes one column, and never touches the network.
+    for (const e of entries.filter((x) => (x.op as { kind: string }).kind === "hash-backfill")) {
+      const op = e.op as unknown as { remoteId: string; relPath: string };
+      const record = this.index.getFileById(pair.id, op.remoteId);
+      if (!record) { this.index.completeOp(e.queued.id, now()); continue; }
+      const hash = await hashFile(longPath(absOf(op.relPath))).catch(() => undefined);
+      this.index.completeOp(e.queued.id, now(), () => {
+        // No hash (deleted, unreadable) still completes: retrying forever
+        // would burn I/O on a file that cannot be read.
+        if (hash) this.index.upsertFile(pair.id, { ...record, contentHash: hash });
+      });
+    }
+
+    // Moves: the bytes are already on the server, so this is metadata only.
+    // A renamed 2 GB file costs two small requests instead of 2 GB.
+    for (const e of entries.filter((x) => x.op.kind === "move-remote")) {
+      const op = e.op as Extract<PlanOp, { kind: "move-remote" }>;
+      const record = this.index.getFileById(pair.id, op.remoteId);
+      if (!record) { this.index.completeOp(e.queued.id, now()); continue; }
+      try {
+        const newName = op.toRelPath.split("/").pop()!;
+        const parentRelPath = op.toRelPath.split("/").slice(0, -1).join("/");
+        const targetFolderId = parentRelPath
+          ? (this.index.getFolder(pair.id, parentRelPath)?.remoteId ?? pair.remoteFolderId)
+          : pair.remoteFolderId;
+        if (targetFolderId !== record.remoteFolderId) {
+          await this.client.moveFile(op.remoteId, targetFolderId);
+        }
+        if (newName !== record.remoteName) {
+          await this.client.renameFile(op.remoteId, newName);
+        }
+        const stat = await this.statOrNull(absOf(op.toRelPath));
+        this.index.completeOp(e.queued.id, now(), () => {
+          this.index.upsertFile(pair.id, {
+            ...record,
+            remoteName: newName,
+            remoteFolderId: targetFolderId,
+            localPath: op.toRelPath,
+            localMtimeMs: stat?.mtimeMs ?? record.localMtimeMs,
+            syncedAt: Date.now(),
+          });
+        });
+        this.log(pair.id, `Moved "${op.fromRelPath}" to "${op.toRelPath}" on the server - no re-upload`);
+      } catch (err: any) {
+        if (err?.message === "SESSION_EXPIRED") throw err;
+        // Fall back to a plain upload on the next scan: the base row still
+        // points at the old path, so the file reads as new and is sent.
+        console.error(`[sync] Server-side move failed for ${op.toRelPath}:`, err?.message ?? err);
+        this.index.failOp(e.queued.id, now(), false);
+      }
+    }
+
+    const uploadEntries = entries.filter((e) => e.op.kind === "upload-new" || e.op.kind === "upload-update");
+    const toUpload: UploadEntry[] = [
+      ...promoted,
+      ...uploadEntries.map((e) => {
+        const op = e.op as Extract<PlanOp, { kind: "upload-new" | "upload-update" }>;
+        return { absPath: absOf(op.relPath), relPath: op.relPath, isNew: op.kind === "upload-new", sizeBytes: op.sizeBytes };
+      }),
+    ];
+
+    if (toUpload.length > 0) {
+      toUpload.sort((a, b) => a.sizeBytes - b.sizeBytes);
+      const smallFiles = toUpload.filter((f) => f.sizeBytes <= RemoteClient.BATCH_FILE_MAX);
+      const largeFiles = toUpload.filter((f) => f.sizeBytes > RemoteClient.BATCH_FILE_MAX);
+      rt.phase = "transferring";
+      rt.statusText = `Uploading ${this.index.countOpsByState(pair.id, "pending").toLocaleString()} files...`;
+      this.emitStatus();
+      await this.uploadSmallFiles(rt, smallFiles, largeFiles);
+      await this.uploadLargeFiles(rt, largeFiles);
+    }
+
+    // The uploaders record each file through putFile as it lands, so the ops
+    // are completed once their batch has been through the transfer paths. A
+    // file that failed carries its own fileErrors row and is retried by the
+    // next scan's plan.
+    for (const e of uploadEntries) this.index.completeOp(e.queued.id, now());
+    for (const e of entries) {
+      const kind = (e.op as { kind: string }).kind;
+      if (kind !== "create-remote-folder" && kind !== "check-content" && kind !== "upload-new" && kind !== "upload-update" && kind !== "move-remote" && kind !== "hash-backfill") {
+        // Kinds the push path does not execute (deletes are filtered out for
+        // push-safe, and two-way still runs through executeActions).
+        this.index.completeOp(e.queued.id, now());
+      }
+    }
+  }
+
+  /**
+   * Progress comes from the ops table rather than in-memory counters, so the
+   * numbers survive a restart mid-sync and describe what is actually left
+   * rather than what this process happens to remember.
+   */
+  private refreshQueueProgress(rt: PairRuntime): void {
+    const pairId = rt.pair.id;
+    const since = rt.batchStartedAt || 0;
+    const pending = this.index.countOpsByState(pairId, "pending");
+    const running = this.index.countOpsByState(pairId, "running");
+    const done = this.index.countOpsByState(pairId, "done", since);
+    rt.completedFilesInBatch = done;
+    rt.totalFilesInBatch = pending + running + done;
+  }
+
+  /**
+   * Queue a bounded slice of hash-backfill work, but only when the pair has
+   * nothing else to do. It is strictly an optimization for later syncs, so it
+   * must never compete with real transfers - and the batch is capped so the
+   * queue depth stays predictable. Successive scans work through the rest.
+   */
+  private enqueueHashBackfill(rt: PairRuntime): void {
+    const pairId = rt.pair.id;
+    try {
+      if (this.index.countOpsByState(pairId, "pending") > 0) return;
+      const remaining = this.index.countFilesWithoutHash(pairId);
+      if (remaining === 0) return;
+      const batch = this.index.findFilesWithoutHash(pairId, HASH_BACKFILL_BATCH);
+      this.index.enqueueOps(
+        pairId,
+        batch.map((r) => ({ kind: "hash-backfill", payload: { kind: "hash-backfill", remoteId: r.remoteId, relPath: r.localPath } })),
+        Date.now(),
+      );
+      this.log(pairId, `Indexing ${batch.length.toLocaleString()} older file(s) for faster future syncs (${remaining.toLocaleString()} left)`);
+    } catch (err: any) {
+      console.error("[sync] Could not queue hash backfill:", err?.message ?? err);
+    }
+  }
+
+  /**
+   * Attach content hashes to the files in a window that could be renames.
+   *
+   * A rename looks like "a new local file appeared" plus "a tracked file went
+   * missing". Confirming it needs the content hash of the new file - which is
+   * I/O, so it cannot happen inside the pure planner. The candidate set is
+   * kept tiny: only files with no base record whose exact size matches a
+   * hashed base row that is not at its own path any more.
+   */
+  private async markRenameCandidates(rt: PairRuntime, files: Map<string, LocalFile>): Promise<void> {
+    const pairId = rt.pair.id;
+    const candidates: LocalFile[] = [];
+    for (const [key, file] of files) {
+      if (this.index.getFileByPath(pairId, key)) continue; // already tracked here
+      const bySize = this.index.findFilesBySize(pairId, file.sizeBytes);
+      const missing = bySize.some((r) => r.contentHash && !files.has(r.localPath));
+      if (missing) candidates.push(file);
+    }
+    if (candidates.length === 0) return;
+
+    const HASH_CONCURRENCY = 4;
+    let idx = 0;
+    const worker = async (): Promise<void> => {
+      while (idx < candidates.length) {
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+        const file = candidates[idx++];
+        const hash = await hashFile(longPath(join(rt.pair.localPath, file.relPath))).catch(() => undefined);
+        if (hash) file.contentHash = hash;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, candidates.length) }, () => worker()));
+  }
+
+  /**
+   * Try to upload only the parts of a file the server does not already have.
+   *
+   * Returns the committed result, or null to mean "use the normal path" -
+   * which is the answer for anything at all doubtful. The whole-file upload is
+   * the proven path and stays the default; this is an optimization layered on
+   * top, and an optimization that fails must cost time, never data.
+   */
+  private async tryDeltaUpload(
+    rt: PairRuntime,
+    absPath: string,
+    relPath: string,
+    sizeBytes: number,
+    existingFileId: string | null,
+    remoteFolderId: string | null,
+    // Same shape uploadFile returns, so the caller treats both identically.
+  ): Promise<{ fileId: string; name: string; version?: number; updatedAt?: number } | null> {
+    const pair = rt.pair;
+    if (!existingFileId) return null; // a new file has nothing to diff against
+
+    const prior = this.index.getBlocks(pair.id, existingFileId);
+    let chunks;
+    try {
+      chunks = await chunkFile(absPath);
+    } catch {
+      return null;
+    }
+
+    const decision = shouldAttemptDelta(sizeBytes, prior.length, chunks.length);
+    if (!decision.attempt) return null;
+
+    try {
+      const hashes = chunks.map((c) => c.hash);
+      const missing = await this.client.chunksMissing(pair.workspaceId, hashes);
+      let missingBytes = 0;
+      for (const c of chunks) if (missing.has(c.hash)) missingBytes += c.size;
+
+      if (!deltaIsWorthIt(sizeBytes, missingBytes)) return null;
+
+      const toSend = chunks.filter((c) => missing.has(c.hash));
+      if (toSend.length > 0) {
+        // Deduplicate by hash: a file can repeat a chunk (long runs of zeros),
+        // and uploading the same content twice is wasted bandwidth.
+        const unique = new Map<string, typeof toSend[number]>();
+        for (const c of toSend) if (!unique.has(c.hash)) unique.set(c.hash, c);
+        const presigned = await this.client.presignChunks(
+          pair.workspaceId, pair.region,
+          [...unique.values()].map((c) => ({ hash: c.hash, size: c.size })),
+        );
+        for (const c of unique.values()) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused") return null;
+          const target = presigned.get(c.hash);
+          if (!target) return null; // server declined this chunk - fall back
+          await this.client.uploadChunkToPresignedUrl(target.url, absPath, c.offset, c.size);
+        }
+      }
+
+      const name = relPath.split("/").pop()!;
+      const ext = name.includes(".") ? name.split(".").pop()! : null;
+      const committed = await this.client.commitChunks({
+        workspaceId: pair.workspaceId,
+        region: pair.region,
+        fileId: existingFileId,
+        folderId: remoteFolderId,
+        name,
+        size: sizeBytes,
+        contentType: "application/octet-stream",
+        ext,
+        chunks: chunks.map((c) => ({ hash: c.hash, size: c.size })),
+      });
+
+      // The chunk list we just proved is what the next delta diffs against.
+      this.index.setBlocks(pair.id, committed.fileId, chunks.map((c, idx) => ({
+        idx, offset: c.offset, size: c.size, hash: c.hash,
+      })));
+
+      const savedMb = Math.round((sizeBytes - missingBytes) / 1024 / 1024);
+      this.log(pair.id, `Sent only the changed parts of "${relPath}" - ${savedMb} MB reused from the server`);
+      // updatedAt is left out on purpose: the commit response does not carry
+      // one, and the caller's estimate is better than a guess here.
+      return { fileId: committed.fileId, name, version: committed.version };
+    } catch (err: any) {
+      if (err?.message === "SESSION_EXPIRED") throw err;
+      // Any other failure: say so once and let the normal upload handle it.
+      console.error(`[sync] Delta upload failed for ${relPath}, sending whole file:`, err?.message ?? err);
+      return null;
+    }
+  }
+
+  /**
+   * Chunk a file and store its block list. Content-defined chunking means an
+   * insert or delete in the middle only changes the chunks around the edit,
+   * so the next upload can skip everything the server already holds.
+   *
+   * Never throws: a missing chunk list only costs a future optimization.
+   * Very large files are chunked with a larger average size so the block
+   * count stays sane (a 10 GB file at 1 MB chunks would be 10,000 rows).
+   */
+  private async recordBlocks(rt: PairRuntime, remoteId: string, absPath: string, sizeBytes: number): Promise<void> {
+    if (!blockTrackingApplies(sizeBytes)) return;
+    try {
+      const chunks = await chunkFile(absPath);
+      this.index.setBlocks(rt.pair.id, remoteId, chunks.map((c, idx) => ({
+        idx, offset: c.offset, size: c.size, hash: c.hash,
+      })));
+    } catch {
+      // Chunking is best-effort - the file is already synced either way.
+    }
+  }
+
+  private async statOrNull(absPath: string): Promise<{ mtimeMs: number } | null> {
+    return stat(longPath(absPath)).catch(() => null);
+  }
+
+  /** Hash files whose mtime changed but size didn't; queue actual changes. */
+  private async hashCandidates(rt: PairRuntime, needsHash: NeedsHashEntry[], toUpload: UploadEntry[]): Promise<void> {
+    if (needsHash.length === 0) return;
+    const { pair } = rt;
+    this.log(pair.id, `Verifying ${needsHash.length.toLocaleString()} files (mtime changed, checking content)...`);
+    rt.statusText = `Checking ${needsHash.length} changed files...`;
+    this.emitStatus();
+    const HASH_CONCURRENCY = 10;
+    let hashIdx = 0;
+    let actuallyChanged = 0;
+    const hashWorker = async () => {
+      while (hashIdx < needsHash.length) {
+        if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+        const i = hashIdx++;
+        const entry = needsHash[i];
+        try {
+          const hash = await hashFile(longPath(entry.absPath));
+          if (hash !== entry.record.contentHash) {
+            // Content actually changed - queue for upload
+            toUpload.push({ absPath: entry.absPath, relPath: entry.relPath, isNew: false, sizeBytes: entry.sizeBytes });
+            actuallyChanged++;
+          } else {
+            // Content identical - just update mtime in state so we don't re-hash next time
+            const s = await stat(longPath(entry.absPath)).catch(() => null);
+            if (s) entry.record.localMtimeMs = s.mtimeMs;
+          }
+        } catch {
+          // Can't hash (permission error, etc.) - treat as changed to be safe
+          toUpload.push({ absPath: entry.absPath, relPath: entry.relPath, isNew: false, sizeBytes: entry.sizeBytes });
+          actuallyChanged++;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(HASH_CONCURRENCY, needsHash.length) }, () => hashWorker()));
+    this.log(pair.id, `Verification done: ${actuallyChanged} actually changed, ${needsHash.length - actuallyChanged} unchanged (content identical)`);
+  }
+
+  /**
+   * Create newly discovered folders on the server via the batch API, one
+   * depth level at a time. The server assigns IDs only when a batch returns,
+   * so a folder can never share a request with its own parent - the parent's
+   * ID wouldn't exist yet to send. Grouping by depth guarantees every parent
+   * was created (and its ID recorded in state.folders) by an earlier level's
+   * request. Chunking the whole depth-sorted list instead flattens the tree:
+   * any folder whose parent sat in the same chunk of 500 silently fell back
+   * to the pair root.
+   */
+  private async createNewFolders(rt: PairRuntime, newFolders: string[]): Promise<void> {
+    if (newFolders.length === 0) return;
+    const { pair, state } = rt;
     newFolders.sort((a, b) => a.split("/").length - b.split("/").length);
     const FOLDER_BATCH_SIZE = 500;
 
-    if (newFolders.length > 0) {
-      rt.statusText = `Creating ${newFolders.length.toLocaleString()} folders on server...`;
-      this.log(pair.id, `Creating ${newFolders.length.toLocaleString()} folders on server...`);
-      this.emitStatus();
-    }
+    rt.statusText = `Creating ${newFolders.length.toLocaleString()} folders on server...`;
+    this.log(pair.id, `Creating ${newFolders.length.toLocaleString()} folders on server...`);
+    this.emitStatus();
 
     let foldersCreated = 0;
     // Folders whose parent has no recorded ID even in level order (the server
@@ -1599,13 +2236,13 @@ export class SyncEngine extends EventEmitter {
           const parts = relPath.split("/");
           const folderName = parts[parts.length - 1];
           const parentRelPath = parts.slice(0, -1).join("/");
-          if (parentRelPath && !state.folders[parentRelPath]) {
+          if (parentRelPath && !this.index.getFolder(rt.pair.id, parentRelPath)) {
             deferred.push(relPath);
             continue;
           }
           batchEntries.push({
             name: folderName,
-            parent_id: parentRelPath ? state.folders[parentRelPath].remoteId : pair.remoteFolderId,
+            parent_id: parentRelPath ? this.index.getFolder(rt.pair.id, parentRelPath)!.remoteId : pair.remoteFolderId,
           });
           batchRelPaths.push(relPath);
         }
@@ -1624,13 +2261,13 @@ export class SyncEngine extends EventEmitter {
             const key = `${entry.parent_id ?? "null"}:${entry.name}`;
             const folderId = resultMap.get(key);
             if (folderId) {
-              state.folders[relPath] = {
+              this.putFolder(rt, {
                 remoteId: folderId,
                 remoteName: entry.name,
                 remoteParentId: entry.parent_id,
                 localPath: relPath,
                 syncedAt: Date.now(),
-              };
+              });
             }
           }
         } catch (err: any) {
@@ -1654,52 +2291,25 @@ export class SyncEngine extends EventEmitter {
     if (foldersCreated > 0) {
       this.log(pair.id, `Created ${foldersCreated.toLocaleString()} folders on server`);
     }
-    // Free folder list - no longer needed
-    newFolders.length = 0;
+  }
 
-    // ── Transferring phase ──
-    // Small files use presigned URLs (direct to R2, bypassing the Worker).
-    // Large files use individual streaming uploads through the Worker.
-    toUpload.sort((a, b) => a.sizeBytes - b.sizeBytes);
-
-    const BATCH_THRESHOLD = RemoteClient.BATCH_FILE_MAX;
-    const smallFiles = toUpload.filter(f => f.sizeBytes <= BATCH_THRESHOLD);
-    const largeFiles = toUpload.filter(f => f.sizeBytes > BATCH_THRESHOLD);
-
-    // Compute totals, then release toUpload - keeping it alongside
-    // smallFiles/largeFiles is a needless third full-size copy at 1M files.
-    const totalFiles = toUpload.length;
-    let totalBytes = 0;
-    for (const f of toUpload) totalBytes += f.sizeBytes;
-    toUpload.length = 0;
-
-    rt.phase = "transferring";
-    rt.statusText = `Uploading ${totalFiles.toLocaleString()} files...`;
-    if (totalFiles > 0) {
-      const totalMB = Math.round(totalBytes / 1024 / 1024);
-      this.log(pair.id, `Starting upload: ${totalFiles.toLocaleString()} files (${totalMB.toLocaleString()} MB) - ${smallFiles.length.toLocaleString()} small, ${largeFiles.length.toLocaleString()} large`);
-    } else {
-      this.log(pair.id, "Everything up to date - nothing to upload");
-    }
-    rt.totalFilesInBatch = totalFiles;
-    rt.completedFilesInBatch = 0;
-    rt.totalBytesInBatch = totalBytes;
-    rt.completedBytesInBatch = 0;
-    rt.batchStartedAt = Date.now();
-    this.emitStatus();
-
-    let opCount = 0;
-
-    // ── Phase 3a: Presigned URL upload for small files ──
-    // Client → Worker (get presigned URLs) → Client → R2 directly (bounded)
-    // → Client → Worker (commit DB records). Worker never touches file bytes.
+  /**
+   * Presigned URL upload for small files: Client → Worker (get presigned
+   * URLs) → Client → R2 directly (bounded) → Client → Worker (commit DB
+   * records). Worker never touches file bytes. Files the manifest path can't
+   * handle are pushed onto `largeFiles` for the streaming path.
+   */
+  private async uploadSmallFiles(
+    rt: PairRuntime,
+    smallFiles: UploadEntry[],
+    largeFiles: UploadEntry[],
+  ): Promise<void> {
+    const { pair, state } = rt;
     const MANIFEST_BATCH = 5000; // files per manifest request (Worker CPU limit)
     const COMMIT_BATCH = 5000; // files per commit request
 
-    // Build + process manifest chunks LAZILY from smallFiles. The old code
-    // copied the whole small-file set twice (eligibleSmall + manifestEntries);
-    // here each request only materializes a ≤MANIFEST_BATCH window, so peak
-    // memory doesn't scale with total file count.
+    // Build + process manifest chunks LAZILY from smallFiles: each request
+    // only materializes a ≤MANIFEST_BATCH window.
     let smallIdx = 0;
     let batchNo = 0;
     while (smallIdx < smallFiles.length) {
@@ -1708,9 +2318,9 @@ export class SyncEngine extends EventEmitter {
       const mChunk: { relPath: string; name: string; size: number; folder_id: string | null; absPath: string }[] = [];
       while (smallIdx < smallFiles.length && mChunk.length < MANIFEST_BATCH) {
         const f = smallFiles[smallIdx++];
-        const err = state.fileErrors[f.relPath];
+        const err = this.index.getError(rt.pair.id, f.relPath);
         if (err?.permanent) continue;
-        if (err && err.retryCount >= MAX_FILE_RETRIES) { state.fileErrors[f.relPath].permanent = true; continue; }
+        if (err && err.retryCount >= MAX_FILE_RETRIES) { this.putError(rt, { ...err, permanent: true }); continue; }
         const parentRelPath = f.relPath.split("/").slice(0, -1).join("/");
         // A parent with no recorded remote id means folder creation failed or
         // was skipped for it. This used to fall back to the PAIR ROOT, which
@@ -1719,18 +2329,18 @@ export class SyncEngine extends EventEmitter {
         // commit FK bomb, and a silently wrong tree even when it worked.
         // Defer the file instead: the error ladder retries it after the next
         // scan's folder phase, and gives up visibly if the parent never comes.
-        if (parentRelPath && !state.folders[parentRelPath]) {
-          const existing = state.fileErrors[f.relPath];
-          state.fileErrors[f.relPath] = {
+        if (parentRelPath && !this.index.getFolder(rt.pair.id, parentRelPath)) {
+          const existing = this.index.getError(rt.pair.id, f.relPath);
+          this.putError(rt, {
             filePath: f.relPath,
             error: `Parent folder "${parentRelPath}" was not created on the server`,
             retryCount: (existing?.retryCount ?? 0) + 1,
             lastAttemptAt: Date.now(),
             permanent: false,
-          };
+          });
           continue;
         }
-        const folderId = parentRelPath ? state.folders[parentRelPath].remoteId : pair.remoteFolderId;
+        const folderId = parentRelPath ? this.index.getFolder(rt.pair.id, parentRelPath)!.remoteId : pair.remoteFolderId;
         mChunk.push({ relPath: f.relPath, name: basename(f.absPath), size: f.sizeBytes, folder_id: folderId, absPath: f.absPath });
       }
       if (mChunk.length === 0) continue;
@@ -1766,7 +2376,7 @@ export class SyncEngine extends EventEmitter {
 
       if (manifest.uploads.length === 0) continue;
 
-      // Upload directly to R2 via presigned URLs - 100 concurrent
+      // Upload directly to R2 via presigned URLs - bounded worker pool
       const uploaded: typeof manifest.uploads = [];
       let uploadIdx = 0;
       let uploadFatalErr: Error | null = null;
@@ -1807,14 +2417,14 @@ export class SyncEngine extends EventEmitter {
             if (err.message === "SESSION_EXPIRED") { uploadFatalErr = err; return; }
             if (isRateLimitError(err)) { uploadFatalErr = err; return; }
             console.error(`[sync] Presigned upload failed for ${upload.relPath}:`, err.message);
-            const existing = state.fileErrors[upload.relPath];
-            state.fileErrors[upload.relPath] = {
+            const existing = this.index.getError(rt.pair.id, upload.relPath);
+            this.putError(rt, {
               filePath: upload.relPath,
               error: err.message,
               retryCount: (existing?.retryCount ?? 0) + 1,
               lastAttemptAt: Date.now(),
               permanent: false,
-            };
+            });
           }
         }
       };
@@ -1856,20 +2466,20 @@ export class SyncEngine extends EventEmitter {
               const refusal = commitRes.refused.get(u.fileId);
               if (refusal) {
                 this.log(pair.id, `Server refused "${u.relPath}" - ${refusal}`);
-                const existing = state.fileErrors[u.relPath];
-                state.fileErrors[u.relPath] = {
+                const existing = this.index.getError(rt.pair.id, u.relPath);
+                this.putError(rt, {
                   filePath: u.relPath,
                   error: refusal,
                   retryCount: (existing?.retryCount ?? 0) + 1,
                   lastAttemptAt: Date.now(),
                   permanent: false,
-                };
+                });
                 continue;
               }
               const entry = mChunkByPath.get(u.relPath);
               const s = entry ? await stat(entry.absPath).catch(() => null) : null;
               const srv = commitRes.results.get(u.fileId);
-              state.files[u.fileId] = {
+              this.putFile(rt, {
                 remoteId: u.fileId,
                 remoteName: u.name,
                 remoteFolderId: u.folderId,
@@ -1880,9 +2490,8 @@ export class SyncEngine extends EventEmitter {
                 localSizeBytes: s?.size ?? u.size,
                 localMtimeMs: s?.mtimeMs ?? Date.now(),
                 syncedAt: Date.now(),
-              };
-              rt.pathIndex.set(u.relPath, u.fileId);
-              delete state.fileErrors[u.relPath];
+              });
+              this.dropError(rt, u.relPath);
             }
           } catch (err: any) {
             if (err.message === "SESSION_EXPIRED") throw err;
@@ -1891,13 +2500,16 @@ export class SyncEngine extends EventEmitter {
         }
       }
 
-      opCount += mChunk.length;
-      if (opCount % STATE_SAVE_INTERVAL === 0) {
-        await this.safeSaveState(rt.state);
-      }
     }
+  }
 
-    // ── Phase 3b: Upload large files individually with streaming ──
+  /** Upload large files individually with streaming through the Worker. */
+  private async uploadLargeFiles(
+    rt: PairRuntime,
+    largeFiles: UploadEntry[],
+  ): Promise<void> {
+    if (largeFiles.length === 0) return;
+    const { state } = rt;
     let rateLimitErr: Error | null = null;
     let sessionExpiredErr: Error | null = null;
 
@@ -1911,16 +2523,16 @@ export class SyncEngine extends EventEmitter {
         const file = largeFiles[idx];
         largeFiles[idx] = null as any;
 
-        const fileError = state.fileErrors[file.relPath];
+        const fileError = this.index.getError(rt.pair.id, file.relPath);
         if (fileError && fileError.permanent) continue;
         if (fileError && fileError.retryCount >= MAX_FILE_RETRIES) {
-          state.fileErrors[file.relPath].permanent = true;
+          this.putError(rt, { ...fileError, permanent: true });
           continue;
         }
 
         try {
           await this.uploadLocalFile(rt, file.absPath, file.relPath);
-          delete state.fileErrors[file.relPath];
+          this.dropError(rt, file.relPath);
           rt.completedFilesInBatch++;
           rt.completedBytesInBatch += file.sizeBytes;
           this.emitStatus();
@@ -1936,41 +2548,30 @@ export class SyncEngine extends EventEmitter {
             return;
           }
           console.error(`[sync] upload failed for ${file.relPath}:`, err.message);
-          const existing = state.fileErrors[file.relPath];
-          state.fileErrors[file.relPath] = {
+          const existing = this.index.getError(rt.pair.id, file.relPath);
+          this.putError(rt, {
             filePath: file.relPath,
             error: err.message,
             retryCount: (existing?.retryCount ?? 0) + 1,
             lastAttemptAt: Date.now(),
             permanent: err.message.includes("permission") || err.message.includes("EPERM") || err.message.includes("quota"),
-          };
+          });
         }
 
         // Save state periodically
-        if (++opCount % STATE_SAVE_INTERVAL === 0) {
-          await this.safeSaveState(rt.state);
-        }
       }
     };
 
-    // Auto-scale concurrency for large batches. The user-configured value
-    // is the baseline, but for initial syncs with thousands of files we
-    // scale up so API round-trip latency doesn't bottleneck the sync.
-    // The server exempts desktop sync from rate limits, so this is safe.
+    // Large files are bandwidth-bound: extra parallel streams don't add
+    // throughput on a saturated uplink, they only add bufferbloat (the
+    // 2026-08-20 stress test took a whole wifi network down with the old
+    // auto-scale to 8). The user's setting is the worker count, full stop.
     const baseConcurrency = this.config?.maxConcurrentTransfers || 3;
-    if (largeFiles.length > 0) {
-      const concurrency = largeFiles.length > 100 ? Math.max(baseConcurrency, 8)
-                         : largeFiles.length > 10  ? Math.max(baseConcurrency, 5)
-                         : baseConcurrency;
-      this.transferSemaphore.updateMax(concurrency);
-      await Promise.all(Array.from({ length: concurrency }, () => worker()));
-      this.transferSemaphore.updateMax(baseConcurrency);
-    }
+    await Promise.all(Array.from({ length: Math.min(baseConcurrency, largeFiles.length) }, () => worker()));
 
     // Propagate fatal errors after all workers finish
     if (sessionExpiredErr) throw sessionExpiredErr;
     if (rateLimitErr) {
-      await this.safeSaveState(rt.state);
       throw rateLimitErr;
     }
   }
@@ -2001,7 +2602,6 @@ export class SyncEngine extends EventEmitter {
     this.beginSyncCycle(rt);
     this.emitStatus();
 
-    let opCount = 0;
 
     try {
       // ── Move/rename detection (safe) ──
@@ -2090,7 +2690,7 @@ export class SyncEngine extends EventEmitter {
 
         const newParentRelPath = newRel.split("/").slice(0, -1).join("/");
         const newFolderId = newParentRelPath
-          ? (rt.state.folders[newParentRelPath]?.remoteId ?? rt.pair.remoteFolderId)
+          ? (this.index.getFolder(rt.pair.id, newParentRelPath)?.remoteId ?? rt.pair.remoteFolderId)
           : rt.pair.remoteFolderId;
         const newFileName = newRel.split("/").pop()!;
 
@@ -2106,8 +2706,6 @@ export class SyncEngine extends EventEmitter {
           existing.record.localPath = newRel;
           existing.record.remoteFolderId = newFolderId;
           existing.record.remoteName = newFileName;
-          rt.pathIndex.delete(oldRel);
-          rt.pathIndex.set(newRel, existing.remoteId);
           this.log(rt.pair.id, `Moved: ${oldRel} → ${newRel}`);
         } catch (e: any) {
           if (e.message === "SESSION_EXPIRED") throw e;
@@ -2175,14 +2773,14 @@ export class SyncEngine extends EventEmitter {
             if (upErr.message === "SESSION_EXPIRED") throw upErr;
             if (isRateLimitError(upErr)) throw upErr;
             console.error(`[sync] upload failed for ${relPath}:`, upErr.message);
-            const existing = rt.state.fileErrors[relPath];
-            rt.state.fileErrors[relPath] = {
+            const existing = this.index.getError(rt.pair.id, relPath);
+            this.putError(rt, {
               filePath: relPath,
               error: upErr.message,
               retryCount: (existing?.retryCount ?? 0) + 1,
               lastAttemptAt: Date.now(),
               permanent: upErr.message.includes("permission") || upErr.message.includes("EPERM") || upErr.message.includes("quota"),
-            };
+            });
           }
         } else if (event.type === "unlink" && (mode === "two-way" || mode === "push")) {
           // Delete from cloud only in full sync or push mode (not push-safe/backup)
@@ -2190,8 +2788,7 @@ export class SyncEngine extends EventEmitter {
           if (found) {
             try {
               await this.client.deleteFile(found.remoteId);
-              delete rt.state.files[found.remoteId];
-              rt.pathIndex.delete(relPath);
+              this.dropFile(rt, found.remoteId);
               console.log(`[sync] Deleted remote: ${relPath}`);
             } catch (e: any) {
               if (isRateLimitError(e)) throw e;
@@ -2203,7 +2800,7 @@ export class SyncEngine extends EventEmitter {
           // Find all tracked files under this folder and delete them remotely.
           const prefix = relPath + "/";
           const toDelete: { remoteId: string; localPath: string }[] = [];
-          for (const [remoteId, record] of Object.entries(rt.state.files)) {
+          for (const [remoteId, record] of [...this.index.iterFiles(rt.pair.id)].map((r) => [r.remoteId, r] as const)) {
             if (record.localPath === relPath || record.localPath.startsWith(prefix)) {
               toDelete.push({ remoteId, localPath: record.localPath });
             }
@@ -2213,8 +2810,7 @@ export class SyncEngine extends EventEmitter {
             try {
               await this.client.deleteFilesBatch(rt.pair.workspaceId, toDelete.map(d => d.remoteId));
               for (const { remoteId, localPath } of toDelete) {
-                delete rt.state.files[remoteId];
-                rt.pathIndex.delete(localPath);
+                this.dropFile(rt, remoteId);
               }
               this.log(rt.pair.id, `Deleted ${toDelete.length} files remotely (folder removed)`);
             } catch (e: any) {
@@ -2224,26 +2820,21 @@ export class SyncEngine extends EventEmitter {
             }
           }
           // Clean up folder state
-          for (const folderRelPath of Object.keys(rt.state.folders)) {
+          for (const folderRelPath of [...this.index.iterFolders(rt.pair.id)].map((f) => f.localPath)) {
             if (folderRelPath === relPath || folderRelPath.startsWith(prefix)) {
-              delete rt.state.folders[folderRelPath];
+              this.dropFolder(rt, folderRelPath);
             }
           }
         }
         // push-safe: skip deletes (backup mode - never delete from cloud)
 
         // Save state periodically
-        opCount++;
-        if (opCount % STATE_SAVE_INTERVAL === 0) {
-          await this.safeSaveState(rt.state);
-        }
       }
 
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
       rt.status = "idle";
-      rt.state.lastFullSyncAt = Date.now();
-      await this.safeSaveState(rt.state);
+      this.putPairMeta(rt, { lastFullSyncAt: Date.now() });
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
@@ -2294,7 +2885,6 @@ export class SyncEngine extends EventEmitter {
     this.beginSyncCycle(rt);
     this.emitStatus();
 
-    let opCount = 0;
 
     try {
       // Build path map from remote files
@@ -2325,7 +2915,7 @@ export class SyncEngine extends EventEmitter {
       // Guard disk space up-front - pull can otherwise fill the volume.
       let neededBytes = 0;
       for (const [remoteId, file] of snapshot.files) {
-        const existing = rt.state.files[remoteId];
+        const existing = this.index.getFileById(rt.pair.id, remoteId);
         if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
           neededBytes += file.size_bytes;
         }
@@ -2349,7 +2939,7 @@ export class SyncEngine extends EventEmitter {
         }
 
         const absPath = join(rt.pair.localPath, relPath);
-        const existing = rt.state.files[remoteId];
+        const existing = this.index.getFileById(rt.pair.id, remoteId);
 
         if (!existing) {
           await mkdir(longPath(dirname(absPath)), { recursive: true });
@@ -2361,10 +2951,6 @@ export class SyncEngine extends EventEmitter {
           await this.downloadRemoteFile(rt, file, absPath, relPath);
         }
 
-        opCount++;
-        if (opCount % STATE_SAVE_INTERVAL === 0) {
-          await this.safeSaveState(rt.state);
-        }
       }
 
       // Handle remote deletions (only in pull, not pull-safe).
@@ -2373,8 +2959,8 @@ export class SyncEngine extends EventEmitter {
       // (e.g., API pagination errors or network interruptions).
       if (mode === "pull") {
         const remoteIds = new Set(snapshot.files.keys());
-        const storedCount = Object.keys(rt.state.files).length;
-        const missingCount = [...Object.keys(rt.state.files)].filter(id => !remoteIds.has(id)).length;
+        const storedCount = this.index.countFiles(rt.pair.id);
+        const missingCount = [...this.index.iterFiles(rt.pair.id)].map((r) => r.remoteId).filter(id => !remoteIds.has(id)).length;
 
         // If more than 50% of tracked files are missing from the snapshot
         // and there are more than 5 missing, assume the snapshot is incomplete.
@@ -2386,17 +2972,15 @@ export class SyncEngine extends EventEmitter {
             `This likely indicates an incomplete remote snapshot.`,
           );
         } else {
-          for (const [id, record] of Object.entries(rt.state.files)) {
+          for (const [id, record] of [...this.index.iterFiles(rt.pair.id)].map((r) => [r.remoteId, r] as const)) {
             if (!remoteIds.has(id)) {
               const absPath = join(rt.pair.localPath, record.localPath);
               try {
                 await unlink(longPath(absPath));
-                delete rt.state.files[id];
-                rt.pathIndex.delete(record.localPath);
+                this.dropFile(rt, id);
                 console.log(`[sync] Deleted local: ${record.localPath}`);
               } catch {
-                delete rt.state.files[id];
-                rt.pathIndex.delete(record.localPath);
+                this.dropFile(rt, id);
               }
             }
           }
@@ -2406,9 +2990,7 @@ export class SyncEngine extends EventEmitter {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
       rt.status = "idle";
-      rt.state.lastFullSyncAt = Date.now();
-      rt.state.lastRemotePollAt = Date.now();
-      await this.safeSaveState(rt.state);
+      this.putPairMeta(rt, { lastFullSyncAt: Date.now(), lastRemotePollAt: Date.now() });
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
@@ -2515,7 +3097,7 @@ export class SyncEngine extends EventEmitter {
       // Mark as recently downloaded to suppress watcher re-upload
       this.markRecentDownload(absPath);
 
-      rt.state.files[file.id] = {
+      this.putFile(rt, {
         remoteId: file.id,
         remoteName: file.name,
         remoteFolderId: file.folder_id,
@@ -2526,10 +3108,9 @@ export class SyncEngine extends EventEmitter {
         localSizeBytes: s.size,
         localMtimeMs: s.mtimeMs,
         syncedAt: Date.now(),
-      };
-      rt.pathIndex.set(relPath, file.id);
+      });
 
-      delete rt.state.fileErrors[relPath];
+      this.dropError(rt, relPath);
     } finally {
       this.activeTransfers.delete(transfer);
       this.transferSemaphore.release();
@@ -2559,7 +3140,7 @@ export class SyncEngine extends EventEmitter {
       // Find the remote folder ID for this file's parent directory
       const parentRelPath = relPath.split("/").slice(0, -1).join("/");
       const remoteFolderId = parentRelPath
-        ? (rt.state.folders[parentRelPath]?.remoteId ?? rt.pair.remoteFolderId)
+        ? (this.index.getFolder(rt.pair.id, parentRelPath)?.remoteId ?? rt.pair.remoteFolderId)
         : rt.pair.remoteFolderId;
 
       const t: ActiveTransfer = {
@@ -2578,8 +3159,13 @@ export class SyncEngine extends EventEmitter {
       const existing = this.lookupByPath(rt, relPath);
       const existingFileId = existing?.remoteId ?? null;
 
+      // Send only the changed parts when that is possible and cheaper. Returns
+      // null for anything doubtful, and the proven whole-file path runs
+      // instead - an optimization may cost time, never data.
+      const delta = await this.tryDeltaUpload(rt, absPath, relPath, s.size, existingFileId, remoteFolderId);
+
       let lastUploadEmit = 0;
-      const result = await this.client.uploadFile(
+      const result = delta ?? await this.client.uploadFile(
         absPath,
         rt.pair.workspaceId,
         remoteFolderId,
@@ -2607,20 +3193,18 @@ export class SyncEngine extends EventEmitter {
 
       // Clean up old entry if fileId changed
       if (existingFileId && existingFileId !== result.fileId) {
-        delete rt.state.files[existingFileId];
+        this.dropFile(rt, existingFileId);
       }
 
-      // Compute content hash for future dedup (mtime change without content change).
-      // Skip hashing for large files (>50MB) - the hash would require re-reading
-      // the entire file from disk after just uploading it. For a 1.5GB file that's
-      // another 1.5GB of I/O. Large files rarely get false-positive mtime changes
-      // and the size check alone is sufficient for them.
-      const HASH_SIZE_LIMIT = 50 * 1024 * 1024; // 50 MB
-      const fileHash = postStat.size <= HASH_SIZE_LIMIT
-        ? await hashFile(longPath(absPath)).catch(() => undefined)
-        : undefined;
+      // Hash EVERY file, regardless of size. This used to stop at 50 MB to
+      // avoid re-reading a large file after uploading it - but that excluded
+      // exactly the files where a hash pays for itself most: a hash is what
+      // lets a 2 GB rename cost nothing and a 1 MB edit to a 2 GB file send
+      // roughly 1 MB. hashFile streams, so the cost is one sequential read,
+      // and a file that cannot be hashed still syncs, just without dedup.
+      const fileHash = await hashFile(longPath(absPath)).catch(() => undefined);
 
-      rt.state.files[result.fileId] = {
+      this.putFile(rt, {
         remoteId: result.fileId,
         remoteName: result.name,
         remoteFolderId: remoteFolderId,
@@ -2632,8 +3216,13 @@ export class SyncEngine extends EventEmitter {
         localMtimeMs: postStat.mtimeMs,
         syncedAt: Date.now(),
         contentHash: fileHash,
-      };
-      rt.pathIndex.set(relPath, result.fileId);
+      });
+
+      // Record the chunk list so the NEXT edit to this file can send only the
+      // parts that changed. Deliberately after the upload has landed and
+      // deliberately swallowed: chunking is an optimization for later, and a
+      // failure here must never fail a transfer that already succeeded.
+      void this.recordBlocks(rt, result.fileId, absPath, postStat.size);
 
       // Collect file ID for batched sync-flag call (done at end of scan, not per-file).
       // For individual watcher events, set the flag inline.
@@ -2643,7 +3232,7 @@ export class SyncEngine extends EventEmitter {
         this.client.setFileSyncFlag(result.fileId, true).catch(() => {});
       }
 
-      delete rt.state.fileErrors[relPath];
+      this.dropError(rt, relPath);
     } finally {
       if (transfer) this.activeTransfers.delete(transfer);
       this.transferSemaphore.release();
@@ -2671,8 +3260,8 @@ export class SyncEngine extends EventEmitter {
   // ── Ensure remote folder exists ───────────────────────────────────
 
   private async ensureRemoteFolder(rt: PairRuntime, relPath: string): Promise<string> {
-    if (rt.state.folders[relPath]) {
-      return rt.state.folders[relPath].remoteId;
+    if (this.index.getFolder(rt.pair.id, relPath)) {
+      return this.index.getFolder(rt.pair.id, relPath)!.remoteId;
     }
 
     const parts = relPath.split("/");
@@ -2681,8 +3270,9 @@ export class SyncEngine extends EventEmitter {
     for (let i = 0; i < parts.length; i++) {
       const partialPath = parts.slice(0, i + 1).join("/");
 
-      if (rt.state.folders[partialPath]) {
-        parentRemoteId = rt.state.folders[partialPath].remoteId;
+      const known = this.index.getFolder(rt.pair.id, partialPath);
+      if (known) {
+        parentRemoteId = known.remoteId;
         continue;
       }
 
@@ -2692,13 +3282,13 @@ export class SyncEngine extends EventEmitter {
         parentRemoteId,
       );
 
-      rt.state.folders[partialPath] = {
+      this.putFolder(rt, {
         remoteId: folderId,
         remoteName: parts[i],
         remoteParentId: parentRemoteId,
         localPath: partialPath,
         syncedAt: Date.now(),
-      };
+      });
 
       try {
         await this.client.setFolderSyncFlag(folderId, true);
@@ -2769,7 +3359,10 @@ export class SyncEngine extends EventEmitter {
       });
     }
     return {
-      pairs,
+      // Merge in configured pairs that have no runtime (engine not started,
+      // pausedGlobally, or a startPair failure) so the UI can never disagree
+      // with the duplicate-folder check, which reads the same config.
+      pairs: mergeStatusPairs(pairs, this.config?.pairs ?? [], this.config?.pausedGlobally ?? false),
       globalPaused: this.config?.pausedGlobally ?? false,
       activeTransfers: [...this.activeTransfers],
       unresolvedConflicts: this.conflicts,
@@ -2789,6 +3382,13 @@ export class SyncEngine extends EventEmitter {
       throw new Error("You must be logged in to add a sync folder.");
     }
     this.config = await loadConfig();
+
+    // Refuse system trees as sync roots. The ignore rules deliberately don't
+    // match system NAMES anymore (2026-08 rework), so this root-level check is
+    // the only thing standing between a user and syncing /usr (the 2026-08-20
+    // stress test: ~500K root-owned files, EACCES churn, OOM).
+    const forbidden = forbiddenSyncRootReason(resolve(pair.localPath), process.platform, homedir(), tmpdir());
+    if (forbidden) throw new Error(forbidden);
 
     // Prevent overlapping sync pairs - two pairs watching the same or nested
     // local paths would race on watcher events and double-upload.
@@ -2867,6 +3467,10 @@ export class SyncEngine extends EventEmitter {
     this.config = await loadConfig();
     const idx = this.config.pairs.findIndex(p => p.id === pairId);
     if (idx === -1) throw new Error("Pair not found");
+    if (updates.localPath !== undefined) {
+      const forbidden = forbiddenSyncRootReason(resolve(updates.localPath), process.platform, homedir(), tmpdir());
+      if (forbidden) throw new Error(forbidden);
+    }
     this.config.pairs[idx] = { ...this.config.pairs[idx], ...updates };
     await saveConfig(this.config);
     await this.stopPair(pairId);
@@ -2887,6 +3491,8 @@ export class SyncEngine extends EventEmitter {
       }
       // Set paused FIRST - in-flight workers check this and bail out.
       rt.status = "paused";
+      // A scanner parked on the queue must not stay parked through a pause.
+      this.backpressures.get(pairId)?.release();
       rt.errorMessage = null;
       rt.syncing = false;
       rt.totalFilesInBatch = 0;
@@ -2898,8 +3504,8 @@ export class SyncEngine extends EventEmitter {
       rt.scannedFiles = 0;
       rt.scannedFolders = 0;
       rt.statusText = "";
-      // Save state so already-uploaded files aren't re-uploaded on resume.
-      await this.safeSaveState(rt.state);
+      // Nothing to flush here any more: uploads recorded themselves in the
+      // index as they completed, so a resume already knows what is done.
       this.emitStatus();
     }
   }
@@ -2911,8 +3517,7 @@ export class SyncEngine extends EventEmitter {
         clearTimeout(rt.rateLimitResumeTimer);
         rt.rateLimitResumeTimer = null;
       }
-      // Rebuild path index from persisted state in case it drifted during pause
-      this.rebuildPathIndex(rt);
+      // No path index to rebuild any more - lookups read the index directly.
       rt.watcher?.start();
       rt.poller?.start();
       rt.status = "idle";
@@ -2927,14 +3532,20 @@ export class SyncEngine extends EventEmitter {
     if (this.pauseResumeTimer) { clearTimeout(this.pauseResumeTimer); this.pauseResumeTimer = null; }
     this.config = await loadConfig();
     this.config.pausedGlobally = true;
+    delete this.config.pausedUntil; // a manual pause is indefinite
     await saveConfig(this.config);
     for (const [id] of this.runtimes) await this.pausePair(id);
   }
 
-  /** Pause everything, then auto-resume after `ms` (a "snooze"). */
+  /** Pause everything, then auto-resume after `ms` (a "snooze"). The deadline
+   *  is persisted so a crash or restart mid-snooze can't leave pausedGlobally
+   *  wedged on forever - the exact trap that emptied the Sync tab in the
+   *  2026-08-20 stress test. */
   async pauseAllFor(ms: number): Promise<void> {
     await this.pauseAll(); // clears any existing timer first
     if (ms > 0) {
+      this.config!.pausedUntil = Date.now() + ms;
+      await saveConfig(this.config!);
       this.pauseResumeTimer = setTimeout(() => {
         this.pauseResumeTimer = null;
         this.resumeAll().catch(() => {});
@@ -2942,17 +3553,61 @@ export class SyncEngine extends EventEmitter {
     }
   }
 
+  /**
+   * Pause every runtime WITHOUT persisting pausedGlobally. For automatic
+   * pauses (system sleep, battery): if the app dies before the matching
+   * resume ever runs, the next launch must start clean instead of finding a
+   * paused flag nobody set on purpose.
+   */
+  async pauseAllTransient(): Promise<void> {
+    for (const [id] of this.runtimes) await this.pausePair(id);
+  }
+
+  /** Resume every runtime without touching the persisted config. */
+  async resumeAllTransient(): Promise<void> {
+    for (const [id] of this.runtimes) await this.resumePair(id);
+  }
+
   async resumeAll(): Promise<void> {
     if (this.pauseResumeTimer) { clearTimeout(this.pauseResumeTimer); this.pauseResumeTimer = null; }
     this.config = await loadConfig();
     this.config.pausedGlobally = false;
+    delete this.config.pausedUntil;
     await saveConfig(this.config);
+    // Engine never started (no session at boot, or a wedged pause) - a resume
+    // is the user asking for sync to run, so try the full start path.
+    if (!this.started) {
+      await this.start();
+      this.emitStatus();
+      return;
+    }
     for (const [id] of this.runtimes) await this.resumePair(id);
+    // Heal configured pairs that lost their runtime (startPair failure,
+    // start skipped by a persisted pause).
+    for (const pair of this.config.pairs) {
+      if (pair.enabled && !this.runtimes.has(pair.id)) {
+        try {
+          await this.startPair(pair);
+        } catch (err: any) {
+          console.error(`[sync] resumeAll startPair failed for ${pair.id}:`, err?.message ?? err);
+        }
+      }
+    }
+    this.emitStatus();
   }
 
   syncNow(pairId: string): void {
     const rt = this.runtimes.get(pairId);
-    if (!rt) return;
+    if (!rt) {
+      // A configured pair without a runtime - the placeholder row's
+      // "Sync now" is a recovery action, so start the pair.
+      const pair = this.config?.pairs.find((p) => p.id === pairId);
+      if (pair && this.started) {
+        this.startPair(pair).catch((err: any) =>
+          console.error(`[sync] syncNow startPair failed for ${pairId}:`, err?.message ?? err));
+      }
+      return;
+    }
     const mode = rt.pair.syncMode || "push-safe";
     if (mode === "two-way" && rt.poller) {
       // For two-way mode, trigger the reconciler via the poller
@@ -2985,26 +3640,27 @@ export class SyncEngine extends EventEmitter {
         await this.uploadLocalFile(rt, conflict.localPath, relPath);
       } else if (resolution === "keep-remote") {
         // Delete local state so the next reconcile treats the remote file as new and downloads it.
-        const existing = rt.state.files[conflict.remoteId];
+        const existing = this.index.getFileById(rt.pair.id, conflict.remoteId);
         if (existing) {
           // Delete the local file so the download doesn't think it's unchanged
           await unlink(longPath(conflict.localPath)).catch(() => {});
-          delete rt.state.files[conflict.remoteId];
-          rt.pathIndex.delete(existing.localPath);
+          this.dropFile(rt, conflict.remoteId);
         }
         // Trigger immediate poll instead of waiting up to 30s
         if (rt.poller) rt.poller.triggerNow();
       } else if (resolution === "keep-both") {
-        // Derive the extension from the file NAME only. Scanning the whole
-        // absolute path would pick up a dot from a parent directory (e.g.
-        // "/a/my.dir/README" → ".dir/README"), mangling an extensionless file.
-        // dotIdx > 0 also guards dotfiles (".env") and no-extension names.
-        const fileName = basename(conflict.localPath);
-        const dotIdx = fileName.lastIndexOf(".");
-        const ext = dotIdx > 0 ? fileName.substring(dotIdx) : "";
-        const base = conflict.localPath.substring(0, conflict.localPath.length - ext.length);
-        const dateStr = new Date().toISOString().slice(0, 10);
-        const conflictPath = `${base} (conflict ${dateStr})${ext}`;
+        // The copy's name has to say WHEN this forked and WHERE the other
+        // version came from - that is what the user needs to pick a side.
+        // Date alone collided on a fast edit-sync-edit cycle; the naming rules
+        // (and the numbered tie-break) live in conflict-name.ts.
+        const dir = dirname(conflict.localPath);
+        const copyName = conflictCopyName({
+          fileName: basename(conflict.localPath),
+          at: new Date(),
+          device: hostname(),
+          taken: (candidate) => existsSync(longPath(join(dir, candidate))),
+        });
+        const conflictPath = join(dir, copyName);
 
         const { rename: fsRename } = await import("fs/promises");
         await fsRename(longPath(conflict.localPath), longPath(conflictPath));
@@ -3013,7 +3669,6 @@ export class SyncEngine extends EventEmitter {
         await this.uploadLocalFile(rt, conflictPath, conflictRelPath);
       }
 
-      await this.safeSaveState(rt.state);
       console.log(`[sync] Conflict resolved (${resolution}): ${conflict.remoteName}`);
     } catch (err: any) {
       console.error(`[sync] Failed to resolve conflict: ${err.message}`);
@@ -3044,6 +3699,17 @@ export class SyncEngine extends EventEmitter {
   }
 
   /**
+   * Folder tree for the workspace picker.
+   *
+   * Exists as an engine method rather than a `getClient()` reach-through
+   * because a RemoteClient cannot cross the utilityProcess boundary, and the
+   * picker was the only caller that ever wanted the client itself.
+   */
+  async getFolderTree(workspaceId: string): Promise<import("./types").RemoteFolderInfo[]> {
+    return this.client.getFolderTree(workspaceId);
+  }
+
+  /**
    * Pre-populate sync state from a remote snapshot when state is empty.
    * Matches remote files to local files by name+size so the reconciler
    * or scanner can skip files that already exist identically on both sides.
@@ -3051,7 +3717,7 @@ export class SyncEngine extends EventEmitter {
    */
   private async prePopulateStateFromRemote(rt: PairRuntime): Promise<RemoteSnapshot | null> {
     const { pair, state } = rt;
-    if (Object.keys(state.files).length > 0 || !pair.remoteFolderId) return null;
+    if (this.index.countFiles(pair.id) > 0 || !pair.remoteFolderId) return null;
 
     rt.statusText = "Comparing with server...";
     this.log(pair.id, "Fetching remote file list...");
@@ -3104,10 +3770,10 @@ export class SyncEngine extends EventEmitter {
     for (const [id, f] of snapshot.folders) {
       const relPath = folderPaths.get(id);
       if (relPath) {
-        state.folders[relPath] = {
+        this.putFolder(rt, {
           remoteId: id, remoteName: f.name, remoteParentId: f.parent_id,
           localPath: relPath, syncedAt: Date.now(),
-        };
+        });
       }
     }
 
@@ -3116,17 +3782,15 @@ export class SyncEngine extends EventEmitter {
       const dir = f.folder_id && f.folder_id !== pair.remoteFolderId
         ? folderPaths.get(f.folder_id) ?? "" : "";
       const relPath = normalizeRel(dir ? `${dir}/${f.name}` : f.name);
-      state.files[id] = {
+      this.putFile(rt, {
         remoteId: id, remoteName: f.name, remoteFolderId: f.folder_id,
         remoteSizeBytes: f.size_bytes, remoteUpdatedAt: f.updated_at,
         remoteVersion: f.current_version, localPath: relPath,
         localSizeBytes: f.size_bytes, localMtimeMs: 0, syncedAt: Date.now(),
-      };
-      rt.pathIndex.set(relPath, id);
+      });
     }
 
     this.log(pair.id, `Found ${snapshot.files.size.toLocaleString()} files and ${snapshot.folders.size.toLocaleString()} folders on server`);
-    await this.safeSaveState(state);
     return snapshot;
   }
 
@@ -3209,9 +3873,7 @@ export class SyncEngine extends EventEmitter {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
       rt.status = "idle";
-      rt.state.lastFullSyncAt = Date.now();
-      rt.state.lastRemotePollAt = Date.now();
-      await this.safeSaveState(rt.state);
+      this.putPairMeta(rt, { lastFullSyncAt: Date.now(), lastRemotePollAt: Date.now() });
       this.log(pairId, "Initial sync complete");
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;

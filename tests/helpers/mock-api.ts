@@ -42,6 +42,8 @@ export async function startMockServer(
   // after a workspace switch should have canceled the queue). Scoped to this
   // server instance, so it resets per test.
   let uploadInitCount = 0;
+  /** Every upload init's file name and destination folder, in order. */
+  const uploadInits: { file_name: string; folder_id: string | null }[] = [];
 
   // Test-only folder store: POST /api/folders and /api/folders/batch persist
   // here so sync specs can assert the remote tree shape (parent linkage) via
@@ -518,7 +520,13 @@ export async function startMockServer(
     // ── Upload ────────────────────────────────────────────
     if (path === "/api/upload/init" && method === "POST") {
       uploadInitCount++;
-      return json({ ok: true, session_id: "sess_1" });
+      readBody(req).then((body) => {
+        // Destination matters, not just the count: a folder drop has to prove
+        // each file was initialised against ITS folder, not the page's.
+        uploadInits.push({ file_name: body.file_name, folder_id: body.folder_id ?? null });
+        json({ ok: true, session_id: "sess_1" });
+      });
+      return;
     }
     if (path.startsWith("/api/upload/") && method === "PUT") {
       setTimeout(() => json({ ok: true }), uploadDelayMs);
@@ -691,6 +699,9 @@ export async function startMockServer(
     }
     if (path === "/__test/folders" && method === "GET") {
       return json({ folders: [...folderStore.values()] });
+    }
+    if (path === "/__test/uploads" && method === "GET") {
+      return json({ uploads: uploadInits });
     }
     if (path === "/__test/batch-deletes" && method === "GET") {
       return json({ batches: batchDeletes });

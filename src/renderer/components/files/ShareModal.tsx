@@ -4,7 +4,10 @@ import { Mail, Link2, X, Loader2, Copy, ChevronDown, Files, Folder } from "lucid
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api-client";
 import { Modal } from "@/components/files/Modal";
-import { buildShareEmailBody, buildShareLinkBody, shareEndpoint } from "@dosya-dev/shared";
+import {
+  buildShareEmailBody, buildShareLinkBody, shareEndpoint,
+  validateEmail, validateSharePassword, validateShareExpiryAt, validateShareBundle,
+} from "@dosya-dev/shared";
 
 /**
  * What is being shared. A share link is one file, one bundle of files, or one
@@ -130,18 +133,46 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
       return;
     }
 
-    const pw = password.trim();
-    if (pw && pw.length < 8) {
-      setError("Password must be at least 8 characters.");
-      return;
+    // Kept in step with web even though no desktop caller builds a bundle yet
+    // (see the note in the email branch below) - the point of a shared policy is
+    // that the surface which grows the feature later already has the rule.
+    if (target.kind === "bundle") {
+      const bundleError = validateShareBundle(target.fileIds.length);
+      if (bundleError) { setError(bundleError); return; }
     }
 
-    setSubmitting(true);
+    if (tab === "email") {
+      // The server refuses the whole request on the first bad address without
+      // saying which. Name it.
+      const bad = emails.find((e) => validateEmail(e) !== null);
+      if (bad) {
+        setError(`"${bad}" is not a valid email address`);
+        emailRef.current?.focus();
+        return;
+      }
+    }
+
+    // Was a hand-written copy of the length clause. Now the shared rule, which
+    // also covers full_lock and a workspace that forces a password - and is the
+    // same function lib/share/create.ts runs on the server.
+    const pw = password.trim();
+    const pwError = validateSharePassword(pw);
+    if (pwError) { setError(pwError); return; }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
     // The builder normalises on absolute expires_at; the picker is still in days.
     const expiresAt = (): number | null => {
       const days = Number(expiry);
-      return days > 0 ? Math.floor(Date.now() / 1000) + days * 86400 : null;
+      return days > 0 ? nowSeconds + days * 86400 : null;
     };
+
+    // Nothing on this client knew about the 3650-day ceiling. The preset picker
+    // cannot currently exceed it, but the check costs nothing and stops a future
+    // preset from shipping a value the API refuses.
+    const expiryError = validateShareExpiryAt(expiresAt(), nowSeconds);
+    if (expiryError) { setError(expiryError); return; }
+
+    setSubmitting(true);
 
     try {
       if (tab === "email") {

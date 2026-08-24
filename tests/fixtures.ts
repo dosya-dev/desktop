@@ -159,6 +159,16 @@ export const guestTest = base.extend<{ appPage: Page }>({
 const appsByPage = new WeakMap<Page, ElectronApplication>();
 
 /**
+ * The Electron application behind a page, for specs that need to reach the
+ * main process rather than the renderer (process metrics, window state).
+ */
+export function electronAppFor(page: Page): ElectronApplication {
+  const app = appsByPage.get(page);
+  if (!app) throw new Error("electronAppFor: no Electron app recorded for this page");
+  return app;
+}
+
+/**
  * Resize the real window.
  *
  * `page.setViewportSize` does nothing useful in Electron - the OS window drives
@@ -174,6 +184,20 @@ export async function resizeWindow(page: Page, width: number, height: number): P
   }, { width, height });
   // Let the media queries and the layout settle before anything is measured.
   await page.waitForTimeout(500);
+}
+
+/**
+ * A CDP session on the app window.
+ *
+ * The only way to synthesise a REAL file drop (one carrying an OS path, so
+ * Chromium builds the DataTransfer itself) is Input.dispatchDragEvent - a
+ * hand-built DataTransfer in page.evaluate cannot produce directory entries at
+ * all, which is exactly what a folder-drop spec has to exercise.
+ */
+export async function cdpFor(page: Page) {
+  const app = appsByPage.get(page);
+  if (!app) throw new Error("cdpFor: no Electron app recorded for this page");
+  return app.context().newCDPSession(page);
 }
 
 /** Navigate within the hash router and wait for React to render */

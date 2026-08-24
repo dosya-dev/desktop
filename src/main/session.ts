@@ -1,4 +1,6 @@
 import { app, session } from "electron";
+import { originAllowed } from "./trusted-origins";
+import { parseSessionCookieHeaders } from "./session-cookie";
 
 /**
  * Configure Electron's session for the desktop app:
@@ -22,7 +24,7 @@ export function setupSession(apiBase: string): void {
   // allows those origins via CORS_ALLOWED_ORIGINS, so overwriting Origin here
   // would break the Access-Control-Allow-Origin match.
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
-    if (details.url.startsWith(apiBase)) {
+    if (originAllowed(details.url, [apiBase])) {
       details.requestHeaders["X-Dosya-Client"] = `desktop/${app.getVersion()}`;
     }
     callback({ requestHeaders: details.requestHeaders });
@@ -104,19 +106,20 @@ export function setupSession(apiBase: string): void {
     // Capture dosya_session from Set-Cookie and store it manually.
     // This is the primary mechanism for cookie storage - the cookies.on("changed")
     // listener below is a safety net for cookies that Chromium does store natively.
-    if (details.url.startsWith(apiBase)) {
-      const setCookies = responseHeaders["set-cookie"] || responseHeaders["Set-Cookie"] || [];
-      for (const raw of setCookies) {
-        if (!raw.startsWith("dosya_session=")) continue;
-        const value = raw.split(";")[0].split("=").slice(1).join("=");
-        if (!value) {
+    // Gate on the parsed origin, NOT a prefix match. `startsWith(apiBase)` was
+    // satisfied by an attacker-registered `api.dosya.dev.evil.example`, whose
+    // Set-Cookie was then written into the real store scoped to apiBase -
+    // letting attacker content fixate the victim's session.
+    if (originAllowed(details.url, [apiBase])) {
+      for (const update of parseSessionCookieHeaders(responseHeaders)) {
+        if (update.action === "clear") {
           // Empty value = cookie cleared (logout). Remove it from the store.
           ses.cookies.remove(apiBase, "dosya_session").catch(() => {});
         } else {
           ses.cookies.set({
             url: apiBase,
             name: "dosya_session",
-            value,
+            value: update.value,
             httpOnly: true,
             secure: true,
             sameSite: "no_restriction",

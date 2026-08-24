@@ -156,3 +156,118 @@ test("delayMs of zero disables reclaim entirely", () => {
   clock.fire();
   assert.equal(destroyedCount(), 0);
 });
+
+// ── The backstop ───────────────────────────────────────────────────
+//
+// Electron's "hide" event is NOT reliably delivered. On macOS 24.6 with
+// Electron 43, `win.hide()` flips `isVisible()` to false without ever emitting
+// it - verified against the real app, with the app forced frontmost. Wiring
+// reclaim solely to that event means a hidden window's renderer is never torn
+// down and the memory is never given back, silently. `verifyIntervalMs` is the
+// belt to that braces: re-check visibility periodically and start the destroy
+// timer for a hide we were never told about.
+
+/** A reclaimer whose window really does disappear when destroyed. */
+function makeBackstopReclaimer(overrides: Partial<Parameters<typeof createWindowReclaimer>[0]> = {}) {
+  const clock = fakeClock();
+  let destroyed = 0;
+  let hidden = true;
+  const reclaimer = createWindowReclaimer({
+    delayMs: 5_000,
+    verifyIntervalMs: 5_000,
+    isQuitting: () => false,
+    isHidden: () => hidden && destroyed === 0,
+    destroy: () => {
+      destroyed++;
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+    ...overrides,
+  });
+  return {
+    clock,
+    reclaimer,
+    destroyedCount: () => destroyed,
+    setHidden: (v: boolean) => {
+      hidden = v;
+    },
+  };
+}
+
+test("a hide the OS never told us about is still reclaimed", () => {
+  const { clock, reclaimer, destroyedCount } = makeBackstopReclaimer();
+
+  // onHide() is deliberately NEVER called - this is the missed-event case.
+  assert.equal(clock.pendingCount(), 1, "the backstop must be armed from creation");
+
+  clock.fire(); // backstop notices the window is hidden and arms the destroy
+  assert.equal(destroyedCount(), 0, "the window must still wait out the full delay");
+
+  clock.fire(); // the delay elapses
+  assert.equal(destroyedCount(), 1);
+});
+
+test("the backstop never destroys a visible window", () => {
+  const { clock, reclaimer, destroyedCount, setHidden } = makeBackstopReclaimer();
+  setHidden(false);
+
+  for (let i = 0; i < 5; i++) clock.fire();
+
+  assert.equal(destroyedCount(), 0);
+});
+
+test("the backstop respects a quitting app", () => {
+  const { clock, destroyedCount } = makeBackstopReclaimer({ isQuitting: () => true });
+
+  for (let i = 0; i < 5; i++) clock.fire();
+
+  assert.equal(destroyedCount(), 0);
+});
+
+test("the backstop does not stack a second destroy on top of a real hide", () => {
+  const { clock, reclaimer, destroyedCount } = makeBackstopReclaimer();
+
+  reclaimer.onHide();
+  // One destroy timer plus the backstop, not two destroy timers.
+  assert.equal(clock.pendingCount(), 2);
+
+  clock.fire();
+  assert.equal(destroyedCount(), 1, "exactly one destroy, not one per timer");
+});
+
+test("a show cancels a destroy the backstop armed", () => {
+  const { clock, reclaimer, destroyedCount, setHidden } = makeBackstopReclaimer();
+
+  clock.fire(); // backstop arms the destroy
+  setHidden(false);
+  reclaimer.onShow();
+  clock.fire();
+
+  assert.equal(destroyedCount(), 0);
+});
+
+test("dispose stops the backstop for good", () => {
+  const { clock, reclaimer, destroyedCount } = makeBackstopReclaimer();
+
+  reclaimer.dispose();
+
+  assert.equal(clock.pendingCount(), 0, "a disposed reclaimer must leave no timer behind");
+  clock.fire();
+  assert.equal(destroyedCount(), 0);
+});
+
+test("delayMs of zero disables the backstop too", () => {
+  const { clock, destroyedCount } = makeBackstopReclaimer({ delayMs: 0 });
+
+  assert.equal(clock.pendingCount(), 0, "the off switch must stay off");
+  clock.fire();
+  assert.equal(destroyedCount(), 0);
+});
+
+test("without verifyIntervalMs there is no backstop timer", () => {
+  // Opt-in, so the existing single-timer behaviour is unchanged for callers
+  // that do not ask for it.
+  const { clock } = makeReclaimer();
+
+  assert.equal(clock.pendingCount(), 0);
+});

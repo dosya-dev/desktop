@@ -16,15 +16,6 @@ import QRCode from "qrcode";
 import { longPath } from "./sync/paths";
 import { clearSessionCookie } from "./session";
 
-/** Allowed OAuth providers (prevents open redirect via arbitrary provider strings). */
-const ALLOWED_OAUTH_PROVIDERS = new Set(["google", "github"]);
-
-/** Allowed navigation prefixes for the OAuth popup. */
-const OAUTH_ALLOWED_ORIGINS = [
-  "https://accounts.google.com",
-  "https://github.com",
-];
-
 export function registerIpcHandlers(apiBase: string): void {
   // Clean up temp files from previous sessions on startup
   const tempDir = join(app.getPath("temp"), "dosya-open");
@@ -143,104 +134,6 @@ export function registerIpcHandlers(apiBase: string): void {
       // Re-check once after subscribing: the cookie may have landed in the gap
       // between the first check and the listener being attached.
       void tryResolve().then((ok) => { if (ok) finish(); });
-    });
-  });
-
-  // OAuth via popup BrowserWindow
-  ipcMain.handle("auth:oauth", async (_event, provider: string) => {
-    if (!ALLOWED_OAUTH_PROVIDERS.has(provider)) {
-      return { ok: false, error: "Unknown OAuth provider" };
-    }
-
-    return new Promise((resolve) => {
-      const authUrl = `${apiBase}/api/auth/${provider}`;
-      let resolved = false;
-
-      const popup = new BrowserWindow({
-        width: 600,
-        height: 700,
-        show: true,
-        webPreferences: {
-          nodeIntegration: false,
-          contextIsolation: true,
-          sandbox: true,
-        },
-      });
-
-      // Restrict navigation to the API and known OAuth providers
-      popup.webContents.on("will-navigate", (event, url) => {
-        const allowed =
-          url.startsWith(apiBase) ||
-          OAUTH_ALLOWED_ORIGINS.some((origin) => url.startsWith(origin));
-        if (!allowed) {
-          event.preventDefault();
-        }
-      });
-
-      // Block popup windows from within the OAuth popup
-      popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-
-      // Timeout: if nothing happens within 60s, resolve with error
-      const loadTimeout = setTimeout(() => {
-        done(false, "", "OAuth timed out");
-      }, 60_000);
-
-      popup.loadURL(authUrl);
-
-      function done(ok: boolean, url: string, error?: string): void {
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(loadTimeout);
-        popup.removeAllListeners();
-        popup.webContents.removeAllListeners();
-        if (!popup.isDestroyed()) popup.close();
-        resolve(ok ? { ok: true, redirectedTo: url } : { ok: false, error });
-      }
-
-      async function check(url: string): Promise<void> {
-        let path: string;
-        try { path = new URL(url).pathname; } catch { return; }
-
-        if (path.startsWith("/dashboard") || path.startsWith("/create-workspace") || path.startsWith("/verify") || path.startsWith("/login/2fa")) {
-          // Poll for the session cookie instead of relying on a fixed delay
-          for (let i = 0; i < 20; i++) {
-            const cookies = await session.defaultSession.cookies.get({ name: "dosya_session" });
-            if (cookies.length > 0) {
-              done(true, url);
-              return;
-            }
-            await new Promise((r) => setTimeout(r, 100));
-          }
-          // Cookie still not found after 2s, resolve anyway (it may arrive later)
-          done(true, url);
-        } else if (path === "/login" && url.includes("error=")) {
-          done(false, url, new URL(url).searchParams.get("error") || "OAuth failed");
-        }
-      }
-
-      // did-navigate fires after the response (including Set-Cookie) is received
-      popup.webContents.on("did-navigate", (_e, url) => {
-        check(url).catch((err) => {
-          console.error("[oauth] check error:", err);
-          done(false, "", "OAuth check failed");
-        });
-      });
-
-      popup.webContents.on("did-fail-load", (_e, code, desc) => {
-        done(false, "", `Failed to load: ${desc} (${code})`);
-      });
-
-      popup.webContents.on("render-process-gone", () => {
-        done(false, "", "OAuth popup crashed");
-      });
-
-      popup.on("closed", () => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(loadTimeout);
-          resolve({ ok: false, error: "Window closed by user" });
-        }
-      });
     });
   });
 

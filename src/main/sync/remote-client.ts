@@ -1,10 +1,10 @@
-import { app, session } from "electron";
 import { createReadStream, createWriteStream, readFileSync } from "fs";
 import { stat, readFile, writeFile as fsWriteFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
 import { basename, extname } from "path";
 import { randomBytes } from "crypto";
 import { Transform, type Readable } from "stream";
 import { longPath } from "./paths";
+import type { EnvProvider } from "./env-provider";
 import { syncDir } from "./config";
 import { DEVICE_ID_HEADER, currentDeviceId, ensureDeviceId } from "./device-id";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
@@ -101,27 +101,6 @@ function agentFor(url: string | URL): http.Agent | https.Agent {
   return protocol === "https:" ? httpsAgent : httpAgent;
 }
 
-/**
- * Resolve system proxy for a URL using Electron's session.
- * Returns the proxy URL string (e.g. "http://proxy:8080") or null for DIRECT.
- * Corporate environments with authenticated proxies, PAC files, etc. are
- * handled automatically by Chromium's proxy resolver.
- */
-async function resolveProxy(url: string): Promise<string | null> {
-  try {
-    const proxyInfo = await session.defaultSession.resolveProxy(url);
-    // proxyInfo format: "DIRECT" or "PROXY host:port" or "HTTPS host:port"
-    if (!proxyInfo || proxyInfo === "DIRECT") return null;
-    const match = proxyInfo.match(/^(PROXY|HTTPS)\s+(.+)$/i);
-    if (match) {
-      const scheme = match[1].toUpperCase() === "HTTPS" ? "https" : "http";
-      return `${scheme}://${match[2]}`;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 // Cache proxy agents per (target-scheme, proxy-url) so keep-alive still works
 // through a corporate proxy instead of a fresh TCP+TLS handshake per request.
@@ -147,20 +126,21 @@ function getProxyAgent(targetUrl: string | URL, proxyUrl: string): http.Agent {
 
 /**
  * Resolve the agent to use for a request. Returns the shared DIRECT keep-alive
- * agent when the system says DIRECT (unchanged fast path); otherwise a proxy
- * agent routed through the resolved system/corporate proxy. Electron's
- * resolveProxy already applies PAC files and NO_PROXY/bypass rules, so a null
- * proxy here means "go direct".
+ * agent when the host says DIRECT (unchanged fast path); otherwise a proxy
+ * agent routed through the resolved system/corporate proxy. The host provider
+ * already applies PAC files and NO_PROXY/bypass rules, so a null proxy here
+ * means "go direct".
  */
-async function resolveAgent(url: string | URL): Promise<http.Agent | https.Agent> {
+async function resolveAgent(url: string | URL, env: EnvProvider): Promise<http.Agent | https.Agent> {
   const urlStr = typeof url === "string" ? url : url.toString();
-  const proxyUrl = await resolveProxy(urlStr);
+  const proxyUrl = await env.resolveProxy(urlStr);
   if (!proxyUrl) return agentFor(url);
   debugLog("[sync] Routing via proxy:", proxyUrl, "for", urlStr);
   return getProxyAgent(url, proxyUrl);
 }
 
-const isDev = !app.isPackaged;
+let isDev = false;
+/** Set from the EnvProvider when a client is constructed. */
 function debugLog(...args: unknown[]): void {
   if (isDev) console.log(...args);
 }
@@ -234,7 +214,15 @@ export class RemoteClient {
   private uploadBucket = new TokenBucket(0);
   private downloadBucket = new TokenBucket(0);
 
-  constructor(private apiBase: string) {}
+  private apiBase: string;
+  /** Host services (auth cookie, proxy, dev flag) - see env-provider.ts. */
+  private env: EnvProvider;
+
+  constructor(apiBase: string, env: EnvProvider) {
+    this.apiBase = apiBase;
+    this.env = env;
+    isDev = env.isDev;
+  }
 
   /** Set aggregate bandwidth caps in bytes/sec (0 = unlimited). */
   setBandwidthLimits(uploadBytesPerSec: number, downloadBytesPerSec: number): void {
@@ -338,7 +326,7 @@ export class RemoteClient {
     }
 
     const apiHost = new URL(this.apiBase).hostname;
-    const allSession = await session.defaultSession.cookies.get({ name: "dosya_session" });
+    const allSession = await this.env.getSessionCookies();
 
     let value: string | null = null;
 
@@ -387,7 +375,7 @@ export class RemoteClient {
     // Resolve system proxy (supports corporate proxies, PAC files, etc.) and
     // build the actual agent for the request - on proxy-mandatory networks a
     // direct agent silently fails, so the resolved proxy MUST be applied.
-    const agent = await resolveAgent(fullUrl);
+    const agent = await resolveAgent(fullUrl, this.env);
 
     let bodyBuf: Buffer | undefined;
     if (opts.body != null) {
@@ -440,7 +428,7 @@ export class RemoteClient {
 
             // Redirect target may be a different host (e.g. R2) - resolve its
             // proxy independently rather than reusing the origin's agent.
-            resolveAgent(redirectUrl).then((rAgent) => {
+            resolveAgent(redirectUrl, this.env).then((rAgent) => {
               const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout, agent: rAgent }, (rRes) => {
                 const chunks: Buffer[] = [];
                 rRes.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -683,7 +671,7 @@ export class RemoteClient {
 
           // Resolve a proxy agent per-URL (redirects can cross hosts); falls
           // back to the shared DIRECT agent when no proxy is configured.
-          resolveAgent(url).then((agent) => {
+          resolveAgent(url, this.env).then((agent) => {
           const req = reqLib.get(url, { headers, timeout: 300_000, agent }, (res) => {
             const status = res.statusCode ?? 500;
             if (status === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
@@ -1032,7 +1020,7 @@ export class RemoteClient {
       const lib = parsed.protocol === "https:" ? https : http;
 
       // Route through the resolved system/corporate proxy when present.
-      resolveAgent(fullUrl).then((agent) => {
+      resolveAgent(fullUrl, this.env).then((agent) => {
       const req = lib.request(fullUrl, {
         method: "PUT",
         headers: {
@@ -1206,7 +1194,7 @@ export class RemoteClient {
       const lib = urlParsed.protocol === "https:" ? https : http;
 
       // Route through the resolved system/corporate proxy when present.
-      resolveAgent(fullUrl).then((agent) => {
+      resolveAgent(fullUrl, this.env).then((agent) => {
       const req = lib.request(fullUrl, {
         method: "PUT",
         headers: {
@@ -1512,7 +1500,7 @@ export class RemoteClient {
 
       // Route through the resolved system/corporate proxy when present (R2 is a
       // different host, so its proxy is resolved independently).
-      resolveAgent(presignedUrl).then((agent) => {
+      resolveAgent(presignedUrl, this.env).then((agent) => {
       const req = lib.request(presignedUrl, {
         method: "PUT",
         headers: {
@@ -1648,6 +1636,101 @@ export class RemoteClient {
     const map = new Map<string, { url: string; r2Key: string }>();
     for (const u of data.uploads ?? []) map.set(u.hash, { url: u.url, r2Key: u.r2Key });
     return map;
+  }
+
+  /**
+   * PUT one chunk - a byte RANGE of a local file - to a presigned URL.
+   *
+   * Streams `[offset, offset+size)` straight off disk, so a delta upload never
+   * holds a chunk in memory, and goes through the same throttle as every other
+   * upload path so it still respects the user's bandwidth cap.
+   */
+  async uploadChunkToPresignedUrl(
+    presignedUrl: string,
+    filePath: string,
+    offset: number,
+    size: number,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(presignedUrl);
+      const lib = parsed.protocol === "https:" ? https : http;
+      resolveAgent(presignedUrl, this.env).then((agent) => {
+        const req = lib.request(presignedUrl, {
+          method: "PUT",
+          headers: { "Content-Type": "application/octet-stream", "Content-Length": String(size) },
+          timeout: 120_000,
+          agent,
+        }, (res) => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            res.resume();
+            resolve();
+            return;
+          }
+          res.resume();
+          reject(new Error(`Chunk upload failed: HTTP ${res.statusCode}`));
+        });
+        req.on("timeout", () => { req.destroy(); reject(new Error("Chunk upload timed out")); });
+        req.on("error", reject);
+
+        // The declared length must match what actually goes out. A short or
+        // long body would leave R2 holding a chunk whose hash no longer
+        // describes its bytes - and that chunk gets REUSED for other files.
+        let sent = 0;
+        const counter = new Transform({
+          transform(c, _e, cb) { sent += c.length; cb(null, c); },
+          flush(cb) {
+            cb(sent === size ? null : new Error(`Chunk changed while uploading (expected ${size} bytes, read ${sent})`));
+          },
+        });
+        counter.on("error", (err) => { req.destroy(); reject(err); });
+
+        const stream = createReadStream(filePath, { start: offset, end: offset + size - 1 });
+        stream.on("error", (err) => { req.destroy(); reject(err); });
+        this.throttle(stream, this.uploadBucket).pipe(counter).pipe(req);
+      }).catch(reject);
+    });
+  }
+
+  /**
+   * Register uploaded chunks and ask the server to reassemble them into the
+   * file. The server caps this at 64 MB / 8192 chunks; the client checks the
+   * same limits before getting here (delta-eligibility.ts).
+   */
+  async commitChunks(opts: {
+    workspaceId: string;
+    region: string;
+    fileId: string | null;
+    folderId: string | null;
+    name: string;
+    size: number;
+    contentType: string;
+    ext: string | null;
+    chunks: { hash: string; size: number }[];
+  }): Promise<{ fileId: string; version: number; reusedChunks: number; uploadedChunks: number }> {
+    const res = await this.fetch("/api/sync/chunks/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspace_id: opts.workspaceId,
+        region: opts.region,
+        file_id: opts.fileId,
+        folder_id: opts.folderId,
+        name: opts.name,
+        size: opts.size,
+        content_type: opts.contentType,
+        ext: opts.ext,
+        chunks: opts.chunks,
+      }),
+    });
+    if (res.status === 401) throw new Error("SESSION_EXPIRED");
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "chunks/commit failed");
+    return {
+      fileId: data.file_id,
+      version: data.version ?? 1,
+      reusedChunks: data.reused_chunks ?? 0,
+      uploadedChunks: data.uploaded_chunks ?? 0,
+    };
   }
 
   // ── Public API ────────────────────────────────────────────────────

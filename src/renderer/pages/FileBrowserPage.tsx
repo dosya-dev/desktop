@@ -33,6 +33,11 @@ import {
   SquarePen,
 } from "lucide-react";
 import { api, apiBase, ApiError } from "@/lib/api-client";
+import {
+  validateFileName, validateFolderName, validateFolderPath,
+  checkUploadFile, checkBatchFitsQuota, summariseRejections,
+} from "@dosya-dev/shared";
+import { fetchUploadLimits } from "@/lib/upload-limits";
 import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes, formatDate } from "@/lib/format";
@@ -49,6 +54,10 @@ import { HideModal } from "@/components/files/HideModal";
 import { FileInfoDialog, type InfoTarget } from "@/components/files/FileInfoDialog";
 import { OriginBadge } from "@/components/files/OriginBadge";
 import { Modal } from "@/components/files/Modal";
+import {
+  readDroppedEntries, orderedDirs, createFolderTree, resolveTargets,
+  MAX_DROPPED_FILES, type FolderPlan,
+} from "@/lib/dropped-entries";
 
 interface FolderRow {
   id: string;
@@ -447,29 +456,46 @@ export function FileBrowserPage() {
   });
 
   const createFolderMut = useMutation({
-    mutationFn: (name: string) =>
-      api.post("/api/folders", {
+    mutationFn: (name: string) => {
+      // The field takes a path, so this is the path validator: 500 total, 100
+      // per segment, single-segment character policy on each. Same function the
+      // API runs, so the thrown message is the one it would have returned.
+      const problem = validateFolderPath(name);
+      if (problem) throw new Error(problem);
+      return api.post("/api/folders", {
         workspace_id: active!.id,
         name,
         parent_id: folderId || null,
-      }),
+      });
+    },
     onSuccess: () => {
       refresh();
       setShowCreateFolder(false);
       setNewFolderName("");
       toast.success("Folder created");
     },
+    // This mutation had no onError at all, so a refused create - a duplicate
+    // name, no permission, and now an invalid one - closed nothing and said
+    // nothing. Any Error carries a message worth showing, not just ApiError.
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Folder could not be created"),
   });
 
   const renameMut = useMutation({
-    mutationFn: ({ id, name, kind }: { id: string; name: string; kind: string }) =>
-      api.put(`/api/${kind === "folder" ? "folders" : "files"}/${id}/rename`, { name }),
+    mutationFn: ({ id, name, kind }: { id: string; name: string; kind: string }) => {
+      // Files cap at 255, folders at 100, both single-segment. Checked before
+      // the request so a slash in the name fails instantly with the reason.
+      const problem = kind === "folder" ? validateFolderName(name) : validateFileName(name);
+      if (problem) throw new Error(problem);
+      return api.put(`/api/${kind === "folder" ? "folders" : "files"}/${id}/rename`, { name });
+    },
     onSuccess: () => {
       refresh();
       setRenameItem(null);
       toast.success("Renamed");
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Rename failed"),
+    // Widened from ApiError: a local policy refusal is a plain Error and its
+    // message is the same sentence the API would have sent.
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Rename failed"),
   });
 
   const moveMut = useMutation({
@@ -606,18 +632,20 @@ export function FileBrowserPage() {
 
   // ── Upload plumbing (drag-and-drop + new version) ──────────
 
-  const uploadFiles = useCallback(async (dropped: FileList | File[]) => {
+  // Takes an explicit folder per file rather than reading `folderId` for all of
+  // them: a dropped folder tree lands across many folders in one batch.
+  const uploadFiles = useCallback(async (targets: { file: File; folderId: string | null }[]) => {
     if (!active?.id) return { uploaded: 0, failed: 0 };
     let uploaded = 0;
     let failed = 0;
-    for (const file of Array.from(dropped)) {
+    for (const { file, folderId: target } of targets) {
       try {
         const initRes = await api.post<{ ok: boolean; session_id?: string; error?: string }>("/api/upload/init", {
           workspace_id: active.id,
           file_name: file.name,
           file_size: file.size,
           mime_type: file.type || "application/octet-stream",
-          folder_id: folderId || null,
+          folder_id: target,
         });
         if (!initRes.ok || !initRes.session_id) { failed++; continue; }
         const res = await fetch(`${apiBase()}/api/upload/${initRes.session_id}`, {
@@ -638,22 +666,113 @@ export function FileBrowserPage() {
       }
     }
     return { uploaded, failed };
-  }, [active?.id, folderId]);
+  }, [active?.id]);
+
+  /** Find-or-create one folder; the server reuses an existing row by name. */
+  const createFolder = useCallback(async (name: string, parentId: string | null) => {
+    const res = await api.post<{ ok: boolean; folder?: { id: string }; error?: string }>("/api/folders", {
+      workspace_id: active?.id, parent_id: parentId, name,
+    });
+    if (!res.ok || !res.folder?.id) throw new Error(res.error ?? "Could not create folder");
+    return res.folder.id;
+  }, [active?.id]);
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); if (!showDeleted) setDragging(true); };
   const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); if (e.currentTarget === e.target) setDragging(false); };
-  const handleDrop = async (e: React.DragEvent) => {
+  // Not `async`, and it must stay that way: readDroppedEntries reads
+  // dataTransfer.items - the only API that can see inside a dropped folder -
+  // before its own first await, and that list is dead once this handler
+  // returns. Passing dataTransfer.files instead (as this used to) handed the
+  // uploader an unreadable directory handle for the folder itself.
+  const handleDrop = (e: React.DragEvent) => {
     e.preventDefault(); e.stopPropagation(); setDragging(false);
-    if (showDeleted || !e.dataTransfer.files.length) return;
-    const { uploaded, failed } = await uploadFiles(e.dataTransfer.files);
-    if (!pageAliveRef.current) return; // page (or session) is gone - no toasts
-    if (uploaded > 0) {
-      toast.success("Uploaded", { description: `${uploaded} file${uploaded > 1 ? "s" : ""} uploaded` });
-      refresh();
-    }
-    if (failed > 0) {
-      toast.error("Some uploads failed", { description: `${failed} file${failed > 1 ? "s" : ""} could not be uploaded` });
-    }
+    if (showDeleted || !active?.id) return;
+    const root = folderId || null;
+
+    void readDroppedEntries(e.dataTransfer).then(async (tree) => {
+      if (tree.entries.length === 0 && tree.dirs.length === 0) return;
+
+      // Screen before a single folder is created. The tree recreation below is
+      // a round trip per folder, so building it for files this workspace was
+      // never going to accept is the expensive half of finding out late.
+      if (tree.entries.length > 0) {
+        const limits = await fetchUploadLimits(active.id);
+        if (!pageAliveRef.current) return;
+        const rejected: { name: string; reason: string }[] = [];
+        const accepted = tree.entries.filter((entry) => {
+          const reason = checkUploadFile(
+            { name: entry.file.name, size: entry.file.size }, limits,
+          );
+          if (reason) { rejected.push({ name: entry.file.name, reason }); return false; }
+          return true;
+        });
+        if (rejected.length > 0) {
+          toast.error(
+            accepted.length > 0
+              ? `${rejected.length} file${rejected.length === 1 ? "" : "s"} left out`
+              : "Nothing could be uploaded",
+            { description: summariseRejections(rejected) },
+          );
+        }
+        if (accepted.length === 0) return;
+        const fit = checkBatchFitsQuota(
+          accepted.reduce((n, entry) => n + entry.file.size, 0), limits,
+        );
+        if (!fit.fits) {
+          toast.warning("This may not all fit", {
+            description: "This upload is larger than the space left in this workspace. Some files may be refused.",
+          });
+        }
+        tree = { ...tree, entries: accepted };
+      }
+
+      let plan: FolderPlan = { ids: new Map(), failed: [] };
+      if (tree.hadDirectory) {
+        const dirs = orderedDirs(tree);
+        // Recreating a deep tree is a round trip per folder - say so up front,
+        // or the drop looks dead until the first file finishes.
+        toast.info("Uploading folder", {
+          description: `Recreating ${dirs.length} folder${dirs.length === 1 ? "" : "s"}, then uploading ${tree.entries.length} file${tree.entries.length === 1 ? "" : "s"}.`,
+        });
+        plan = await createFolderTree(dirs, root, createFolder);
+        if (!pageAliveRef.current) return;
+        if (plan.failed.length > 0) {
+          toast.error("Some folders could not be created", {
+            description: `${plan.failed.length} folder${plan.failed.length === 1 ? "" : "s"} failed. ${plan.error ?? ""}`.trim(),
+          });
+        }
+        // Folders exist before their files finish, so show them now.
+        if (plan.ids.size > 0) refresh();
+      }
+
+      const { targets, skipped } = resolveTargets(tree.entries, plan, root);
+      if (skipped > 0 && pageAliveRef.current) {
+        toast.error("Some files were skipped", {
+          description: `${skipped} file${skipped === 1 ? "" : "s"} had no folder to go in.`,
+        });
+      }
+      if (tree.skipped > 0 && pageAliveRef.current) {
+        toast.error("Too many files in one go", {
+          description: `Only the first ${MAX_DROPPED_FILES.toLocaleString()} files were uploaded - ${tree.skipped} left out.`,
+        });
+      }
+      if (targets.length === 0) {
+        if (tree.hadDirectory && plan.ids.size > 0 && pageAliveRef.current) {
+          toast.success("Folder created", { description: "There were no files inside to upload." });
+        }
+        return;
+      }
+
+      const { uploaded, failed } = await uploadFiles(targets);
+      if (!pageAliveRef.current) return; // page (or session) is gone - no toasts
+      if (uploaded > 0) {
+        toast.success("Uploaded", { description: `${uploaded} file${uploaded > 1 ? "s" : ""} uploaded` });
+        refresh();
+      }
+      if (failed > 0) {
+        toast.error("Some uploads failed", { description: `${failed} file${failed > 1 ? "s" : ""} could not be uploaded` });
+      }
+    });
   };
 
   const handleVersionUpload = async (fileId: string, file: File) => {
@@ -794,7 +913,7 @@ export function FileBrowserPage() {
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-[var(--color-primary)] bg-[var(--color-primary)]/5">
           <div className="flex flex-col items-center gap-2 text-[var(--color-primary)]">
             <Upload size={40} />
-            <p className="text-sm font-semibold">Drop files to upload</p>
+            <p className="text-sm font-semibold">Drop files or folders to upload</p>
             <p className="text-xs opacity-70">{folderId ? `to ${breadcrumbs.at(-1)?.name ?? "folder"}` : "to root folder"}</p>
           </div>
         </div>

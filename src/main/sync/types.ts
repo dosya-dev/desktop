@@ -35,6 +35,9 @@ export interface SyncConfig {
   pairs: SyncPair[];
   globalPollIntervalMs: number;
   pausedGlobally: boolean;
+  /** Epoch ms deadline for a timed pause ("snooze"). Persisted so a crash
+   *  mid-snooze can't leave pausedGlobally stuck on across restarts. */
+  pausedUntil?: number;
   maxConcurrentTransfers: number;
   /** Upload/download rate caps in bytes/sec. 0 or undefined = unlimited. */
   maxUploadBytesPerSec?: number;
@@ -159,7 +162,7 @@ export interface SyncStatus {
 
 /** A non-fatal, user-visible condition attached to a pair. */
 export interface SyncNotice {
-  kind: "degraded-watch" | "files-skipped";
+  kind: "degraded-watch" | "files-skipped" | "conflict-copy";
   message: string;
 }
 

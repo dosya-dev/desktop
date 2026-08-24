@@ -37,6 +37,36 @@ export function normalizeRel(relPath: string): string {
 }
 
 /**
+ * True if `relPath` resolves inside `syncRoot`.
+ *
+ * Remote file and folder names are workspace-controlled and the reconciler
+ * concatenates them into relPaths without sanitising (normalizeRel is NFC only),
+ * so a name like ".." reaches every local filesystem sink. Every sink that
+ * builds a path from a REMOTE name must gate on this - downloads, folder
+ * creation, and moves alike.
+ *
+ * Both separators are rejected explicitly rather than left to path.resolve:
+ * on POSIX a backslash is an ordinary filename character, so resolve() would
+ * not see "..\\evil" as traversal, and the engine should fail closed on a
+ * snapshot that is dangerous on any host it might also be syncing from.
+ *
+ * Lives here, exported and pure, rather than as a private engine method so it
+ * can be tested directly - the API's folders/batch.ts route is a standing
+ * reminder that an unenforced copy of a rule is the one that gets missed.
+ */
+export function isPathWithinRoot(syncRoot: string, relPath: string): boolean {
+  if (typeof relPath !== "string" || relPath.length === 0) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(relPath)) return false;
+  for (const segment of relPath.split(/[\\/]/)) {
+    if (segment === "." || segment === "..") return false;
+  }
+  const root = pathResolve(syncRoot);
+  const full = pathResolve(root, relPath);
+  return full === root || full.startsWith(root + sep);
+}
+
+/**
  * Compute the lookup key for a relative path. On case-insensitive
  * filesystems this folds case so that case-only variants collapse to one
  * entry (matching how the OS treats them on disk). The real path is kept

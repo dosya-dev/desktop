@@ -1,7 +1,7 @@
 import { app, Tray, Menu, nativeImage, shell } from "electron";
 import { join } from "path";
 import { markQuitting } from "./quit-state";
-import type { SyncEngine } from "./sync";
+import type { SyncEngineHandle } from "./sync/engine-host";
 import type { SyncStatus } from "./sync/types";
 
 /**
@@ -19,7 +19,7 @@ export interface TrayWindowHandles {
 
 let tray: Tray | null = null;
 
-export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngine): void {
+export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle): void {
   // Load tray icon from build resources
   const trayIconPath = join(__dirname, "../../build/tray-icon.png");
   let icon: Electron.NativeImage;

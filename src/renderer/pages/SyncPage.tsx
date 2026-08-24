@@ -61,7 +61,7 @@ const SYNC_MODES = [
 
 export function SyncPage() {
   const { active, workspaces } = useWorkspace();
-  const { status, conflicts, isLoading, init, refresh } = useSyncStore();
+  const { status, conflicts, isLoading, loadFailed, init, refresh } = useSyncStore();
   const [tab, setTab] = useState<Tab>("overview");
   const [showAdd, setShowAdd] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -385,11 +385,37 @@ export function SyncPage() {
       {/* Content */}
       {tab === "overview" && (
         <div>
+          {status?.globalPaused && !isLoading && (
+            <div className="mb-3 flex items-center justify-between rounded-xl border px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
+              <p className="text-sm font-medium">Sync is paused for all folders.</p>
+              <button
+                onClick={() => { void window.electronAPI.resumeAllSync?.().then(() => refresh()); }}
+                className="rounded-lg px-3 py-1.5 text-xs font-medium text-white"
+                style={{ background: "var(--color-primary)" }}
+              >
+                Resume all
+              </button>
+            </div>
+          )}
           {isLoading ? (
             <div className="space-y-2">
               {[1, 2, 3].map((i) => (
                 <div key={i} className="h-12 animate-pulse rounded-lg bg-[var(--color-bg-tertiary)]" />
               ))}
+            </div>
+          ) : loadFailed ? (
+            <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
+              <p className="text-sm font-medium">Couldn't read sync status</p>
+              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                The app couldn't reach its sync engine - try restarting dosya.
+              </p>
+              <button
+                onClick={() => { void refresh().catch(() => {}); }}
+                className="mt-4 rounded-lg border px-4 py-2 text-sm font-medium"
+                style={{ borderColor: "var(--color-border)" }}
+              >
+                Try again
+              </button>
             </div>
           ) : pairs.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
@@ -490,6 +516,18 @@ export function SyncPage() {
                         <p className="text-sm font-medium">{p.remoteFolderName}</p>
                         <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">{n.message}</p>
                         <p className="mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
+                        {n.kind === "conflict-copy" && (
+                          // Both versions are sitting side by side on disk;
+                          // the only thing left is to look at them and delete
+                          // the one you do not want.
+                          <button
+                            onClick={() => { void window.electronAPI.openSyncFolder?.(p.pairId); }}
+                            className="mt-2 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+                            style={{ borderColor: "var(--color-border)" }}
+                          >
+                            Show both versions
+                          </button>
+                        )}
                       </div>
                     </div>
                   )),
@@ -1127,11 +1165,29 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
 
   // Step 2: sync mode
   const [syncMode, setSyncMode] = useState("push-safe");
-  const [strategy, setStrategy] = useState<"last-write-wins" | "keep-both">("last-write-wins");
+  // Defaults to keeping both copies: when the same file changed in two places,
+  // picking a winner throws one person's edit away silently.
+  const [strategy, setStrategy] = useState<"last-write-wins" | "keep-both">("keep-both");
 
   // Step 3: advanced
   const [excludedPatterns, setExcludedPatterns] = useState<string[]>([...DEFAULT_EXCLUDED]);
   const [newPattern, setNewPattern] = useState("");
+
+  // Huge-folder preflight: a cheap file count so "500K files" is a warning the
+  // user reads BEFORE syncing, not an OOM they discover 3 hours in.
+  const [estimate, setEstimate] = useState<{ files: number; folders: number; truncated: boolean } | null>(null);
+  const [confirmedBig, setConfirmedBig] = useState(false);
+  useEffect(() => {
+    setEstimate(null);
+    setConfirmedBig(false);
+    if (!localPath) return;
+    let cancelled = false;
+    window.electronAPI.estimateLocalFolder?.(localPath)
+      .then((e) => { if (!cancelled) setEstimate(e); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [localPath]);
+  const bigFolder = !!estimate && (estimate.truncated || estimate.files >= 50_000);
 
   const [loading, setLoading] = useState(false);
 
@@ -1184,7 +1240,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
 
   const canProceedStep1 = !!localPath;
   const canProceedStep2 = true; // always valid, has a default
-  const canSubmit = !!workspaceId && !!localPath;
+  const canSubmit = !!workspaceId && !!localPath && (!bigFolder || confirmedBig);
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -1444,6 +1500,24 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
           {/* ── Step 3: Advanced (exclude patterns) ── */}
           {step === 3 && (
             <div className="space-y-4">
+              {bigFolder && (
+                <div className="rounded-lg border px-3 py-2.5" style={{ borderColor: "var(--color-warning)" }}>
+                  <p className="text-sm font-medium">
+                    This folder contains {estimate!.truncated ? "more than" : "about"} {estimate!.files.toLocaleString()} files.
+                  </p>
+                  <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
+                    Very large folders can take many hours to sync and use a lot of memory and bandwidth.
+                  </p>
+                  <label className="mt-2 flex items-center gap-2 text-xs font-medium">
+                    <input
+                      type="checkbox"
+                      checked={confirmedBig}
+                      onChange={(e) => setConfirmedBig(e.target.checked)}
+                    />
+                    Sync it anyway
+                  </label>
+                </div>
+              )}
               <div>
                 <label className="mb-1.5 block text-sm font-medium">Excluded files & folders</label>
                 <p className="mb-3 text-xs text-[var(--color-text-muted)]">

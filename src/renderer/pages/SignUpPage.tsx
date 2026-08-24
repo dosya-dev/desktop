@@ -1,9 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useState, useRef, useEffect, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
-import { ipc } from "@/lib/ipc";
 import { isValidEmail, validatePassword } from "@dosya-dev/shared";
 import logoSvg from "@/assets/logo.svg";
 import { LegalLinks, LegalNotice } from "@/components/LegalNotice";
@@ -19,6 +18,12 @@ export function SignUpPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Pending OAuth teardown (IPC listener + 2-min timeout). Held in a ref so we
+  // can tear it down when the flow completes AND if the page unmounts first -
+  // otherwise the timer would fire on an unmounted component.
+  const oauthCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => oauthCleanup.current?.(), []);
+
   /**
    * One handler for all three providers.
    *
@@ -26,23 +31,58 @@ export function SignUpPage() {
    * third would have meant three places to keep in step. The main process
    * already accepts every provider name it is given (see the allowlist in
    * main/index.ts), so the only per-provider thing left is the button.
+   *
+   * Uses the same system-browser flow as the login page. This page used to call
+   * the in-app popup (`ipc.oauth`), whose navigation allow-list compared URLs
+   * with `startsWith` and so accepted attacker-registered lookalikes such as
+   * `accounts.google.com.evil.example`. That handler is gone; the browser owns
+   * the provider UI, and the callback is only accepted if it echoes back the
+   * single-use nonce minted here.
    */
   async function runOAuth(provider: "google" | "github" | "apple") {
     setError("");
     setLoading(true);
+
     try {
-      const result = await ipc.oauth(provider);
-      if (result.ok) {
+      const oauthUrl = await window.electronAPI.beginOAuth(provider);
+      // Open in system browser (Chrome, Firefox, etc.)
+      window.open(oauthUrl, "_blank");
+    } catch (err: any) {
+      setLoading(false);
+      setError(err?.message || `Could not start ${provider} sign-up. Please try again.`);
+      return;
+    }
+
+    // Tear down any previous in-flight attempt before starting a new one.
+    oauthCleanup.current?.();
+
+    const unsub = window.electronAPI.onOAuthComplete(async () => {
+      oauthCleanup.current?.();
+      oauthCleanup.current = null;
+      try {
+        await window.electronAPI.waitForSession();
         await refreshUser();
         navigate("/dashboard");
-      } else if (result.error) {
-        setError(result.error);
+      } catch (err: any) {
+        setError(err.message || "Sign up failed");
+      } finally {
+        setLoading(false);
       }
-    } catch (err: any) {
-      setError(err.message || "OAuth failed");
-    } finally {
+    });
+
+    // Timeout after 2 minutes if the user doesn't complete OAuth
+    const timer = setTimeout(() => {
+      oauthCleanup.current?.();
+      oauthCleanup.current = null;
       setLoading(false);
-    }
+      setError("Sign up timed out. Please try again.");
+    }, 120_000);
+
+    // One combined teardown for both the listener and the timer.
+    oauthCleanup.current = () => {
+      unsub();
+      clearTimeout(timer);
+    };
   }
 
   async function handleSubmit(e: FormEvent) {

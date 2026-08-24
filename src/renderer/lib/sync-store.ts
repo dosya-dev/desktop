@@ -4,7 +4,7 @@ import { syncJustSettled } from "./sync-settled";
 
 /** Mirrors SyncNotice in src/main/sync/types.ts. */
 export interface SyncNotice {
-  kind: "degraded-watch" | "files-skipped";
+  kind: "degraded-watch" | "files-skipped" | "conflict-copy";
   message: string;
 }
 
@@ -75,6 +75,9 @@ interface SyncStore {
   status: SyncStatus | null;
   conflicts: SyncConflict[];
   isLoading: boolean;
+  /** The status IPC itself failed - render "couldn't read sync status", never
+   *  the "no folders yet" empty state (they used to be indistinguishable). */
+  loadFailed: boolean;
   init: () => () => void;
   refresh: () => Promise<void>;
 }
@@ -102,13 +105,14 @@ export const useSyncStore = create<SyncStore>((set) => ({
   status: null,
   conflicts: [],
   isLoading: true,
+  loadFailed: false,
 
   init: () => {
     refCount++;
     if (refCount === 1) {
       window.electronAPI.getSyncStatus()
-        .then((s: SyncStatus) => set({ status: s, isLoading: false }))
-        .catch(() => set({ status: EMPTY_STATUS, isLoading: false }));
+        .then((s: SyncStatus) => set({ status: s, isLoading: false, loadFailed: false }))
+        .catch(() => set({ status: EMPTY_STATUS, isLoading: false, loadFailed: true }));
 
       window.electronAPI.getSyncConflicts()
         .then((c: SyncConflict[]) => set({ conflicts: c.slice(-MAX_CONFLICTS) }))
@@ -124,7 +128,7 @@ export const useSyncStore = create<SyncStore>((set) => ({
           void queryClient.invalidateQueries({ queryKey: ["files"] });
           void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
         }
-        set({ status: s });
+        set({ status: s, loadFailed: false });
       });
       const unsub2 = window.electronAPI.onSyncConflictDetected((c: SyncConflict) =>
         set((state) => ({ conflicts: [...state.conflicts, c].slice(-MAX_CONFLICTS) })),
@@ -146,7 +150,7 @@ export const useSyncStore = create<SyncStore>((set) => ({
       window.electronAPI.getSyncStatus(),
       window.electronAPI.getSyncConflicts(),
     ]);
-    set({ status, conflicts: conflicts.slice(-MAX_CONFLICTS) });
+    set({ status, conflicts: conflicts.slice(-MAX_CONFLICTS), loadFailed: false });
   },
 }));
 

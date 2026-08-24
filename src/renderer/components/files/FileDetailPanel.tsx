@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError, apiBase } from "@/lib/api-client";
+import { validateCommentBody } from "@dosya-dev/shared";
 import { useAvatarVersion, userAvatarUrl } from "@/lib/avatar-version";
 import { usePermissions } from "@/lib/use-permissions";
 import { fileRawUrl } from "@/lib/file-url";
@@ -522,25 +523,36 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["comments", file.id] });
-  const failed = (e: unknown) => toast.error(e instanceof ApiError ? e.message : "Failed");
+  // Widened from ApiError: a local policy refusal is a plain Error carrying the
+  // sentence the API would have returned, and "Failed" is not that sentence.
+  const failed = (e: unknown) => toast.error(e instanceof Error ? e.message : "Failed");
 
   const postMut = useMutation({
-    mutationFn: (input: { body: string; parentId: string | null }) =>
-      api.post<{ ok: boolean; comment: Comment }>("/api/comments", {
+    mutationFn: (input: { body: string; parentId: string | null }) => {
+      // 5000 characters, from the shared policy. A pasted essay used to upload
+      // in full and come back refused.
+      const problem = validateCommentBody(input.body);
+      if (problem) throw new Error(problem);
+      return api.post<{ ok: boolean; comment: Comment }>("/api/comments", {
         file_id: file.id,
         workspace_id: workspaceId,
         body: input.body,
         // Absence means top level. A null would be looked up, and the API answers
         // a parent it cannot find with a 404.
         ...(input.parentId ? { parent_id: input.parentId } : {}),
-      }),
+      });
+    },
     // Cleared on success only, so a failed post leaves the typed text in place.
     onSuccess: () => { invalidate(); setNewComment(""); setReplyTo(null); },
     onError: failed,
   });
 
   const editMut = useMutation({
-    mutationFn: (v: { id: string; body: string }) => api.put(`/api/comments/${v.id}`, { body: v.body }),
+    mutationFn: (v: { id: string; body: string }) => {
+      const problem = validateCommentBody(v.body);
+      if (problem) throw new Error(problem);
+      return api.put(`/api/comments/${v.id}`, { body: v.body });
+    },
     onSuccess: () => { invalidate(); setEditId(null); },
     // Only the author may edit. A 403 means the UI offered something the server
     // refuses, so refetch and stop disagreeing with it.
