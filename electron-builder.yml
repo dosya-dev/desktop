@@ -57,6 +57,26 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
 
+# dmg-background.tiff carries both @1x (540x380) and @2x (1080x760) reps,
+# combined with `tiffutil -cathidpicheck`. dmg-builder sizes the Finder
+# window from the background file itself (via `sips`, which reads the @1x
+# rep of a HiDPI tiff) - dmg.window is only honored for the flat-color
+# fallback, not here, so it's intentionally omitted. iconSize/x/y were
+# verified against the art with a real dmgbuild run: x/y is each icon's
+# center, and Finder draws the filename label itself below it - the
+# background only reserves the space and never contains that text.
+dmg:
+  background: build/dmg-background.tiff
+  iconSize: 128
+  contents:
+    - x: 130
+      y: 220
+      type: file
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
 # ── Windows ─────────────────────────────────────────────────────────
 win:
   target:

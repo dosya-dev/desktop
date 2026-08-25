@@ -7,6 +7,8 @@ export const TEXT_READABLE_EXTS = new Set<string>([
   'txt', 'log', 'md', 'markdown', 'rst', 'tex', 'csv', 'tsv', 'json', 'jsonc',
   'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env', 'properties',
   'diff', 'patch', 'sql', 'graphql', 'proto',
+  // subtitles - they ride alongside the videos they belong to
+  'srt', 'vtt', 'ass', 'ssa',
   // web
   'html', 'htm', 'css', 'scss', 'less', 'styl', 'svg',
   'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'vue', 'svelte',

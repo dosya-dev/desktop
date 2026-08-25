@@ -37,6 +37,13 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
   const [sleepLabel, setSleepLabel] = useState<string | null>(null);
   const [sleepOpen, setSleepOpen] = useState(false);
   const [tab, setTab] = useState<'queue' | 'lyrics'>('queue');
+  // A WMA everywhere, or a codec Chromium lacks, fails silently: the element
+  // never fires canplay and every control is a no-op. Naming the problem
+  // beats a transport that ignores clicks. The failure is remembered
+  // per-url, so navigating to the next track clears it without a reset
+  // effect.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const decodeFailed = failedUrl === rawUrl;
 
   const { tags, artworkUrl } = useAudioTags(rawUrl, file.name);
   const cacheKey = useMemo(() => `${file.id}:${version ?? 'current'}`, [file.id, version]);
@@ -146,7 +153,7 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
 
   return (
     <div className="flex w-full flex-1 flex-col self-stretch min-h-0">
-      <audio ref={audioRef} src={rawUrl} preload="metadata" />
+      <audio ref={audioRef} src={rawUrl} preload="metadata" onError={() => setFailedUrl(rawUrl)} />
 
       <div className="flex flex-col px-8 pt-7 pb-6">
         <div className="flex items-start gap-[26px]">
@@ -197,7 +204,11 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
           </div>
         </div>
 
-        {waveState === 'ready' && peaks ? (
+        {decodeFailed ? (
+          <div className="mt-[22px] flex h-[78px] items-center justify-center rounded-lg border border-dashed px-4 text-center text-xs text-muted-foreground">
+            This app can't decode this audio format. Download the file to play it in another app.
+          </div>
+        ) : waveState === 'ready' && peaks ? (
           <Waveform peaks={peaks} position={position} duration={duration} loop={loopState.loop} onSeek={seek} />
         ) : (
           <div className="mt-[22px] flex h-[78px] items-center">

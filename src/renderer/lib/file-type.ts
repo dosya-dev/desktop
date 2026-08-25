@@ -45,7 +45,10 @@ export function kindLabel(name: string): string {
   return "File";
 }
 
-const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "heic", "heif"]);
+// avif is Chromium-native. tiff/dng are NOT here on purpose: Chromium does
+// not decode them and the server thumbnailer only knows heic/png/jpeg, so
+// the honest download card is the right rendering.
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg", "ico", "heic", "heif"]);
 export function isImage(name: string): boolean {
   return IMAGE_EXTS.has(extOf(name));
 }
@@ -71,7 +74,10 @@ export function isText(name: string): boolean {
   return TEXT_EXTS.has(extOf(name));
 }
 
-const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "flac", "aac", "m4a", "wma"]);
+// opus/oga are Chromium-native; mka rides its Matroska demuxer. wma plays
+// nowhere - it stays listed so the player's decode-failure banner claims
+// the file rather than the generic fallback card.
+const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "opus", "flac", "aac", "m4a", "mka", "wma"]);
 export function isAudio(name: string): boolean {
   return AUDIO_EXTS.has(extOf(name));
 }
