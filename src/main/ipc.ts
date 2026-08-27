@@ -9,7 +9,7 @@ import {
 import { app } from "electron";
 import { join, resolve, sep, basename } from "path";
 import { createWriteStream } from "fs";
-import { mkdir, rm } from "fs/promises";
+import { mkdtemp, readdir, rm } from "fs/promises";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import QRCode from "qrcode";
@@ -17,9 +17,38 @@ import { longPath } from "./sync/paths";
 import { clearSessionCookie } from "./session";
 
 export function registerIpcHandlers(apiBase: string): void {
-  // Clean up temp files from previous sessions on startup
-  const tempDir = join(app.getPath("temp"), "dosya-open");
-  rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  // "Open in system app" writes here. A single fixed name (the old approach)
+  // lets another local user preclaim it on a shared /tmp before we start -
+  // Linux's sticky bit on /tmp then stops us from ever removing or verifying
+  // a directory we don't own, so we'd silently write the authenticated
+  // download where they can read it. mkdtemp's random suffix means nobody
+  // can preclaim a path they can't predict, and POSIX mandates the result is
+  // created mode 0700 (owner-only), independent of umask.
+  const openDirRoot = app.getPath("temp");
+  const openDirPrefix = "dosya-open-";
+  let openDirPromise: Promise<string> | null = null;
+  const getOpenDir = (): Promise<string> => {
+    if (!openDirPromise) {
+      openDirPromise = mkdtemp(join(openDirRoot, openDirPrefix)).catch((err) => {
+        openDirPromise = null;
+        throw err;
+      });
+    }
+    return openDirPromise;
+  };
+
+  // Best-effort sweep of dirs left behind by a crashed previous run. Safe to
+  // ignore failures: each is uniquely named, so we never fall back to
+  // reusing one we couldn't remove or don't own.
+  readdir(openDirRoot)
+    .then((entries) =>
+      Promise.all(
+        entries
+          .filter((name) => name.startsWith(openDirPrefix))
+          .map((name) => rm(join(openDirRoot, name), { recursive: true, force: true }).catch(() => {})),
+      ),
+    )
+    .catch(() => {});
 
   // ── Window Controls ──────────────────────────────────────────────
 
@@ -182,7 +211,7 @@ export function registerIpcHandlers(apiBase: string): void {
       }
 
       // Download the file to a temp directory and open it with the system default app
-      await mkdir(tempDir, { recursive: true });
+      const tempDir = await getOpenDir();
 
       const filePath = join(tempDir, safeName);
 
@@ -210,7 +239,9 @@ export function registerIpcHandlers(apiBase: string): void {
         throw new Error(`Download failed: ${res.status}`);
       }
 
-      const fileStream = createWriteStream(longPath(filePath));
+      // Explicit mode is defense in depth: the containing dir is already 0700,
+      // but this keeps the file itself owner-only if that ever changes.
+      const fileStream = createWriteStream(longPath(filePath), { mode: 0o600 });
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
 
       // shell.openPath resolves to an error STRING ("" on success), so ignoring

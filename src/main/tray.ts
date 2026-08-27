@@ -1,6 +1,7 @@
 import { app, Tray, Menu, nativeImage, shell } from "electron";
 import { join } from "path";
 import { markQuitting } from "./quit-state";
+import { summarizeSyncStatus } from "./sync-status-summary";
 import type { SyncEngineHandle } from "./sync/engine-host";
 import type { SyncStatus } from "./sync/types";
 
@@ -42,10 +43,6 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
     if (syncStatus && syncStatus.pairs.length > 0) {
       // Summary line
       const pairs = syncStatus.pairs;
-      const syncing = pairs.filter((p) => p.status === "syncing").length;
-      const errors = pairs.filter((p) => p.status === "error").length;
-      const paused = pairs.filter((p) => p.status === "paused").length;
-      const transferCount = syncStatus.activeTransfers.length;
 
       // Icon + human label for a single pair. A paused folder is a deliberate
       // stop, not a failure - it reads "Paused", never as an error.
@@ -61,16 +58,7 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
         }
       };
 
-      // Priority: global pause / all paused → paused; then real errors; then
-      // active sync; then a partial pause; else everything is synced. Paused
-      // pairs must never be summarized as an error.
-      let summary: string;
-      if (syncStatus.globalPaused || (paused > 0 && paused === pairs.length)) summary = "Paused";
-      else if (errors > 0) summary = `${errors} error${errors > 1 ? "s" : ""}`;
-      else if (syncing > 0 || transferCount > 0)
-        summary = `Syncing ${transferCount} file${transferCount !== 1 ? "s" : ""}…`;
-      else if (paused > 0) summary = `${paused} paused`;
-      else summary = "All synced";
+      const summary = summarizeSyncStatus(syncStatus);
 
       syncItems.push({ label: `Sync: ${summary}`, enabled: false });
 
@@ -155,10 +143,11 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
 
     tray?.setContextMenu(menu);
 
-    // Update tooltip
+    // Update tooltip. Uses the same priority logic as the menu's summary line
+    // so a pair sitting in "error" can never be reported here as "All synced"
+    // just because nothing is actively transferring.
     if (syncStatus) {
-      const syncing = syncStatus.activeTransfers.length;
-      tray?.setToolTip(syncing > 0 ? `dosya - Syncing ${syncing} file${syncing !== 1 ? "s" : ""}...` : "dosya - All synced");
+      tray?.setToolTip(`dosya - ${summarizeSyncStatus(syncStatus)}`);
     }
   }
 

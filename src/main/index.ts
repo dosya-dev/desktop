@@ -3,7 +3,7 @@ import { gracefulify } from "graceful-fs";
 import fs, { statSync } from "fs";
 gracefulify(fs);
 
-import { app, BrowserWindow, shell, powerMonitor, powerSaveBlocker, session, crashReporter, ipcMain, protocol, net, screen } from "electron";
+import { app, BrowserWindow, shell, powerMonitor, powerSaveBlocker, session, crashReporter, ipcMain, protocol, net, screen, Notification } from "electron";
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { dirname, join, resolve, sep } from "path";
@@ -26,6 +26,7 @@ import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { linuxProtocolInstallPlan } from "./linux-protocol";
 import { setupSession } from "./session";
+import { isUnexpectedSessionLoss } from "./session-events";
 import { originAllowed } from "./trusted-origins";
 import { createMenu } from "./menu";
 import { createTray } from "./tray";
@@ -685,13 +686,23 @@ if (!gotTheLock) {
 
     // Watch for login/logout by monitoring the dosya_session cookie.
     // Start sync engine on login, stop on logout.
-    session.defaultSession.cookies.on("changed", (_event, cookie, _cause, removed) => {
+    session.defaultSession.cookies.on("changed", (_event, cookie, cause, removed) => {
       if (cookie.name !== "dosya_session" || !syncEngine) return;
 
       if (removed) {
         // Logout: stop the sync engine
-        console.log("[sync] Session cookie removed - stopping sync engine");
+        console.log(`[sync] Session cookie removed (${cause}) - stopping sync engine`);
         syncEngine.stop().catch(() => {});
+        // An explicit logout is the user's own action - they already know.
+        // Anything else (the fixed 30-day expiry elapsing, eviction from a
+        // remote revocation) happened with no action on their part, and the
+        // only other signal is a "sync stopped" email up to 72 hours later.
+        if (isUnexpectedSessionLoss(removed, cause)) {
+          new Notification({
+            title: "Signed out of dosya",
+            body: "Your session ended and sync has stopped. Open dosya to sign in again.",
+          }).show();
+        }
       } else if (!syncEngine.isRunning()) {
         // Login: start the sync engine
         console.log("[sync] Session cookie set - starting sync engine");
