@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "@/lib/api-client";
+import { groupLocations, pickPreselected, type RegionInfo } from "@/lib/location-groups";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useAuth } from "@/lib/auth-context";
 import { FolderOpen, Upload, RefreshCw, Shield, Users, Zap, LogOut, ArrowRight } from "lucide-react";
@@ -25,6 +26,44 @@ export function CreateWorkspacePage() {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [color, setColor] = useState("#22c55e");
+  // Where this workspace's files will live. Chosen here and only here - the
+  // server refuses to move a workspace afterwards, so there is no second chance
+  // and no per-upload override anywhere in the app.
+  const [region, setRegion] = useState("");
+  const [locationQuery, setLocationQuery] = useState("");
+
+  const {
+    data: regionsData,
+    isError: regionsError,
+  } = useQuery({
+    queryKey: ["regions"],
+    queryFn: () =>
+      api.get<{ ok: boolean; regions: RegionInfo[]; suggested: string }>(
+        "/api/regions",
+      ),
+  });
+
+  const regions = useMemo(() => regionsData?.regions ?? [], [regionsData]);
+  // The list never arrived (offline, or an old API). Creating a workspace must
+  // still work: the server picks the nearest location when the request carries
+  // none, so the form submits without one rather than dead-ending on a button
+  // that can never enable.
+  const locationsUnavailable =
+    regionsError || (!!regionsData && regions.length === 0);
+
+  // The server's nearest-location guess, so the common case is one click fewer
+  // rather than an empty required field. Only a suggestion the picker can
+  // actually show is accepted - see pickPreselected.
+  useEffect(() => {
+    if (region) return;
+    const preselected = pickPreselected(regions, regionsData?.suggested);
+    if (preselected) setRegion(preselected);
+  }, [regions, regionsData, region]);
+
+  const locationGroups = useMemo(
+    () => groupLocations(regions, locationQuery),
+    [regions, locationQuery],
+  );
 
   const initials = name.trim()
     ? name
@@ -48,7 +87,13 @@ export function CreateWorkspacePage() {
           icon_color: string;
           owner_id: string;
         };
-      }>("/api/workspaces", { name: wsName, icon_color: color }),
+      }>("/api/workspaces", {
+        name: wsName,
+        icon_color: color,
+        // Empty only when the location list could not be loaded; the server
+        // then suggests one from the request's geography.
+        default_region: region,
+      }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
       setActive(data.workspace as any);
@@ -61,9 +106,14 @@ export function CreateWorkspacePage() {
     },
   });
 
+  // Mirrors the button's own gate so a return key in the name field cannot
+  // create the workspace before its permanent location has been chosen.
+  const canCreate =
+    !!name.trim() && !createMut.isPending && (!!region || locationsUnavailable);
+
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (name.trim()) createMut.mutate(name.trim());
+    if (canCreate) createMut.mutate(name.trim());
   }
 
   return (
@@ -134,9 +184,91 @@ export function CreateWorkspacePage() {
               </div>
             </div>
 
+            {/* Location */}
+            <div>
+              <label className="mb-1.5 block text-sm font-medium">
+                Location
+              </label>
+              <p className="mb-2 text-xs text-[var(--color-text-secondary)]">
+                Where this workspace's files are stored. Chosen once - every
+                file in the workspace lives here.
+              </p>
+              {locationsUnavailable ? (
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Locations could not be loaded. Your workspace will be created
+                  in the one closest to you.
+                </p>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    value={locationQuery}
+                    onChange={(e) => setLocationQuery(e.target.value)}
+                    placeholder="Search a city or country"
+                    aria-label="Search locations"
+                    className="mb-2 w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
+                    style={{ borderColor: "var(--color-border)" }}
+                  />
+                  <div
+                    role="listbox"
+                    aria-label="Location"
+                    className="max-h-48 overflow-y-auto rounded-lg border"
+                    style={{ borderColor: "var(--color-border)" }}
+                  >
+                    {locationGroups.map(([continent, rows]) => (
+                      <div key={continent} role="group" aria-label={continent}>
+                        <div
+                          aria-hidden="true"
+                          className="bg-[var(--color-bg-secondary)] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]"
+                        >
+                          {continent}
+                        </div>
+                        {rows.map((r) => (
+                          <button
+                            key={r.code}
+                            type="button"
+                            role="option"
+                            aria-selected={r.code === region}
+                            onClick={() => setRegion(r.code)}
+                            className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--color-bg-secondary)] ${
+                              r.code === region
+                                ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
+                                : ""
+                            }`}
+                          >
+                            <span>
+                              {r.flag ? `${r.flag} ` : ""}
+                              {r.city}, {r.country}
+                            </span>
+                            <span className="text-[var(--color-text-muted)]">
+                              {r.code}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                    {regions.length === 0 && (
+                      <div className="px-3 py-5 text-center text-xs text-[var(--color-text-muted)]">
+                        Loading locations...
+                      </div>
+                    )}
+                    {regions.length > 0 && locationGroups.length === 0 && (
+                      <div className="px-3 py-5 text-center text-xs text-[var(--color-text-muted)]">
+                        No location matches.
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* The location is permanent, so the form waits until the server
+                has said what the options are and one of them is selected - but
+                never past the point where the list is known to be unavailable,
+                which would leave this button disabled forever. */}
             <button
               type="submit"
-              disabled={!name.trim() || createMut.isPending}
+              disabled={!canCreate}
               className="w-full rounded-lg px-4 py-2.5 text-sm font-semibold text-white transition-colors disabled:opacity-50"
               style={{ background: "var(--color-primary)" }}
             >

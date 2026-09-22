@@ -51,12 +51,16 @@ function formatElapsed(ms: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+// Every desc follows the same two-sentence shape at roughly the same length:
+// what moves where, then what is ignored or protected. A picker where one
+// option explains itself differently than the rest reads as a different KIND
+// of option, not a different direction.
 const SYNC_MODES = [
-  { id: "two-way", label: "Full Sync", desc: "Mirror every action in both directions. Changes on either side are reflected everywhere." },
-  { id: "push", label: "Push to Cloud", desc: "Local changes are sent to the cloud. Cloud changes are ignored locally." },
-  { id: "push-safe", label: "Protect & Upload", desc: "Only upload files to the cloud. Nothing is ever deleted on the cloud." },
-  { id: "pull", label: "Pull from Cloud", desc: "Cloud changes are downloaded locally. Local changes are ignored on the cloud." },
-  { id: "pull-safe", label: "Save to Device", desc: "Only download files from the cloud. Nothing is ever deleted locally." },
+  { id: "two-way", label: "Full Sync", desc: "Changes on either side are mirrored to the other side. Deletions are applied in both directions." },
+  { id: "push", label: "Push to Cloud", desc: "Local changes are sent to the cloud, including deletions. Cloud changes are ignored locally." },
+  { id: "push-safe", label: "Protect & Upload", desc: "Local files are uploaded to the cloud as they change. Nothing is ever deleted from the cloud." },
+  { id: "pull", label: "Pull from Cloud", desc: "Cloud changes are downloaded to this device, including deletions. Local changes are ignored." },
+  { id: "pull-safe", label: "Save to Device", desc: "Cloud files are downloaded to this device as they change. Nothing is ever deleted locally." },
 ];
 
 export function SyncPage() {
@@ -397,6 +401,12 @@ export function SyncPage() {
               </button>
             </div>
           )}
+          {/* A large local deletion the engine refused to mirror. The pair is
+              held until the user answers - deleting here is the one thing
+              sync cannot take back on its own. */}
+          {pairs.filter((p) => p.pendingDeletion).map((p) => (
+            <PendingDeletionBanner key={p.pairId} pair={p} onDecided={refresh} />
+          ))}
           {isLoading ? (
             <div className="space-y-2">
               {[1, 2, 3].map((i) => (
@@ -571,7 +581,7 @@ export function SyncPage() {
                   <div>
                     <p className="text-sm font-medium">Full Sync</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      Two-way mirror. Changes on either side (add, edit, delete) are reflected on the other. Best for keeping two locations identical.
+                      Two-way mirror. Changes on either side, including deletions, are reflected on the other. Best for keeping two locations identical.
                     </p>
                   </div>
                 </div>
@@ -581,7 +591,7 @@ export function SyncPage() {
                   <div>
                     <p className="text-sm font-medium">Push to Cloud</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      One-way upload. Local changes are sent to the cloud, including deletions. Cloud-only changes are ignored locally.
+                      One-way upload. Local changes are sent to the cloud, including deletions, and cloud-only changes are ignored. Best for publishing work from this device.
                     </p>
                   </div>
                 </div>
@@ -591,7 +601,7 @@ export function SyncPage() {
                   <div>
                     <p className="text-sm font-medium">Protect & Upload</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      Safe backup mode. Files are uploaded to the cloud but never deleted there, even if you delete them locally. Best for backups.
+                      Safe upload mode. Files are uploaded to the cloud but never deleted there, even if you delete them locally. Best for backing up this device.
                     </p>
                   </div>
                 </div>
@@ -601,7 +611,7 @@ export function SyncPage() {
                   <div>
                     <p className="text-sm font-medium">Pull from Cloud</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      One-way download. Cloud changes are downloaded locally, including deletions. Local-only changes are ignored.
+                      One-way download. Cloud changes are downloaded to this device, including deletions, and local-only changes are ignored. Best for following a shared folder.
                     </p>
                   </div>
                 </div>
@@ -611,7 +621,7 @@ export function SyncPage() {
                   <div>
                     <p className="text-sm font-medium">Save to Device</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      Safe download mode. Files are downloaded from the cloud but never deleted locally, even if removed from the cloud.
+                      Safe download mode. Files are downloaded from the cloud but never deleted locally, even if removed there. Best for keeping an offline copy.
                     </p>
                   </div>
                 </div>
@@ -671,6 +681,10 @@ function SyncPairRow({
 }) {
   const [showMenu, setShowMenu] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
+  // "N files not synced" pill → the list of failed files with Retry / Clear.
+  const [showErrors, setShowErrors] = useState(false);
+  const [errorActionBusy, setErrorActionBusy] = useState(false);
+  const failedCount = pair.fileErrorCount ?? pair.fileErrors?.length ?? 0;
 
   const statusConfig: Record<string, { icon: React.ReactNode; color: string; label: string; dot: string }> = {
     idle: { icon: <CheckCircle2 size={12} />, color: "var(--color-primary)", label: "Synced", dot: "bg-green-500" },
@@ -679,6 +693,7 @@ function SyncPairRow({
     error: { icon: <AlertCircle size={12} />, color: "var(--color-danger)", label: "Error", dot: "bg-red-500" },
     offline: { icon: <AlertCircle size={12} />, color: "#f59e0b", label: "Offline", dot: "bg-yellow-500" },
     "rate-limited": { icon: <Clock size={12} />, color: "#f59e0b", label: "Waiting", dot: "bg-yellow-500" },
+    "needs-confirmation": { icon: <AlertTriangle size={12} />, color: "#f59e0b", label: "Needs attention", dot: "bg-yellow-500" },
   };
 
   // Unknown/transient status falls back to a neutral state, NOT "Error" - a
@@ -785,10 +800,30 @@ function SyncPairRow({
               {s.icon} {s.label}
             </span>
           )}
-          {pair.errorMessage && pair.status === "error" && (
-            <p className="mt-0.5 max-w-[140px] truncate text-[10px] text-[var(--color-danger)]" title={pair.errorMessage}>
+          {pair.errorMessage && (pair.status === "error" || pair.status === "offline") && (
+            // Offline is not a fault of this folder's, so it is warning-toned
+            // rather than red - but it IS shown: the row used to say nothing
+            // at all while the poller quietly backed off.
+            <p
+              className="mt-0.5 max-w-[140px] truncate text-[10px]"
+              style={{ color: pair.status === "offline" ? "#f59e0b" : "var(--color-danger)" }}
+              title={pair.errorMessage}
+            >
               {pair.errorMessage}
             </p>
+          )}
+          {/* Files the engine gave up on this cycle. "Synced" above is about
+              the pair; this is about what the pair could not carry. Without it
+              a folder with 200 permission-denied files read as fully synced. */}
+          {failedCount > 0 && (
+            <button
+              onClick={() => setShowErrors((v) => !v)}
+              className="mt-1 inline-flex items-center gap-1 rounded-full bg-[var(--color-danger)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--color-danger)] hover:bg-[var(--color-danger)]/20"
+              title={showErrors ? "Hide the list" : "Show which files"}
+            >
+              <AlertCircle size={10} />
+              {failedCount.toLocaleString()} file{failedCount === 1 ? "" : "s"} not synced
+            </button>
           )}
         </td>
 
@@ -869,7 +904,146 @@ function SyncPairRow({
           </div>
         </td>
       </tr>
+      {showErrors && failedCount > 0 && (
+        <tr className="border-b" style={{ borderColor: "var(--color-border)" }}>
+          <td colSpan={5} className="px-4 pb-3 pt-1">
+            <div className="rounded-lg border p-3" style={{ borderColor: "var(--color-border)", background: "var(--color-bg-secondary)" }}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="text-xs font-medium">
+                  {failedCount.toLocaleString()} file{failedCount === 1 ? "" : "s"} could not be synced
+                  {pair.fileErrors.length < failedCount ? ` - showing the ${pair.fileErrors.length} most recent` : ""}
+                </p>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    disabled={errorActionBusy}
+                    onClick={async () => {
+                      setErrorActionBusy(true);
+                      try {
+                        await window.electronAPI.retryFileErrors(pair.pairId);
+                        toast.success("Retrying - the files stay listed until they sync");
+                        onRefresh();
+                      } catch (e: any) {
+                        toast.error(e?.message || "Could not retry");
+                      } finally {
+                        setErrorActionBusy(false);
+                      }
+                    }}
+                    className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
+                    style={{ borderColor: "var(--color-border)" }}
+                    title="Try every listed file again, including the ones marked won't retry"
+                  >
+                    <RefreshCw size={11} /> Retry
+                  </button>
+                  <button
+                    disabled={errorActionBusy}
+                    onClick={async () => {
+                      setErrorActionBusy(true);
+                      try {
+                        await window.electronAPI.clearFileErrors(pair.pairId);
+                        setShowErrors(false);
+                        onRefresh();
+                      } catch (e: any) {
+                        toast.error(e?.message || "Could not clear");
+                      } finally {
+                        setErrorActionBusy(false);
+                      }
+                    }}
+                    className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
+                    style={{ borderColor: "var(--color-border)" }}
+                    title="Dismiss the list. The files are tried again on the next scan."
+                  >
+                    <X size={11} /> Clear
+                  </button>
+                </div>
+              </div>
+              <ul className="max-h-56 space-y-1 overflow-auto">
+                {pair.fileErrors.map((f) => (
+                  <li key={f.path} className="flex items-start gap-2 text-[11px]">
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-mono" title={f.path}>{f.path}</span>
+                      <span className="block truncate text-[var(--color-text-muted)]" title={f.message}>{f.message}</span>
+                    </span>
+                    <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]" title={new Date(f.at).toLocaleString()}>
+                      {f.permanent ? "won't retry" : "will retry"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </td>
+        </tr>
+      )}
     </>
+  );
+}
+
+// ── PendingDeletionBanner ───────────────────────────────────────────
+
+function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatus; onDecided: () => void }) {
+  const [busy, setBusy] = useState<"delete" | "keep" | null>(null);
+  const held = pair.pendingDeletion;
+  if (!held) return null;
+  const n = held.count;
+
+  const decide = async (kind: "delete" | "keep") => {
+    setBusy(kind);
+    try {
+      if (kind === "delete") {
+        await window.electronAPI.confirmPendingDeletion(pair.pairId);
+        toast.success(`Deleted ${n.toLocaleString()} file${n === 1 ? "" : "s"} from the cloud`);
+      } else {
+        await window.electronAPI.dismissPendingDeletion(pair.pairId);
+        toast.success("Cloud copies kept");
+      }
+      onDecided();
+    } catch (e: any) {
+      toast.error(e?.message || "Could not apply that - try again");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mb-3 rounded-xl border p-4" style={{ borderColor: "#f59e0b", background: "var(--color-bg-secondary)" }}>
+      <div className="flex items-start gap-3">
+        <AlertTriangle size={16} className="mt-0.5 shrink-0" style={{ color: "#f59e0b" }} />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">
+            dosya paused this folder: {n.toLocaleString()} file{n === 1 ? "" : "s"} disappeared locally.
+            Delete {n === 1 ? "it" : "them"} from the cloud too, or keep the cloud {n === 1 ? "copy" : "copies"}?
+          </p>
+          <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)] font-mono truncate">
+            {pair.remoteFolderName} - {pair.localPath}
+          </p>
+          {held.sample.length > 0 && (
+            <p className="mt-1 text-[11px] text-[var(--color-text-muted)] truncate" title={held.sample.join("\n")}>
+              {held.sample.join(", ")}{n > held.sample.length ? `, and ${(n - held.sample.length).toLocaleString()} more` : ""}
+            </p>
+          )}
+          <p className="mt-1.5 text-[11px] text-[var(--color-text-muted)]">
+            This usually means a drive was unplugged or a folder was moved. Keeping the cloud copies changes nothing on the server; deleting moves them to the cloud trash.
+          </p>
+        </div>
+      </div>
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <button
+          disabled={busy !== null}
+          onClick={() => decide("keep")}
+          className="rounded-lg px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+          style={{ background: "var(--color-primary)" }}
+        >
+          {busy === "keep" ? "Keeping..." : "Keep the cloud copies"}
+        </button>
+        <button
+          disabled={busy !== null}
+          onClick={() => decide("delete")}
+          className="rounded-lg border px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          {busy === "delete" ? "Deleting..." : "Delete from the cloud too"}
+        </button>
+      </div>
+    </div>
   );
 }
 

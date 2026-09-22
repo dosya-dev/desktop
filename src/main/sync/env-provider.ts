@@ -17,6 +17,8 @@
  */
 /** A session cookie as the host sees it, before any domain matching. */
 export interface HostCookie {
+  /** `__Host-dosya_session` (prod) or `dosya_session` (dev / legacy). */
+  name: string;
   value: string;
   /** May be dot-prefixed (".dosya.dev"). Empty when the host omits it. */
   domain: string;
@@ -39,6 +41,14 @@ export interface EnvProvider {
    */
   resolveProxy(url: string): Promise<string | null>;
 
+  /**
+   * Move a local file to the OS trash (Electron's shell.trashItem). Rejects
+   * where that is impossible (network volume, no desktop trash); the caller
+   * falls back to a permanent unlink - see deletion-guard.ts. Lives here
+   * because `shell` is a main-process API a utilityProcess cannot reach.
+   */
+  trashItem(absPath: string): Promise<void>;
+
   /** True in a development build - enables verbose transport logging. */
   readonly isDev: boolean;
 
@@ -58,6 +68,7 @@ export interface EnvProvider {
 export const NULL_ENV: EnvProvider = {
   getSessionCookies: async () => [],
   resolveProxy: async () => null,
+  trashItem: async () => { throw new Error("No trash available in this environment"); },
   isDev: false,
   userDataDir: "",
 };

@@ -251,3 +251,34 @@ test("deleteFileById clears the path lookup too", async () => {
     db.close();
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("error ledger: count, newest-first listing, reset for retry, clear", async () => {
+  // Field report 2026-09-02 (desktop #5/#6): permanent errors were never
+  // retried and there was no "clear errors". The Sync page's Retry resets the
+  // ladder (including permanent rows); Clear drops the ledger for the pair.
+  const dir = await mkdtemp(join(tmpdir(), "dosya-idx-"));
+  try {
+    const db = SyncIndex.open(join(dir, "index.db"));
+    db.upsertError("p1", { filePath: "a", error: "e1", retryCount: 5, lastAttemptAt: 1, permanent: true });
+    db.upsertError("p1", { filePath: "b", error: "e2", retryCount: 2, lastAttemptAt: 3, permanent: false });
+    db.upsertError("p1", { filePath: "c", error: "e3", retryCount: 1, lastAttemptAt: 2, permanent: false });
+    db.upsertError("p2", { filePath: "z", error: "other pair", retryCount: 1, lastAttemptAt: 9, permanent: false });
+
+    assert.equal(db.countErrors("p1"), 3);
+    assert.deepEqual(db.listErrors("p1", 2).map((e) => e.filePath), ["b", "c"]); // newest first, capped
+    assert.deepEqual(db.listErrors("p1", 10).map((e) => e.filePath), ["b", "c", "a"]);
+
+    assert.equal(db.resetErrorsForRetry("p1"), 3);
+    for (const e of db.iterErrors("p1")) {
+      assert.equal(e.retryCount, 0, e.filePath);
+      assert.equal(e.permanent, false, e.filePath);
+    }
+    // Other pairs untouched.
+    assert.equal(db.getError("p2", "z")?.retryCount, 1);
+
+    assert.equal(db.clearErrors("p1"), 3);
+    assert.equal(db.countErrors("p1"), 0);
+    assert.equal(db.countErrors("p2"), 1);
+    db.close();
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

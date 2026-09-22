@@ -31,8 +31,14 @@ import {
   RotateCcw,
   Loader2,
   SquarePen,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { api, apiBase, ApiError } from "@/lib/api-client";
+import {
+  purgeTrashedFolder, purgeSummary, bulkPurgeSummary,
+  type PurgeResponse, type PurgeMessage, type UnfinishedFolder,
+} from "@/lib/folder-purge";
 import {
   validateFileName, validateFolderName, validateFolderPath,
   checkUploadFile, checkBatchFitsQuota, summariseRejections,
@@ -42,47 +48,32 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes, formatDate } from "@/lib/format";
 import { activeFilter as readActiveFilter } from "@/lib/files-params";
+import { useLibrary } from "@/lib/use-library";
+import {
+  kindForFilter, sortOptionsFor, plural, KIND_COPY, LIBRARY_QUERY_ROOT,
+  loadLibraryLayouts, saveLibraryLayout, type LibrarySort, type LibraryLayout,
+} from "@/lib/library-request";
 import { timeAgo, extOf, colorFor, originLabel, isOfficeFile, hiddenTitle, kindLabel, regionLabel } from "@/lib/file-type";
 import { toast } from "sonner";
 import { FileIcon, FolderIcon, fileIconSrc } from "@/components/files/FileIcon";
-import { FileViewer, downloadViaDialog, type ViewerFile } from "@/components/files/FileViewer";
+import { FileViewer, downloadViaDialog } from "@/components/files/FileViewer";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { FileDetailPanel } from "@/components/files/FileDetailPanel";
 import { ShareModal, type ShareTarget } from "@/components/files/ShareModal";
-import { LockModal } from "@/components/files/LockModal";
+import { LockModal, type LockTarget } from "@/components/files/LockModal";
 import { HideModal } from "@/components/files/HideModal";
 import { FileInfoDialog, type InfoTarget } from "@/components/files/FileInfoDialog";
 import { OriginBadge } from "@/components/files/OriginBadge";
+import { LibraryGrid, KIND_ICON, type TileSize } from "@/components/files/LibraryGrid";
+import {
+  ALL_COLUMNS, libraryColumnsFor, loadSavedColumns, NAME_COL_MIN, CHECKBOX_COL, ACTIONS_COL, TABLE_COLUMNS_KEY,
+  type ColumnKey, type FileRow, type FolderRow,
+} from "@/lib/file-columns";
 import { Modal } from "@/components/files/Modal";
 import {
   readDroppedEntries, orderedDirs, createFolderTree, resolveTargets,
   MAX_DROPPED_FILES, type FolderPlan,
 } from "@/lib/dropped-entries";
-
-interface FolderRow {
-  id: string;
-  name: string;
-  created_at: number;
-  updated_at: number;
-  file_count: number;
-  lock_mode: string;
-  is_hidden: number;
-  /** Who `is_hidden` hides this from - "none" | "everyone" | "users" | "roles". */
-  hidden_mode: string;
-  is_synced: number;
-  total_size_bytes: number;
-  content_updated_at: number;
-  region: string | null;
-  uploader_name: string | null;
-  share_count: number;
-  comment_count: number;
-  origin: string | null;
-}
-
-interface FileRow extends ViewerFile {
-  uploaded_by: string;
-  is_synced: number;
-}
 
 interface FilesResponse {
   ok: boolean;
@@ -102,73 +93,34 @@ interface FilesResponse {
 
 type ViewMode = "table" | "card";
 
-// ── Table columns (web parity) ─────────────────────────────
-
-type ColumnKey =
-  | "name" | "size" | "created" | "modified" | "type" | "extension"
-  | "version" | "uploader" | "region" | "origin" | "shares" | "comments";
-
-interface ColumnDef {
-  key: ColumnKey;
-  label: string;
-  defaultVisible: boolean;
-  /** Fixed column width in px. Omitted only for `name`, which takes the rest. */
-  width?: number;
-  render: (f: FileRow) => React.ReactNode;
-  renderFolder?: (f: FolderRow) => React.ReactNode;
-}
-
-/**
- * Widths are px, not Tailwind classes, because the table needs to add them up.
- *
- * Turning on every column used to crush twelve of them into whatever the window
- * was, wrapping MIME types over three lines and leaving the header unreadable.
- * The table now declares `min-width` = these widths + a floor for Name, so once
- * the columns no longer fit the container scrolls sideways instead of
- * compressing. See the colgroup in the table below.
- */
-const NAME_COL_MIN = 260;
-const CHECKBOX_COL = 32;
-const ACTIONS_COL = 40;
-
-const ALL_COLUMNS: ColumnDef[] = [
-  { key: "name", label: "Name", defaultVisible: true, render: () => null /* handled separately */ },
-  { key: "size", label: "Size", defaultVisible: true, width: 88, render: (f) => formatBytes(f.size_bytes), renderFolder: (f) => formatBytes(f.total_size_bytes ?? 0) },
-  { key: "created", label: "Created", defaultVisible: true, width: 104, render: (f) => timeAgo(f.created_at), renderFolder: (f) => timeAgo(f.created_at) },
-  { key: "modified", label: "Modified", defaultVisible: false, width: 104, render: (f) => timeAgo(f.updated_at), renderFolder: (f) => timeAgo(f.content_updated_at ?? f.created_at) },
-  // The raw MIME type was unreadable at any column width
-  // ("application/vnd.openxmlformats-officedocument.wordprocessingml.document").
-  // A category rather than the extension, because Extension is its own column
-  // and two columns reading "DOCX" would waste one of them. The full MIME type
-  // is still on hover, via the title attribute this cell carries.
-  { key: "type", label: "Type", defaultVisible: false, width: 96, render: (f) => kindLabel(f.name), renderFolder: () => "Folder" },
-  { key: "extension", label: "Extension", defaultVisible: false, width: 88, render: (f) => (f.extension || extOf(f.name) || "-").toUpperCase() },
-  { key: "version", label: "Version", defaultVisible: false, width: 80, render: (f) => (f.current_version ?? 1) > 1 ? `v${f.current_version}` : "-" },
-  { key: "uploader", label: "Uploader", defaultVisible: false, width: 120, render: (f) => f.uploader_name ?? "-", renderFolder: (f) => f.uploader_name ?? "-" },
-  // regionLabel already existed and turns "ap-southeast-2" into "Sydney" - the
-  // raw code was both wider and less useful.
-  { key: "region", label: "Region", defaultVisible: true, width: 112, render: (f) => f.region ? regionLabel(f.region) : "-", renderFolder: (f) => f.region ? regionLabel(f.region) : "-" },
-  { key: "origin", label: "Origin", defaultVisible: true, width: 88, render: (f) => originLabel(f.origin), renderFolder: (f) => originLabel(f.origin) },
-  { key: "shares", label: "Shares", defaultVisible: false, width: 72, render: (f) => f.share_count > 0 ? String(f.share_count) : "-", renderFolder: (f) => f.share_count > 0 ? String(f.share_count) : "-" },
-  { key: "comments", label: "Comments", defaultVisible: false, width: 88, render: (f) => f.comment_count > 0 ? String(f.comment_count) : "-", renderFolder: (f) => f.comment_count > 0 ? String(f.comment_count) : "-" },
-];
-
-const DEFAULT_VISIBLE: Set<ColumnKey> = new Set(ALL_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key));
-
-function loadSavedColumns(): Set<ColumnKey> {
-  try {
-    const saved = localStorage.getItem("dosya_table_columns");
-    if (saved) return new Set(JSON.parse(saved) as ColumnKey[]);
-  } catch {}
-  return new Set(DEFAULT_VISIBLE);
-}
-
 const VIEW_STORAGE_KEY = "dosya_files_view";
 
 function loadSavedView(): ViewMode {
   const saved = localStorage.getItem(VIEW_STORAGE_KEY);
   return saved === "table" || saved === "card" ? saved : "table";
 }
+
+// The library keeps its own order and tile size, under the same keys the web
+// app uses - the folder listing's `sort`/`viewMode` mean nothing to it. One
+// setting for all three kinds, and the keys keep their `photos` names: the
+// stored values are the same three sorts whatever is on screen.
+const PHOTO_SORT_KEY = "dosya_photos_sort";
+const PHOTO_TILE_KEY = "dosya_photos_tile";
+
+function loadSavedPhotoSort(): LibrarySort {
+  const saved = localStorage.getItem(PHOTO_SORT_KEY);
+  // Any kind's option list carries the same three wire values.
+  return sortOptionsFor("photos").some((o) => o.value === saved) ? (saved as LibrarySort) : "taken_desc";
+}
+
+function loadSavedTileSize(): TileSize {
+  return localStorage.getItem(PHOTO_TILE_KEY) === "large" ? "large" : "small";
+}
+
+// The library has neither, and a fresh [] every render would give every
+// memo, callback and effect keyed on them a new identity each time.
+const NO_FOLDERS: FolderRow[] = [];
+const NO_BREADCRUMBS: { id: string; name: string }[] = [];
 
 export function FileBrowserPage() {
   const { active } = useWorkspace();
@@ -206,6 +158,27 @@ export function FileBrowserPage() {
   // sidebar that now selects the view agree on what the query string means.
   const activeFilter = readActiveFilter(searchParams);
 
+  // The Images, Videos and Documents rows open the library: workspace-wide,
+  // month-grouped items from /api/library?kind=… in place of the folder
+  // listing. Everything downstream reads `allFiles` / `selected`, so the
+  // viewer, bulk bar and modals are untouched.
+  const libraryKind = kindForFilter(activeFilter);
+  const isLibraryView = libraryKind !== null;
+  // Hooks cannot be conditional and a component has to be capitalised to be
+  // usable as a tag, so the kind's mark is resolved here, with photos standing
+  // in when there is no library on screen (nothing renders it then).
+  const LibraryIcon = KIND_ICON[libraryKind ?? "photos"];
+  const [photoSort, setPhotoSortState] = useState<LibrarySort>(loadSavedPhotoSort);
+  const setPhotoSort = (s: LibrarySort) => { setPhotoSortState(s); localStorage.setItem(PHOTO_SORT_KEY, s); };
+  const [tileSize, setTileSizeState] = useState<TileSize>(loadSavedTileSize);
+  const setTileSize = (t: TileSize) => { setTileSizeState(t); localStorage.setItem(PHOTO_TILE_KEY, t); };
+
+  // Where an upload started from this page lands. The library spans every
+  // folder and ignores the `folder` param (which filterNavParams keeps so
+  // leaving the library returns you to it), so there is no current folder to
+  // upload into here - and no breadcrumb to name it with either.
+  const uploadFolderId = isLibraryView ? null : folderId;
+
   const [viewMode, setViewModeState] = useState<ViewMode>(loadSavedView);
   const setViewMode = (m: ViewMode) => {
     setViewModeState(m);
@@ -214,13 +187,28 @@ export function FileBrowserPage() {
   const [visibleColumns, setVisibleColumns] = useState<Set<ColumnKey>>(loadSavedColumns);
   const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const toggleColumn = (key: ColumnKey) => {
-    if (key === "name") return; // name is always visible
+    if (key === "name" || key === "taken") return; // both are always visible
     setVisibleColumns((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
-      localStorage.setItem("dosya_table_columns", JSON.stringify([...next]));
+      localStorage.setItem(TABLE_COLUMNS_KEY, JSON.stringify([...next]));
       return next;
     });
+  };
+
+  // Tiles or a table, remembered per kind rather than for the library as a
+  // whole: photos are a contact sheet and documents are a list of names and
+  // dates, so one shared preference would always be wrong for one of them. The
+  // folder listing keeps its own `viewMode` - the two never interfere.
+  const [libraryLayouts, setLibraryLayouts] = useState(loadLibraryLayouts);
+  const libraryLayout: LibraryLayout = libraryKind ? libraryLayouts[libraryKind] : "grid";
+  const changeLibraryLayout = (next: LibraryLayout) => {
+    if (!libraryKind) return;
+    setLibraryLayouts((prev) => ({ ...prev, [libraryKind]: next }));
+    saveLibraryLayout(libraryKind, next);
+    // The column picker belongs to the table; going back to tiles unmounts it,
+    // so drop the open flag with it rather than let it reopen on the way back.
+    if (next === "grid") setColumnPickerOpen(false);
   };
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -250,7 +238,7 @@ export function FileBrowserPage() {
   const [viewerFile, setViewerFile] = useState<FileRow | null>(null);
   const [panel, setPanel] = useState<{ file: FileRow; tab: "info" | "comments" } | null>(null);
   const [shareTarget, setShareTarget] = useState<{ target: ShareTarget; name: string } | null>(null);
-  const [lockTarget, setLockTarget] = useState<{ id: string; name: string; type: "file" | "folder" } | null>(null);
+  const [lockTarget, setLockTarget] = useState<LockTarget | null>(null);
   const [hideTarget, setHideTarget] = useState<{ id: string; name: string; type: "file" | "folder" } | null>(null);
   const [infoTarget, setInfoTarget] = useState<InfoTarget | null>(null);
   const [versionUploadTarget, setVersionUploadTarget] = useState<string | null>(null);
@@ -308,7 +296,7 @@ export function FileBrowserPage() {
       if (showHidden) params.set("hidden", "1");
       return api.get<FilesResponse>(`/api/files?${params}`);
     },
-    enabled: !!active,
+    enabled: !!active && !isLibraryView,
     placeholderData: keepPreviousData,
     // Shorter than the app-wide default on purpose. Every other cache only
     // changes when this window changes it; this listing can also change from
@@ -320,6 +308,10 @@ export function FileBrowserPage() {
     // while keeping ordinary back-and-forth navigation instant.
     staleTime: 60_000,
   });
+
+  // Null outside the library, which leaves the hook idle - exactly one of
+  // the two feeds is ever live.
+  const library = useLibrary(active && libraryKind ? { workspaceId: active.id, kind: libraryKind, sort: photoSort, q: search } : null);
 
   const navigateToFolder = useCallback(
     (id: string) => {
@@ -367,7 +359,12 @@ export function FileBrowserPage() {
   };
 
   const refresh = useCallback(() => {
+    // Both roots, every time: a file deleted from a folder has to leave the
+    // library too, and vice versa. Keyed on the root rather than the
+    // workspace so this stays right in either mode - useLibrary's own refresh
+    // derives its workspace from a view that is null outside the library.
     queryClient.invalidateQueries({ queryKey: ["files"] });
+    queryClient.invalidateQueries({ queryKey: [LIBRARY_QUERY_ROOT] });
   }, [queryClient]);
 
   // ── Favourites ─────────────────────────────────────────────
@@ -538,9 +535,10 @@ export function FileBrowserPage() {
     }
   }, []);
 
-  const allFolders = data?.folders ?? [];
-  const allFiles = data?.files ?? [];
-  const breadcrumbs = data?.breadcrumbs ?? [];
+  // One of the two feeds, chosen here so nothing below has to know which.
+  const allFolders = isLibraryView ? NO_FOLDERS : data?.folders ?? [];
+  const allFiles: FileRow[] = isLibraryView ? library.files : data?.files ?? [];
+  const breadcrumbs = isLibraryView ? NO_BREADCRUMBS : data?.breadcrumbs ?? [];
 
   // How many trailing folders stay on the trail before the middle collapses.
   // Two ancestors plus where you are: enough to keep your bearings, few enough
@@ -552,14 +550,16 @@ export function FileBrowserPage() {
       : [];
   const shownCrumbs =
     hiddenCrumbs.length > 0 ? breadcrumbs.slice(-MAX_VISIBLE_CRUMBS) : breadcrumbs;
-  const pagination = data?.pagination;
+  // The library pages by cursor from inside the grid, so the numbered pager
+  // has nothing to page - and `data` can still hold the previous listing here.
+  const pagination = isLibraryView ? null : data?.pagination;
 
   // can_lock / can_hide have been in this response type since the file was
   // written and were never read, so Lock and Hide were offered to every role
   // while only an owner's clicks worked. Default false, not true: the endpoint
   // refuses anyway, and offering a locked door is the defect being fixed.
-  const canLock = data?.can_lock ?? false;
-  const canHide = data?.can_hide ?? false;
+  const canLock = isLibraryView ? library.canLock : data?.can_lock ?? false;
+  const canHide = isLibraryView ? library.canHide : data?.can_hide ?? false;
 
   /**
    * Whether Delete should be offered for one file, mirroring what
@@ -594,10 +594,25 @@ export function FileBrowserPage() {
   }, []);
   const totalSelected = selected.size + selectedFolders.size;
 
+  // Selection is per-view. The folder listing clears it on navigation
+  // (navigateToFolder), but the library has no folder to navigate into: it
+  // is entered and left through the sidebar, and re-cut by its kind, by its
+  // own sort, by the search, and by the workspace it reads. The key is
+  // constant outside the library, so this fires only on the way in, on the way
+  // out, and while the library is on screen. The kind has to be in it as much
+  // as the workspace id does: hopping Videos -> Documents replaces every item
+  // on screen, and a selection carried over would leave the bulk bar acting on
+  // ids the view no longer shows.
+  const libraryViewKey = isLibraryView ? `${libraryKind}|${active?.id ?? ""}|${photoSort}|${search}` : "";
+  useEffect(() => { clearSelection(); }, [isLibraryView, libraryViewKey, clearSelection]);
+
   // ── Deep links: ?view=<id> / ?panel=<id> (web parity) ──────
 
   useEffect(() => {
-    if (openRestored.current || isLoading || !data) return;
+    // In library mode the listing query is disabled, so `data` never arrives -
+    // wait on the library feed instead, or a ?view=/?panel= link into the
+    // library would never restore.
+    if (openRestored.current || (isLibraryView ? library.isLoading : isLoading || !data)) return;
     const viewId = searchParams.get("view");
     const panelId = searchParams.get("panel");
     const id = viewId || panelId;
@@ -615,7 +630,7 @@ export function FileBrowserPage() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoading, data]);
+  }, [isLoading, data, isLibraryView, library.isLoading]);
 
   // Mirror the open viewer/panel into the URL so it survives a reload.
   useEffect(() => {
@@ -687,7 +702,7 @@ export function FileBrowserPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault(); e.stopPropagation(); setDragging(false);
     if (showDeleted || !active?.id) return;
-    const root = folderId || null;
+    const root = uploadFolderId;
 
     void readDroppedEntries(e.dataTransfer).then(async (tree) => {
       if (tree.entries.length === 0 && tree.dirs.length === 0) return;
@@ -868,13 +883,30 @@ export function FileBrowserPage() {
     for (const id of selected) {
       try { await api.delete(`/api/files/${id}`); ok++; } catch { fail++; }
     }
+    // A trashed FOLDER empties in bounded passes: the server answers 202
+    // `complete: false` when its round-trip budget runs out, and the call is
+    // idempotent, so finishing the job is asking again. Counting that first
+    // 202 as a deleted item is what reported success over a folder that was
+    // still half full - see lib/folder-purge.ts.
+    const incomplete: UnfinishedFolder[] = [];
     for (const id of selectedFolders) {
-      try { await api.delete(`/api/folders/${id}`); ok++; } catch { fail++; }
+      const name = allFolders.find((f) => f.id === id)?.name ?? id;
+      try {
+        const outcome = await purgeTrashedFolder(() => api.delete<PurgeResponse>(`/api/folders/${id}`));
+        if (outcome.complete) ok++;
+        else incomplete.push({ name, filesAffected: outcome.filesAffected, remaining: outcome.remaining });
+      } catch { fail++; }
     }
-    if (fail === 0) toast.success("Deleted", { description: `${ok} item${ok === 1 ? "" : "s"} permanently deleted` });
-    else toast.error("Some items could not be deleted", { description: `${ok} deleted, ${fail} failed` });
+    showPurgeMessage(bulkPurgeSummary({ deleted: ok, failed: fail, incomplete }));
     clearSelection();
     refresh();
+  };
+
+  /** One place decides which toast a purge outcome deserves. */
+  const showPurgeMessage = (msg: PurgeMessage) => {
+    if (msg.kind === "success") toast.success(msg.title, { description: msg.body });
+    else if (msg.kind === "info") toast.info(msg.title, { description: msg.body });
+    else toast.error(msg.title, { description: msg.body });
   };
 
   // Row-level restore from the trash context menu (Restore/Delete permanently
@@ -890,6 +922,17 @@ export function FileBrowserPage() {
   };
 
   const visibleCols = ALL_COLUMNS.filter((c) => visibleColumns.has(c.key));
+
+  // The library's own column set, built once and used twice: the picker lists
+  // all of it, the table gets the visible ones. Null outside the library, where
+  // the picker falls back to ALL_COLUMNS and the table below has no columns to
+  // render at all.
+  const libraryColumns = libraryKind ? libraryColumnsFor(libraryKind) : null;
+  const pickerColumns = libraryColumns ?? ALL_COLUMNS;
+  // `taken` is the date the library is ordered by, so it is on whatever the
+  // saved set says - like Name, it cannot be switched off, and it is never part
+  // of the folder listing's saved set in the first place.
+  const activeColumns = libraryColumns?.filter((c) => c.key === "taken" || visibleColumns.has(c.key)) ?? [];
 
   // What the table needs before it starts squeezing. Past this the wrapper
   // scrolls sideways, which is the whole point: twelve columns cannot share a
@@ -914,7 +957,7 @@ export function FileBrowserPage() {
           <div className="flex flex-col items-center gap-2 text-[var(--color-primary)]">
             <Upload size={40} />
             <p className="text-sm font-semibold">Drop files or folders to upload</p>
-            <p className="text-xs opacity-70">{folderId ? `to ${breadcrumbs.at(-1)?.name ?? "folder"}` : "to root folder"}</p>
+            <p className="text-xs opacity-70">{uploadFolderId ? `to ${breadcrumbs.at(-1)?.name ?? "folder"}` : "to root folder"}</p>
           </div>
         </div>
       )}
@@ -930,7 +973,17 @@ export function FileBrowserPage() {
         {/* basis keeps the trail on its own line once the toolbar no longer
             fits beside it, instead of the two fighting over a few pixels. */}
         <div className="min-w-0 flex-1 basis-64">
-          {/* Breadcrumbs */}
+          {/* Breadcrumbs. The library spans every folder, so there is no path
+              to walk: its name and its size take the trail's place. */}
+          {libraryKind ? (
+            <div className="flex min-w-0 items-center gap-2.5 text-sm">
+              <LibraryIcon size={16} className="shrink-0" />
+              <span className="font-semibold">{KIND_COPY[libraryKind].title}</span>
+              <span className="truncate whitespace-nowrap text-xs tabular-nums text-[var(--color-text-muted)]">
+                {library.isLoading ? "Loading…" : `${plural(libraryKind, library.total)} · all folders`}
+              </span>
+            </div>
+          ) : (
           <div className="flex min-w-0 items-center gap-1 text-sm">
             <button
               onClick={() => setSearchParams({})}
@@ -995,6 +1048,7 @@ export function FileBrowserPage() {
               </span>
             ))}
           </div>
+          )}
         </div>
         {/* Wraps internally too. Making only the outer header wrap moved the
             whole toolbar onto its own line but kept it one unbreakable row, so
@@ -1012,7 +1066,7 @@ export function FileBrowserPage() {
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && doSearch()}
-              placeholder="Search files..."
+              placeholder={libraryKind ? KIND_COPY[libraryKind].searchPlaceholder : "Search files..."}
               // Was a hard 200px, which is a lot to spend on one control in a
               // 700px window. It now gives way down to 120 before anything
               // else in the row has to.
@@ -1021,7 +1075,22 @@ export function FileBrowserPage() {
             />
           </div>
 
-          {/* Sort */}
+          {/* Sort. The library orders by the item's own date - when a photo was
+              taken, when a video or document was created - which none of the
+              folder listing's six orders can express. */}
+          {libraryKind ? (
+            <select
+              value={photoSort}
+              onChange={(e) => setPhotoSort(e.target.value as LibrarySort)}
+              aria-label={`Sort ${KIND_COPY[libraryKind].nounPlural}`}
+              className="rounded-lg border px-2.5 py-1.5 text-sm outline-none"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              {sortOptionsFor(libraryKind).map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          ) : (
           <select
             value={sort}
             onChange={(e) => setSort(e.target.value)}
@@ -1035,8 +1104,63 @@ export function FileBrowserPage() {
             <option value="largest">Largest</option>
             <option value="smallest">Smallest</option>
           </select>
+          )}
 
-          {/* View toggle */}
+          {/* View toggle. Every library kind can be tiles or a table now, so the
+              library gets the same List/Grid pair the folder listing has - bound
+              to its own per-kind preference, not `viewMode`. The tile-size
+              toggle follows the tiles only (documents included, now that they
+              can be a grid); a table is one size, and gets the column picker
+              below instead. */}
+          {isLibraryView ? (
+            <>
+              <div className="flex rounded-lg border" style={{ borderColor: "var(--color-border)" }}>
+                <button
+                  onClick={() => changeLibraryLayout("list")}
+                  aria-label="List view"
+                  aria-pressed={libraryLayout === "list"}
+                  title="List view"
+                  className={`p-1.5 ${libraryLayout === "list" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
+                >
+                  <LayoutList size={16} />
+                </button>
+                <button
+                  onClick={() => changeLibraryLayout("grid")}
+                  aria-label="Grid view"
+                  aria-pressed={libraryLayout === "grid"}
+                  title="Grid view"
+                  className={`p-1.5 ${libraryLayout === "grid" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
+                >
+                  <LayoutGrid size={16} />
+                </button>
+              </div>
+              {/* Zoom glyphs, not a second pair of grid marks: sitting beside the
+                  layout toggle, a shared Grid icon made the two controls read as
+                  one. The titles are unchanged. */}
+              {libraryLayout === "grid" && (
+                <div className="flex rounded-lg border" style={{ borderColor: "var(--color-border)" }}>
+                  <button
+                    onClick={() => setTileSize("small")}
+                    aria-label="Small tiles"
+                    aria-pressed={tileSize === "small"}
+                    title="Small tiles"
+                    className={`p-1.5 ${tileSize === "small" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
+                  >
+                    <ZoomOut size={16} />
+                  </button>
+                  <button
+                    onClick={() => setTileSize("large")}
+                    aria-label="Large tiles"
+                    aria-pressed={tileSize === "large"}
+                    title="Large tiles"
+                    className={`p-1.5 ${tileSize === "large" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
+                  >
+                    <ZoomIn size={16} />
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
           <div className="flex rounded-lg border" style={{ borderColor: "var(--color-border)" }}>
             <button
               onClick={() => setViewMode("table")}
@@ -1057,9 +1181,11 @@ export function FileBrowserPage() {
               <LayoutGrid size={16} />
             </button>
           </div>
+          )}
 
-          {/* Column picker (table view) */}
-          {viewMode === "table" && (
+          {/* Column picker. One picker, two tables: the folder listing's list
+              view and the library's, each gated on the mode that owns it. */}
+          {((viewMode === "table" && !isLibraryView) || (isLibraryView && libraryLayout === "list")) && (
             <div className="relative">
               <button
                 onClick={() => setColumnPickerOpen((v) => !v)}
@@ -1076,21 +1202,28 @@ export function FileBrowserPage() {
                     className="absolute right-0 z-50 mt-1 w-44 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
                     style={{ borderColor: "var(--color-border)" }}
                   >
-                    {ALL_COLUMNS.map((col) => (
-                      <label
-                        key={col.key}
-                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-xs ${col.key === "name" ? "opacity-50" : "cursor-pointer hover:bg-[var(--color-bg-secondary)]"}`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={visibleColumns.has(col.key)}
-                          disabled={col.key === "name"}
-                          onChange={() => toggleColumn(col.key)}
-                          className="accent-[var(--color-primary)]"
-                        />
-                        {col.label}
-                      </label>
-                    ))}
+                    {pickerColumns.map((col) => {
+                      // Name anchors the table, and the library's primary date is
+                      // what its rows are ordered by: both are forced on. `taken`
+                      // only exists in the library's set, so the folder listing's
+                      // picker behaves exactly as it did.
+                      const locked = col.key === "name" || col.key === "taken";
+                      return (
+                        <label
+                          key={col.key}
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-xs ${locked ? "opacity-50" : "cursor-pointer hover:bg-[var(--color-bg-secondary)]"}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={col.key === "taken" || visibleColumns.has(col.key)}
+                            disabled={locked}
+                            onChange={() => toggleColumn(col.key)}
+                            className="accent-[var(--color-primary)]"
+                          />
+                          {col.label}
+                        </label>
+                      );
+                    })}
                   </div>
                 </>
               )}
@@ -1098,7 +1231,7 @@ export function FileBrowserPage() {
           )}
 
           {/* New Folder */}
-          {!showDeleted && (
+          {!showDeleted && !isLibraryView && (
             <button
               onClick={() => setShowCreateFolder(true)}
               className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium"
@@ -1243,8 +1376,45 @@ export function FileBrowserPage() {
         </div>
       )}
 
-      {/* Content */}
-      {isLoading ? (
+      {/* Content. The library branch comes first on purpose: the folder
+          listing is disabled in this view, so its skeleton would otherwise
+          have the grid's own loading state to itself. */}
+      {libraryKind ? (
+        /* No horizontal padding on the scroller, like the two branches below -
+           it is what lets the grid's sticky month header blur the tiles from
+           edge to edge as they pass under it. */
+        <div className="flex-1 overflow-auto">
+          <LibraryGrid
+            kind={libraryKind}
+            months={library.months}
+            total={library.total}
+            loaded={library.loaded}
+            hasMore={library.hasMore}
+            isLoading={library.isLoading}
+            isLoadingMore={library.isLoadingMore}
+            error={library.error}
+            search={search}
+            selected={selected}
+            favourites={favourites}
+            unlockedFiles={unlockedFiles}
+            activeId={panel?.file.id ?? null}
+            tileSize={tileSize}
+            layout={libraryLayout}
+            columns={activeColumns}
+            onLoadMore={library.loadMore}
+            onRetry={library.refresh}
+            onUploadClick={() => navigate("/upload")}
+            onOpen={(f) => openFileWithLockCheck(f, "view")}
+            onToggleSelect={toggleSelect}
+            onSelectMany={(ids) => setSelected((prev) => new Set([...prev, ...ids]))}
+            onFavourite={toggleFavourite}
+            onContextMenu={(e, f) => {
+              e.preventDefault();
+              setContextMenu({ x: e.clientX, y: e.clientY, item: { id: f.id, name: f.name, kind: "file" } });
+            }}
+          />
+        </div>
+      ) : isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 8 }).map((_, i) => (
             <div key={i} className="h-12 animate-pulse rounded-lg bg-[var(--color-bg-tertiary)]" />
@@ -1633,7 +1803,7 @@ export function FileBrowserPage() {
                 }} />}
                 <Divider />
                 {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFolder && ctxFolder.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
-                  setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "folder" }); setContextMenu(null);
+                  setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "folder", file_count: ctxFolder?.file_count, total_size_bytes: ctxFolder?.total_size_bytes, lock_mode: ctxFolder?.lock_mode }); setContextMenu(null);
                 }} />}
                 {canHide && <CtxItem icon={ctxFolder?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFolder?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
                   setHideTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "folder" }); setContextMenu(null);
@@ -1701,7 +1871,7 @@ export function FileBrowserPage() {
                   setContextMenu(null);
                 }} />
                 {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFile && ctxFile.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
-                  setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "file" }); setContextMenu(null);
+                  setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "file", size_bytes: ctxFile?.size_bytes, extension: ctxFile?.extension, lock_mode: ctxFile?.lock_mode }); setContextMenu(null);
                 }} />}
                 {canHide && <CtxItem icon={ctxFile?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFile?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
                   setHideTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "file" }); setContextMenu(null);
@@ -1925,9 +2095,34 @@ export function FileBrowserPage() {
                   } catch (e: any) {
                     toast.error(e instanceof ApiError ? e.message : "Delete failed");
                   }
+                } else if (deleteConfirm.permanent) {
+                  // Same bounded purge as the bulk path: a folder is asked
+                  // again until the server says it is finished, and a run that
+                  // hits the pass cap says so instead of claiming the folder
+                  // is gone.
+                  try {
+                    let stillEmptying: PurgeMessage | null = null;
+                    for (let i = 0; i < deleteConfirm.ids.length; i++) {
+                      const id = deleteConfirm.ids[i];
+                      if (deleteConfirm.kinds[i] !== "folder") {
+                        await api.delete(`/api/files/${id}`);
+                        continue;
+                      }
+                      const outcome = await purgeTrashedFolder(() => api.delete<PurgeResponse>(`/api/folders/${id}`));
+                      if (!outcome.complete) {
+                        stillEmptying = purgeSummary(outcome, deleteConfirm.names[i] ?? "That folder");
+                      }
+                    }
+                    if (stillEmptying) showPurgeMessage(stillEmptying);
+                    else toast.success("Permanently deleted");
+                  } catch (e) {
+                    toast.error(e instanceof ApiError ? e.message : "Delete failed");
+                  }
+                  refresh();
+                  clearSelection();
                 } else {
                   deleteConfirm.ids.forEach((id, i) => deleteMut.mutate({ id, kind: deleteConfirm.kinds[i] }));
-                  toast.success(deleteConfirm.permanent ? "Permanently deleted" : "Deleted");
+                  toast.success("Deleted");
                   clearSelection();
                 }
                 setPanel((p) => (p && deleteConfirm.ids.includes(p.file.id) ? null : p));

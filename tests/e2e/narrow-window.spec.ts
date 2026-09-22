@@ -1,4 +1,4 @@
-import { test, expect, navigateTo, resizeWindow } from "../fixtures";
+import { test, expect, multiWsTest, navigateTo, resizeWindow } from "../fixtures";
 
 /**
  * The window minimum dropped from 900x600 to 700x560 so the app can sit beside
@@ -59,4 +59,29 @@ test.describe("narrow window", () => {
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(NARROW.w);
   });
+});
+
+// The collapsed rail withdraws the expand toggle, so if the workspace button
+// goes inert too there is no path to another workspace at all. The inline
+// dropdown has no room at 60px - the button must open a flyout beside the
+// rail instead, like the Files row does.
+multiWsTest("workspace switching survives the collapsed sidebar", async ({ appPage: page }) => {
+  await resizeWindow(page, NARROW.w, NARROW.h);
+
+  // Collapsed, the button names the active workspace via its tooltip.
+  const wsButton = page.getByTitle("Test Workspace");
+  await expect(wsButton).toBeVisible();
+  await wsButton.click();
+
+  const menu = page.getByTestId("workspace-menu");
+  await expect(menu).toBeVisible();
+  // Beside the rail and fully on screen - not clipped to the 60px column.
+  const box = await menu.boundingBox();
+  expect(box!.x).toBeGreaterThan(50);
+  expect(box!.width).toBeGreaterThan(150);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(NARROW.w);
+
+  await menu.getByText("Second Workspace").click();
+  // The switch lands: the collapsed button now names workspace B.
+  await expect(page.getByTitle("Second Workspace")).toBeVisible({ timeout: 10_000 });
 });

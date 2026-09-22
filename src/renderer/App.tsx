@@ -6,6 +6,7 @@ import { queryClient } from "./lib/query-client";
 import { AuthProvider, useAuth } from "./lib/auth-context";
 import { WorkspaceProvider, useWorkspace } from "./lib/workspace-context";
 import { saveLastRoute } from "./lib/route-restore";
+import { MaintenanceGate } from "./components/MaintenanceGate";
 
 // Auth entry points stay eager so first paint after launch is instant.
 import { LoginPage } from "./pages/LoginPage";
@@ -206,6 +207,7 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <HashRouter>
         <AuthProvider>
+          <MaintenanceGate>
           <WorkspaceProvider>
           <RouteMemory />
           <IdlePrefetch />
@@ -218,6 +220,7 @@ export function App() {
             </Suspense>
           </ErrorBoundary>
           </WorkspaceProvider>
+          </MaintenanceGate>
           <Toaster
             position="bottom-right"
             toastOptions={{

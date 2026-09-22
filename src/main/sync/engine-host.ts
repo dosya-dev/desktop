@@ -45,7 +45,12 @@ export interface SyncEngineHandle {
   resolveConflict(conflictId: string, resolution: "keep-local" | "keep-remote" | "keep-both"): Promise<void>;
   setAppVisible(visible: boolean): void;
   notifyNetworkOnline(): void;
+  notifySessionRefreshed(): void;
   getFolderTree(workspaceId: string): Promise<RemoteFolderInfo[]>;
+  retryFileErrors(pairId: string): Promise<void>;
+  clearFileErrors(pairId: string): Promise<void>;
+  confirmPendingDeletion(pairId: string): Promise<void>;
+  dismissPendingDeletion(pairId: string): Promise<void>;
 }
 
 const EMPTY_STATUS: SyncStatus = {
@@ -54,6 +59,7 @@ const EMPTY_STATUS: SyncStatus = {
   activeTransfers: [],
   unresolvedConflicts: [],
   recentLogs: [],
+  fileErrorCount: 0,
 };
 
 /** How long an RPC may sit unanswered before we give the caller an error. */
@@ -295,10 +301,23 @@ export class SyncEngineHost extends EventEmitter implements SyncEngineHandle {
    */
   private async serveHostCall(id: number, method: HostMethod, args: unknown[]): Promise<void> {
     try {
-      const value =
-        method === "getSessionCookies"
-          ? await this.env.getSessionCookies()
-          : await this.env.resolveProxy(typeof args[0] === "string" ? args[0] : "");
+      let value: unknown;
+      switch (method) {
+        case "getSessionCookies":
+          value = await this.env.getSessionCookies();
+          break;
+        case "resolveProxy":
+          value = await this.env.resolveProxy(typeof args[0] === "string" ? args[0] : "");
+          break;
+        case "trashItem":
+          // The path is the engine's own - it only ever names files inside a
+          // sync root it manages - but it is still validated as a string so a
+          // malformed message cannot reach shell.trashItem with `undefined`.
+          if (typeof args[0] !== "string" || args[0].length === 0) throw new Error("trashItem: path required");
+          await this.env.trashItem(args[0]);
+          value = null;
+          break;
+      }
       this.post({ t: "host-res", id, ok: true, value });
     } catch (err) {
       this.post({ t: "host-res", id, ok: false, error: errorText(err) });
@@ -496,7 +515,27 @@ export class SyncEngineHost extends EventEmitter implements SyncEngineHandle {
     if (this.child) this.send("notifyNetworkOnline", []);
   }
 
+  notifySessionRefreshed(): void {
+    if (this.child) this.send("notifySessionRefreshed", []);
+  }
+
   async getFolderTree(workspaceId: string): Promise<RemoteFolderInfo[]> {
     return (await this.rpc("getFolderTree", [workspaceId])) as RemoteFolderInfo[];
+  }
+
+  async retryFileErrors(pairId: string): Promise<void> {
+    await this.rpc("retryFileErrors", [pairId]);
+  }
+
+  async clearFileErrors(pairId: string): Promise<void> {
+    await this.rpc("clearFileErrors", [pairId]);
+  }
+
+  async confirmPendingDeletion(pairId: string): Promise<void> {
+    await this.rpc("confirmPendingDeletion", [pairId]);
+  }
+
+  async dismissPendingDeletion(pairId: string): Promise<void> {
+    await this.rpc("dismissPendingDeletion", [pairId]);
   }
 }

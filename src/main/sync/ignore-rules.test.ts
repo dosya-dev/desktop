@@ -52,3 +52,16 @@ test("pattern skips name the pattern, for the Activity log", () => {
   assert.equal(ignoreReason("app.log", false, ["*.log"], "/p/app.log"), 'excluded by pattern "*.log"');
   assert.equal(ignoreReason("bin", true, ["/bin"], "/bin"), 'excluded by pattern "/bin"');
 });
+
+test("AppleDouble sidecars (._*) are ignored by default - they are metadata, not the user's files", () => {
+  // Field report 2026-09-02 (desktop #10): macOS writes "._photo.jpg" beside
+  // files on non-HFS volumes (SMB, FAT, exFAT). Syncing them clutters every
+  // other device with unreadable 4 KB files and they change on every touch.
+  assert.equal(ignoreReason("._photo.jpg", false, []), "AppleDouble metadata file");
+  assert.equal(shouldIgnoreEntry("._.DS_Store", false, [], "/Volumes/usb/._.DS_Store"), true);
+  // A real file that merely starts with a dot and underscore elsewhere is fine.
+  assert.equal(ignoreReason("_.txt", false, []), null);
+  assert.equal(ignoreReason(".hidden", false, []), null);
+  // Directories named that way are real folders.
+  assert.equal(ignoreReason("._cache", true, []), null);
+});

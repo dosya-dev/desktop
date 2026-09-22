@@ -7,6 +7,7 @@ import {
   Notification,
 } from "electron";
 import { app } from "electron";
+import { HIDDEN_LAUNCH_ARG } from "./window-show";
 import { join, resolve, sep, basename } from "path";
 import { createWriteStream } from "fs";
 import { mkdtemp, readdir, rm } from "fs/promises";
@@ -15,6 +16,8 @@ import { Readable } from "stream";
 import QRCode from "qrcode";
 import { longPath } from "./sync/paths";
 import { clearSessionCookie } from "./session";
+import { isSessionCookieName, sessionCookieHeader } from "./session-cookie";
+import { buildDownloadUrl } from "./download-url";
 
 export function registerIpcHandlers(apiBase: string): void {
   // "Open in system app" writes here. A single fixed name (the old approach)
@@ -75,10 +78,25 @@ export function registerIpcHandlers(apiBase: string): void {
   );
 
   // ── Launch at login ──────────────────────────────────────────────
-  ipcMain.handle("app:get-launch-at-login", () => app.getLoginItemSettings().openAtLogin);
+  // macOS honours openAsHidden and reports it back as wasOpenedAsHidden;
+  // Windows has no hidden-launch flag, so the login item carries --hidden and
+  // main/index.ts reads it off argv (window-show.ts). getLoginItemSettings on
+  // Windows only answers openAtLogin=true when the registered args match, so
+  // the same args are passed to both calls; executableWillLaunchAtLogin covers
+  // an entry registered before the argument existed.
+  const loginItemArgs = process.platform === "win32" ? [HIDDEN_LAUNCH_ARG] : [];
+  const launchAtLogin = (): boolean => {
+    try {
+      const s = app.getLoginItemSettings({ args: loginItemArgs });
+      return s.openAtLogin || (process.platform === "win32" && s.executableWillLaunchAtLogin === true);
+    } catch {
+      return false;
+    }
+  };
+  ipcMain.handle("app:get-launch-at-login", () => launchAtLogin());
   ipcMain.handle("app:set-launch-at-login", (_e, enabled: boolean) => {
-    app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true });
-    return app.getLoginItemSettings().openAtLogin;
+    app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true, args: loginItemArgs });
+    return launchAtLogin();
   });
 
   // ── Standard OS folders (for known-folder backup presets) ────────
@@ -113,7 +131,8 @@ export function registerIpcHandlers(apiBase: string): void {
 
     /** Returns true when the cookie is present and usable (fixing it if not). */
     const tryResolve = async (): Promise<boolean> => {
-      const cookies = await session.defaultSession.cookies.get({ name: "dosya_session" });
+      const all = await session.defaultSession.cookies.get({ url: apiBase });
+      const cookies = all.filter((c) => isSessionCookieName(c.name));
       if (cookies.some((c) => c.sameSite === "no_restriction")) return true;
 
       const unfixed = cookies.find((c) => c.sameSite !== "no_restriction");
@@ -125,6 +144,7 @@ export function registerIpcHandlers(apiBase: string): void {
           value: unfixed.value,
           httpOnly: unfixed.httpOnly,
           secure: true,
+          path: "/", // keep a __Host- cookie valid on re-set
           expirationDate: unfixed.expirationDate || Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
           sameSite: "no_restriction",
         });
@@ -155,7 +175,7 @@ export function registerIpcHandlers(apiBase: string): void {
         _cause: string,
         removed: boolean,
       ): void => {
-        if (cookie.name !== "dosya_session" || removed) return;
+        if (!isSessionCookieName(cookie.name) || removed) return;
         void tryResolve().then((ok) => { if (ok) finish(); });
       };
       const timer = setTimeout(finish, WAIT_TIMEOUT_MS);
@@ -224,14 +244,14 @@ export function registerIpcHandlers(apiBase: string): void {
 
       // Get session cookie
       const cookies = await session.defaultSession.cookies.get({ url: apiBase });
-      const sessionCookie = cookies.find((c) => c.name === "dosya_session");
-      if (!sessionCookie) {
+      const cookieHeader = sessionCookieHeader(cookies);
+      if (!cookieHeader) {
         throw new Error("Not authenticated");
       }
 
       const res = await fetch(`${apiBase}/api/files/${encodeURIComponent(fileId)}/download`, {
         headers: {
-          Cookie: `dosya_session=${sessionCookie.value}`,
+          Cookie: cookieHeader,
         },
       });
 
@@ -260,7 +280,15 @@ export function registerIpcHandlers(apiBase: string): void {
 
   ipcMain.handle(
     "file:download",
-    async (_event, { fileId, fileName, version }: { fileId: string; fileName: string; version?: number }) => {
+    async (
+      _event,
+      {
+        fileId,
+        fileName,
+        version,
+        archiveEntryIndex,
+      }: { fileId: string; fileName: string; version?: number; archiveEntryIndex?: number },
+    ) => {
       if (typeof fileId !== "string" || fileId.length === 0 || fileId.length > 200) {
         throw new Error("Invalid fileId");
       }
@@ -270,6 +298,11 @@ export function registerIpcHandlers(apiBase: string): void {
       if (version !== undefined && (!Number.isInteger(version) || version < 1 || version > 100000)) {
         throw new Error("Invalid version");
       }
+      // Validated (and the URL decided) before the save dialog even opens, the
+      // same discipline the checks above already follow - a malformed entry
+      // index fails fast instead of prompting for a save location it will
+      // never use.
+      const url = buildDownloadUrl(apiBase, { fileId, version, archiveEntryIndex });
 
       const safeName = basename(fileName).replace(/[/\\]/g, "_");
       if (!safeName || safeName === "." || safeName === "..") {
@@ -283,15 +316,14 @@ export function registerIpcHandlers(apiBase: string): void {
       if (canceled || !filePath) return { ok: false, canceled: true };
 
       const cookies = await session.defaultSession.cookies.get({ url: apiBase });
-      const sessionCookie = cookies.find((c) => c.name === "dosya_session");
-      if (!sessionCookie) {
+      const cookieHeader = sessionCookieHeader(cookies);
+      if (!cookieHeader) {
         throw new Error("Not authenticated");
       }
 
-      const qs = version ? `?version=${version}` : "";
-      const res = await fetch(`${apiBase}/api/files/${encodeURIComponent(fileId)}/download${qs}`, {
+      const res = await fetch(url, {
         headers: {
-          Cookie: `dosya_session=${sessionCookie.value}`,
+          Cookie: cookieHeader,
         },
       });
 
@@ -318,12 +350,12 @@ export function registerIpcHandlers(apiBase: string): void {
       if (canceled || !filePath) return { ok: false, canceled: true };
 
       const cookies = await session.defaultSession.cookies.get({ url: apiBase });
-      const sessionCookie = cookies.find((c) => c.name === "dosya_session");
-      if (!sessionCookie) throw new Error("Not authenticated");
+      const cookieHeader = sessionCookieHeader(cookies);
+      if (!cookieHeader) throw new Error("Not authenticated");
 
       const res = await fetch(`${apiBase}/api/files/download-archive`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Cookie: `dosya_session=${sessionCookie.value}` },
+        headers: { "Content-Type": "application/json", Cookie: cookieHeader },
         body: JSON.stringify({ file_ids: fileIds, folder_ids: folderIds }),
       });
       if (!res.ok) throw new Error(`Download failed: ${res.status}`);

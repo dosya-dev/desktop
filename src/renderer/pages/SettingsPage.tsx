@@ -14,6 +14,8 @@ import {
   DownloadCloud,
   LogOut,
   Globe,
+  Eraser,
+  RotateCcw,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -240,6 +242,13 @@ export function SettingsPage() {
             </div>
           </Section>
         )}
+        {tab === "general" && (
+          <div className="mt-6">
+            <Section title="Troubleshooting">
+              <TroubleshootingSection />
+            </Section>
+          </div>
+        )}
 
         {tab === "limits" && (
           <Section title="Hard limits">
@@ -369,6 +378,129 @@ export function SettingsPage() {
  * accident. Both hand off, and the panel says so plainly rather than letting
  * someone discover it from a failed request.
  */
+/**
+ * The escape hatches for "the app is stuck": a safe cache clear, and a full
+ * local reset. Born from a real support case - a session revoked server-side
+ * left sync erroring after re-login, and there was nothing in the app the
+ * user could reach for. The reset is app-scoped (this device only): nothing
+ * in the cloud is touched.
+ */
+function TroubleshootingSection() {
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [busy, setBusy] = useState<"cache" | "reset" | null>(null);
+  const queryClient = useQueryClient();
+
+  const clearCache = async () => {
+    setBusy("cache");
+    try {
+      await window.electronAPI.clearAppCache();
+      // Renderer-side caches too: query results and decoded previews are the
+      // caches the user can actually see going stale.
+      queryClient.invalidateQueries();
+      toast.success("Cache cleared");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to clear cache");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const factoryReset = async () => {
+    setBusy("reset");
+    try {
+      // Quits and relaunches signed out; nothing to do afterwards.
+      await window.electronAPI.factoryReset();
+    } catch (err) {
+      setBusy(null);
+      setConfirmReset(false);
+      toast.error(err instanceof Error ? err.message : "Reset failed");
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="mb-1 font-semibold">Clear cache</h3>
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Clears downloaded previews and cached data. Your files, sync folders
+            and sign-in are not affected.
+          </p>
+        </div>
+        <button
+          onClick={clearCache}
+          disabled={busy !== null}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          <Eraser size={14} /> {busy === "cache" ? "Clearing..." : "Clear cache"}
+        </button>
+      </div>
+
+      <div className="border-t" style={{ borderColor: "var(--color-border)" }} />
+
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="mb-1 font-semibold text-[var(--color-danger)]">Reset app data</h3>
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Signs you out, removes all local app data including sync folder
+            settings, and restarts the app. Files in the cloud are not touched.
+          </p>
+        </div>
+        <button
+          onClick={() => setConfirmReset(true)}
+          disabled={busy !== null}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
+          style={{ borderColor: "var(--color-danger)", color: "var(--color-danger)" }}
+        >
+          <RotateCcw size={14} /> Reset app data
+        </button>
+      </div>
+
+      {confirmReset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div
+            className="w-full max-w-md rounded-xl border bg-[var(--color-bg)] p-6 shadow-xl"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <h3 className="mb-2 text-lg font-semibold">Reset app data?</h3>
+            <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
+              This signs you out and removes everything the app stores on this
+              computer:
+            </p>
+            <ul className="mb-4 list-disc space-y-1 pl-5 text-sm text-[var(--color-text-secondary)]">
+              <li>Sync folder settings and sync history</li>
+              <li>Cached files, previews and thumbnails</li>
+              <li>Your session on this device</li>
+            </ul>
+            <p className="mb-5 text-sm text-[var(--color-text-secondary)]">
+              Files on your computer and in the cloud are not deleted. The app
+              restarts signed out.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmReset(false)}
+                disabled={busy === "reset"}
+                className="rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
+                style={{ borderColor: "var(--color-border)" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={factoryReset}
+                disabled={busy === "reset"}
+                className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {busy === "reset" ? "Resetting..." : "Reset and restart"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DangerZone({ workspaceId, workspaceName }: { workspaceId: string; workspaceName: string }) {
   const openInWeb = () => window.open(webAppUrl("/settings#section-danger"), "_blank");
 

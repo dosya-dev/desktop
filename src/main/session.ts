@@ -1,6 +1,11 @@
 import { app, session } from "electron";
 import { originAllowed } from "./trusted-origins";
-import { parseSessionCookieHeaders } from "./session-cookie";
+import {
+  parseSessionCookieHeaders,
+  isSessionCookieName,
+  HOST_SESSION_COOKIE,
+  LEGACY_SESSION_COOKIE,
+} from "./session-cookie";
 
 /**
  * Configure Electron's session for the desktop app:
@@ -113,16 +118,21 @@ export function setupSession(apiBase: string): void {
     if (originAllowed(details.url, [apiBase])) {
       for (const update of parseSessionCookieHeaders(responseHeaders)) {
         if (update.action === "clear") {
-          // Empty value = cookie cleared (logout). Remove it from the store.
-          ses.cookies.remove(apiBase, "dosya_session").catch(() => {});
+          // Logout clears whichever name(s) the store might hold.
+          ses.cookies.remove(apiBase, HOST_SESSION_COOKIE).catch(() => {});
+          ses.cookies.remove(apiBase, LEGACY_SESSION_COOKIE).catch(() => {});
         } else {
           ses.cookies.set({
             url: apiBase,
-            name: "dosya_session",
+            // Store under the name the API issued - it validates that exact
+            // name. `path: "/"` (plus secure + no domain) is what lets Chromium
+            // accept a `__Host-`-prefixed cookie; without it the set is rejected.
+            name: update.name,
             value: update.value,
             httpOnly: true,
             secure: true,
             sameSite: "no_restriction",
+            path: "/",
             expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
           }).catch(() => {});
         }
@@ -144,7 +154,7 @@ export function setupSession(apiBase: string): void {
   // We also persist the cookie across restarts by setting expirationDate.
   // Without it, Electron treats it as a session cookie deleted on close.
   ses.cookies.on("changed", (_event, cookie, _cause, removed) => {
-    if (removed || cookie.name !== "dosya_session") return;
+    if (removed || !isSessionCookieName(cookie.name)) return;
     const needsSameSiteFix = cookie.sameSite !== "no_restriction";
     const needsExpiryFix = !cookie.expirationDate;
     if (needsSameSiteFix || needsExpiryFix) {
@@ -154,6 +164,8 @@ export function setupSession(apiBase: string): void {
         value: cookie.value,
         httpOnly: cookie.httpOnly,
         secure: true,
+        // Preserve Path=/ so a __Host- cookie stays valid on re-set.
+        path: "/",
         expirationDate: cookie.expirationDate || Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
         sameSite: "no_restriction",
       }).catch(() => {});
@@ -170,7 +182,7 @@ export async function clearSessionCookie(apiBase: string): Promise<void> {
   const url = apiBase;
   const cookies = await session.defaultSession.cookies.get({ url });
   for (const cookie of cookies) {
-    if (cookie.name === "dosya_session") {
+    if (isSessionCookieName(cookie.name)) {
       await session.defaultSession.cookies.remove(url, cookie.name);
     }
   }

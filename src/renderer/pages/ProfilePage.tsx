@@ -43,7 +43,7 @@ import {
 } from "@dosya-dev/shared";
 import { toast } from "sonner";
 import { THEMES, type Mode } from "@/lib/themes";
-import { readCache, writeCache, applyTheme, applyThemeAnimated, subscribeThemeChange, type ThemePref } from "@/lib/theme";
+import { useThemePref } from "@/lib/use-theme-pref";
 import { webAppUrl } from "../lib/web-app-url";
 
 type Tab = "identity" | "appearance" | "password" | "api-keys" | "sessions" | "notifications" | "billing" | "about" | "help" | "delete";
@@ -113,32 +113,12 @@ export function ProfilePage() {
 }
 
 // ── Appearance Section ──────────────────────────────────────────────
-// Same 8 themes × light/dark/system offered on the web. Applies instantly and
-// saves to the account (PUT /api/me/appearance) so it follows the user across
-// devices, with an optimistic rollback if the save fails.
+// Same 8 themes × light/dark/system offered on the web. Apply/persist/rollback
+// live in useThemePref, shared with the titlebar's ThemeMenu so the two
+// surfaces cannot drift.
 
 function AppearanceSection() {
-  const [pref, setPref] = useState<ThemePref>(() => readCache());
-
-  // Stay in sync if another surface (e.g. account reconcile on refresh) applies a theme.
-  useEffect(() => subscribeThemeChange((next) => setPref(next)), []);
-
-  const save = async (next: ThemePref) => {
-    const prev = pref;
-    setPref(next);
-    applyThemeAnimated(next);
-    writeCache(next);
-    try {
-      await api.put("/api/me/appearance", next);
-    } catch (e) {
-      // Roll back the optimistic change on failure - instantly, since a second
-      // wipe in the other direction reads as a bug rather than a revert.
-      setPref(prev);
-      applyTheme(prev);
-      writeCache(prev);
-      toast.error(e instanceof ApiError ? e.message : "Your theme could not be saved");
-    }
-  };
+  const { pref, save } = useThemePref();
 
   const MODES: { value: Mode; label: string }[] = [
     { value: "light", label: "Light" },

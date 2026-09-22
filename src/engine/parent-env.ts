@@ -1,7 +1,8 @@
 import type { EnvProvider, HostCookie } from "../main/sync/env-provider";
+import type { HostMethod } from "../main/sync/engine-protocol";
 
 /** Sends a host request to the parent and resolves when it answers. */
-export type HostCall = (method: "getSessionCookies" | "resolveProxy", args: unknown[]) => Promise<unknown>;
+export type HostCall = (method: HostMethod, args: unknown[]) => Promise<unknown>;
 
 /**
  * The EnvProvider for the isolated engine.
@@ -28,6 +29,12 @@ export function createParentEnv(call: HostCall, opts: { userDataDir: string; isD
     async resolveProxy(url: string): Promise<string | null> {
       const res = await call("resolveProxy", [url]);
       return typeof res === "string" ? res : null;
+    },
+
+    async trashItem(absPath: string): Promise<void> {
+      // shell.trashItem is main-process only; the parent does it and a
+      // rejection there (no trash on that volume) arrives here as a rejection.
+      await call("trashItem", [absPath]);
     },
 
     isDev: opts.isDev,

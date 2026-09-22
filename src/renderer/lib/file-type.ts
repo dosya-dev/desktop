@@ -100,6 +100,14 @@ export function isBook(name: string): boolean {
   return BOOK_EXTS.has(extOf(name));
 }
 
+// Deliberately narrow. `.cbz` and `.epub` are zips too, but both already
+// route to the book reader, and claiming them here would take a working
+// experience away and replace it with a file tree.
+const ARCHIVE_EXTS = new Set(["zip"]);
+export function isArchive(name: string): boolean {
+  return ARCHIVE_EXTS.has(extOf(name));
+}
+
 export function isVcard(name: string): boolean {
   const e = extOf(name);
   return e === "vcf" || e === "vcard";

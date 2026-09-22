@@ -108,6 +108,19 @@ export async function startMockServer(
       });
     });
 
+  // Session revocation state (see /__test/set-auth below). Revocation is
+  // per-token, like production: killing a session leaves its cookie value
+  // dead forever, and only a fresh login mints a live one. `sessionSerial`
+  // gives each login a distinct cookie value - Chromium only reports a
+  // cookie "changed" when the value actually differs, and the main process
+  // keys sync-session refresh off that event.
+  let sessionSerial = 0;
+  const deadSessions = new Set<string>();
+  const currentSession = () => `mock-session-${sessionSerial}`;
+
+  // Account appearance saved by PUT /api/me/appearance, echoed on /api/me.
+  let savedAppearance: { ui_theme?: string; ui_mode?: string } = {};
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const path = url.pathname;
@@ -140,6 +153,25 @@ export async function startMockServer(
       return res.end();
     }
 
+    // Runtime session revocation - simulates the server invalidating the
+    // CURRENT session token while its cookie still sits in the Electron jar
+    // (the "logged out due to token issues" flow: no cookie-removed event
+    // ever fires). POST /__test/set-auth {revoked:true} kills the current
+    // token; it stays dead forever, and only /api/auth/login mints a live
+    // replacement - exactly like production.
+    if (path === "/__test/set-auth" && method === "POST") {
+      return readBody(req).then((body) => {
+        if (body.revoked) deadSessions.add(currentSession());
+        json({ ok: true });
+      });
+    }
+    if (path.startsWith("/api/") && !path.startsWith("/api/auth/")) {
+      const presented = /(?:^|;\s*)dosya_session=([^;]+)/.exec(req.headers.cookie || "")?.[1];
+      if (presented && deadSessions.has(presented)) {
+        return json({ ok: false, error: "Unauthorized" }, 401);
+      }
+    }
+
     // ── Auth ──────────────────────────────────────────────
     if (path === "/api/me" && method === "GET") {
       if (!authenticated) return json({ ok: false, error: "Unauthorized" }, 401);
@@ -147,11 +179,20 @@ export async function startMockServer(
       // Electron cookie jar (src/main/session.ts) - the sync engine's
       // hasSession() login gate checks that jar, so authenticated fixtures
       // must carry a session cookie, not just a 200 from /api/me.
-      return json({ ok: true, user: data.mockUser }, 200, {
-        "Set-Cookie": "dosya_session=mock-session; Path=/",
+      // Saved appearance rides along like production: auth-context reconciles
+      // ui_theme/ui_mode from /api/me onto <html> at boot, so a PUT that the
+      // mock forgot would make every theme choice revert on reload.
+      return json({ ok: true, user: { ...data.mockUser, ...savedAppearance } }, 200, {
+        "Set-Cookie": `dosya_session=${currentSession()}; Path=/`,
       });
     }
     if (path === "/api/me" && method === "PATCH") return json({ ok: true, user: data.mockUser });
+    if (path === "/api/me/appearance" && method === "PUT") {
+      return readBody(req).then((body) => {
+        savedAppearance = { ui_theme: body.theme, ui_mode: body.mode };
+        json({ ok: true });
+      });
+    }
     if (path === "/api/me/sessions" && method === "GET") return json({ ok: true, sessions: data.mockSessions });
     if (path === "/api/me/api-keys" && method === "GET") return json({ ok: true, keys: [] });
     if (path === "/api/me/change-password" && method === "POST") return json({ ok: true });
@@ -166,7 +207,15 @@ export async function startMockServer(
       res.writeHead(200, { "Content-Type": "image/png", ...corsHeaders });
       return res.end(AVATAR_PNG);
     }
-    if (path === "/api/auth/login" && method === "POST") return json({ ok: true, user: data.mockUser });
+    if (path === "/api/auth/login" && method === "POST") {
+      // A successful login mints a NEW session - the dead token stays dead
+      // but the fresh one works, same as production. The serial bump gives
+      // the cookie a new value so the cookie jar reports a real change.
+      sessionSerial++;
+      return json({ ok: true, user: data.mockUser }, 200, {
+        "Set-Cookie": `dosya_session=${currentSession()}; Path=/`,
+      });
+    }
     if (path === "/api/auth/signup" && method === "POST") return json({ ok: true });
     if (path === "/api/auth/2fa/verify" && method === "POST") return json({ ok: true, user: data.mockUser });
     if (path.startsWith("/api/auth/forgot") && method === "POST") return json({ ok: true });

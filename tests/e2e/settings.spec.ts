@@ -1,6 +1,36 @@
-import { test, expect, navigateTo } from "../fixtures";
+import { test, expect, navigateTo, electronAppFor } from "../fixtures";
 
 test.describe("Settings Page", () => {
+  test("Troubleshooting offers a cache clear that reports success", async ({ appPage }) => {
+    await navigateTo(appPage, "/settings");
+
+    await expect(appPage.getByText("Troubleshooting")).toBeVisible();
+    await appPage.getByRole("button", { name: "Clear cache" }).click();
+    await expect(appPage.getByText("Cache cleared")).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("Reset app data confirms, then quits the app", async ({ appPage }) => {
+    await navigateTo(appPage, "/settings");
+
+    await appPage.getByRole("button", { name: "Reset app data" }).click();
+    // The confirmation names what is deleted and what is not.
+    await expect(appPage.getByText("Reset app data?")).toBeVisible();
+    await expect(appPage.getByText(/Sync folder settings/)).toBeVisible();
+    await expect(appPage.getByText(/cloud are not deleted/)).toBeVisible();
+
+    // Cancel leaves everything standing.
+    await appPage.getByRole("button", { name: "Cancel" }).click();
+    await expect(appPage.getByText("Reset app data?")).toHaveCount(0);
+
+    // Confirming quits the app (the relaunch is skipped under NODE_ENV=test -
+    // a relaunched instance would outlive the harness as an orphan).
+    const app = electronAppFor(appPage);
+    const closed = app.waitForEvent("close", { timeout: 20_000 });
+    await appPage.getByRole("button", { name: "Reset app data" }).click();
+    await appPage.getByRole("button", { name: "Reset and restart" }).click();
+    await closed;
+  });
+
   test("renders settings page with sidebar tabs", async ({ appPage }) => {
     await navigateTo(appPage, "/settings");
 

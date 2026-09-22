@@ -7,7 +7,6 @@ import {
   Check,
   Loader2,
   Shield,
-  Globe,
   Plus,
   ChevronRight,
   Pause,
@@ -16,6 +15,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { api, apiBase, ApiError, apiRequest } from "@/lib/api-client";
+import { LIBRARY_QUERY_ROOT } from "@/lib/library-request";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes } from "@/lib/format";
 import { toast } from "sonner";
@@ -31,18 +31,11 @@ interface QueueItem {
   bytesUploaded: number;
   error?: string;
   // Destination captured at enqueue time. Uploads must never retarget when
-  // the active workspace/folder/region changes mid-queue.
+  // the active workspace/folder changes mid-queue. The location is not part of
+  // this: files land wherever the workspace was created, which no upload can
+  // override.
   workspaceId: string;
   folderId: string | null;
-  region: string;
-}
-
-interface RegionInfo {
-  code: string;
-  city: string;
-  country: string;
-  continent: string;
-  flag?: string;
 }
 
 interface PickerFolder {
@@ -67,7 +60,6 @@ export function UploadPage() {
     id: string | null;
     name: string;
   }>({ id: null, name: "Root (top level)" });
-  const [selectedRegion, setSelectedRegion] = useState("");
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -80,24 +72,6 @@ export function UploadPage() {
   pausedRef.current = paused;
   const abortControllers = useRef(new Map<string, AbortController>());
 
-  // Fetch regions from API
-  const { data: regionsData } = useQuery({
-    queryKey: ["regions"],
-    queryFn: () => api.get<{ ok: boolean; regions: RegionInfo[] }>("/api/regions"),
-  });
-
-  // Fetch workspace settings for available_regions + default_region
-  const { data: wsData } = useQuery({
-    queryKey: ["workspace-detail", active?.id],
-    queryFn: () =>
-      api.get<{
-        ok: boolean;
-        workspace?: { default_region: string };
-        settings?: { available_regions: string | null } | null;
-      }>(`/api/workspaces/${active?.id}`),
-    enabled: !!active,
-  });
-
   // Fetch folder tree
   const { data: foldersData } = useQuery({
     queryKey: ["folders-tree", active?.id],
@@ -107,28 +81,6 @@ export function UploadPage() {
       ),
     enabled: !!active,
   });
-
-  // Compute available regions
-  const allRegions = regionsData?.regions ?? [];
-  let availableCodes: string[] = [];
-  if (wsData?.settings?.available_regions) {
-    try {
-      availableCodes = JSON.parse(wsData.settings.available_regions);
-    } catch {}
-  }
-  const regions =
-    availableCodes.length > 0
-      ? allRegions.filter((r) => availableCodes.includes(r.code))
-      : allRegions;
-
-  // Set default region from workspace
-  useEffect(() => {
-    if (!selectedRegion && wsData?.workspace?.default_region) {
-      setSelectedRegion(wsData.workspace.default_region);
-    } else if (!selectedRegion && regions.length > 0) {
-      setSelectedRegion(regions[0].code);
-    }
-  }, [wsData, regions, selectedRegion]);
 
   // Create folder mutation
   const createFolderMut = useMutation({
@@ -172,7 +124,6 @@ export function UploadPage() {
         file_size: item.file.size,
         mime_type: item.file.type || "application/octet-stream",
         folder_id: item.folderId,
-        region: item.region,
       });
 
       if (controller.signal.aborted) throw new Error("Cancelled");
@@ -273,7 +224,7 @@ export function UploadPage() {
         processQueue();
       });
     }
-  }, [active, selectedFolder, selectedRegion]);
+  }, [active, selectedFolder]);
 
   // Abort any in-flight uploads when leaving the page so their XHRs don't
   // outlive the component (orphaned requests / setState-after-unmount).
@@ -329,13 +280,12 @@ export function UploadPage() {
         bytesUploaded: 0,
         workspaceId: active.id,
         folderId: selectedFolder.id,
-        region: selectedRegion,
       }));
       setQueue((prev) => [...prev, ...items]);
       // Start processing after state update
       setTimeout(() => processQueue(), 50);
     },
-    [processQueue, active, selectedFolder.id, selectedRegion],
+    [processQueue, active, selectedFolder.id],
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -403,17 +353,15 @@ export function UploadPage() {
 
   const folders = foldersData?.folders ?? [];
 
-  // Sort regions: selected first
-  const sortedRegions = [...regions].sort((a, b) => {
-    if (a.code === selectedRegion) return -1;
-    if (b.code === selectedRegion) return 1;
-    return 0;
-  });
-
   // Invalidate file queries when all uploads are done
   useEffect(() => {
     if (totalFiles > 0 && pendingCount === 0 && uploading.length === 0 && doneCount > 0) {
       queryClient.invalidateQueries({ queryKey: ["files"] });
+      // An uploaded file belongs to the workspace-wide library view too (photos,
+      // videos, documents), and that view is not a folder listing - ["files"] does
+      // not partial-match it, so without this the grid stayed stale until its own
+      // staleTime expired.
+      queryClient.invalidateQueries({ queryKey: [LIBRARY_QUERY_ROOT] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     }
   }, [totalFiles, pendingCount, uploading.length, doneCount]);
@@ -427,7 +375,7 @@ export function UploadPage() {
           <p className="text-sm text-[var(--color-text-muted)]">
             {selectedFolder.id
               ? <>Uploading to <strong className="text-[var(--color-text)]">{selectedFolder.name}</strong> · encrypted in transit</>
-              : "Files are encrypted in transit (TLS 1.3). You pick the region."}
+              : "Files are encrypted in transit (TLS 1.3). They are stored in this workspace's location."}
           </p>
         </div>
 
@@ -576,8 +524,9 @@ export function UploadPage() {
         <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
           <p className="mb-3 text-xs font-semibold text-[var(--color-text-secondary)]">Upload options</p>
 
-          {/* Folder */}
-          <div className="mb-4">
+          {/* Folder - the only upload option left. Where the bytes land is a
+              property of the workspace, chosen once when it was created. */}
+          <div>
             <p className="mb-1.5 flex items-center gap-1 text-xs font-medium text-[var(--color-text-secondary)]">
               <FolderIcon fileCount={1} size={13} />
               Folder
@@ -607,57 +556,6 @@ export function UploadPage() {
               <Plus size={11} />
               Create new folder
             </button>
-          </div>
-
-          <div className="my-3 h-px bg-[var(--color-border)]" />
-
-          {/* Region */}
-          <div>
-            <p className="mb-1.5 flex items-center gap-1 text-xs font-medium text-[var(--color-text-secondary)]">
-              <Globe size={13} />
-              Select region
-              <span className="ml-auto text-[10px] font-normal text-[var(--color-text-muted)]">
-                {regions.length} available
-              </span>
-            </p>
-            <div role="radiogroup" aria-label="Storage region" className="grid grid-cols-1 gap-1.5 max-h-60 overflow-y-auto">
-              {sortedRegions.map((r) => (
-                <button
-                  key={r.code}
-                  role="radio"
-                  aria-checked={(!!r.code && selectedRegion === r.code)}
-                  onClick={() => setSelectedRegion(r.code)}
-                  className={`flex items-start rounded-lg border px-3 py-2 text-left transition-colors ${
-                    (!!r.code && selectedRegion === r.code)
-                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]/5"
-                      : "hover:bg-[var(--color-bg-secondary)]"
-                  }`}
-                  style={{
-                    borderColor:
-                      (!!r.code && selectedRegion === r.code) ? "var(--color-primary)" : "var(--color-border)",
-                  }}
-                >
-                  <span
-                    aria-hidden="true"
-                    className="mr-2 mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border"
-                    style={{ borderColor: (!!r.code && selectedRegion === r.code) ? "var(--color-primary)" : "var(--color-border)" }}
-                  >
-                    {(!!r.code && selectedRegion === r.code) && (
-                      <span className="h-2 w-2 rounded-full" style={{ background: "var(--color-primary)" }} />
-                    )}
-                  </span>
-                  <div>
-                    <p className={`text-xs font-medium ${(!!r.code && selectedRegion === r.code) ? "text-[var(--color-primary)]" : ""}`}>
-                      {r.city}, {r.country}
-                    </p>
-                    <p className="text-[10px] text-[var(--color-text-muted)]">{r.code}</p>
-                  </div>
-                </button>
-              ))}
-              {regions.length === 0 && (
-                <p className="py-3 text-center text-xs text-[var(--color-text-muted)]">Loading regions...</p>
-              )}
-            </div>
           </div>
         </div>
 

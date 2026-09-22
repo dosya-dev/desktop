@@ -54,6 +54,7 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
           case "error": return { icon: "⚠", text: "Error" };
           case "rate-limited": return { icon: "⏳", text: "Waiting" };
           case "offline": return { icon: "⚠", text: "Offline" };
+          case "needs-confirmation": return { icon: "⚠", text: "Needs attention" };
           default: return { icon: "•", text: "" };
         }
       };
@@ -61,6 +62,21 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
       const summary = summarizeSyncStatus(syncStatus);
 
       syncItems.push({ label: `Sync: ${summary}`, enabled: false });
+
+      // A platform switch paused this surface - show the team's message
+      // (rt.errorMessage, set by SyncEngine.setMaintenance) if there is one,
+      // right under the summary line.
+      if (syncStatus.maintenance) {
+        const pairMessage = syncStatus.pairs
+          .map((p) => p.errorMessage)
+          .find((m): m is string => !!m?.startsWith("Paused for maintenance:"));
+        if (pairMessage) {
+          syncItems.push({
+            label: `  ${pairMessage.replace(/^Paused for maintenance:\s*/, "")}`,
+            enabled: false,
+          });
+        }
+      }
 
       // Per-pair status
       for (const pair of pairs) {

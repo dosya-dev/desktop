@@ -143,6 +143,12 @@ export function Sidebar() {
   const { can } = usePermissions();
   const queryClient = useQueryClient();
   const [wsOpen, setWsOpen] = useState(false);
+  // Collapsed (60px) has no room for the inline dropdown - left-3/right-3 of
+  // a 60px rail is ~36px - so the workspace button opens a fixed flyout
+  // beside the rail instead, same pattern as the Files flyout below. null
+  // means the inline dropdown (expanded sidebar).
+  const wsBtnRef = useRef<HTMLButtonElement>(null);
+  const [wsFlyout, setWsFlyout] = useState<{ top: number; left: number } | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newWsName, setNewWsName] = useState("");
   const [newWsColor, setNewWsColor] = useState("#22c55e");
@@ -203,6 +209,9 @@ export function Sidebar() {
   // Any navigation, or leaving collapsed mode, dismisses it.
   useEffect(() => { setFlyout(null); }, [location.pathname, location.search]);
   useEffect(() => { if (!collapsed) setFlyout(null); }, [collapsed]);
+  // The workspace menu is anchored to geometry that a collapse/expand flip
+  // invalidates, so the flip closes it; the next click re-measures.
+  useEffect(() => { setWsOpen(false); }, [collapsed]);
 
   // ── Sliding active pill ────────────────────────────────────
   // One indicator glides to whichever row is active instead of each row
@@ -270,7 +279,8 @@ export function Sidebar() {
       if (!map[wsId]) map[wsId] = { syncing: false, error: false, paused: false, count: 0 };
       map[wsId].count++;
       if (p.status === "syncing") map[wsId].syncing = true;
-      if (p.status === "error") map[wsId].error = true;
+      // A held deletion needs the user as much as an error does.
+      if (p.status === "error" || p.status === "needs-confirmation") map[wsId].error = true;
       if (p.status === "paused") map[wsId].paused = true;
     }
     return map;
@@ -511,7 +521,24 @@ export function Sidebar() {
       {/* Workspace Switcher */}
       <div className="relative p-3 pb-0">
         <button
-          onClick={() => !collapsed && setWsOpen(!wsOpen)}
+          ref={wsBtnRef}
+          onClick={() => {
+            if (wsOpen) {
+              setWsOpen(false);
+              return;
+            }
+            if (collapsed) {
+              const r = wsBtnRef.current?.getBoundingClientRect();
+              if (!r) return;
+              // Clamped like the Files flyout: taller than the gap below the
+              // button and the panel would run off a minimum-height window.
+              const top = Math.max(8, Math.min(r.top, window.innerHeight - FLYOUT_MAX_H - 8));
+              setWsFlyout({ top, left: r.right + 6 });
+            } else {
+              setWsFlyout(null);
+            }
+            setWsOpen(true);
+          }}
           className={`flex w-full items-center ${collapsed ? "justify-center" : "gap-2.5"} rounded-lg px-3 py-2 text-sm hover:bg-black/5 transition-colors`}
           title={collapsed ? active?.name || "Select workspace" : undefined}
         >
@@ -534,13 +561,30 @@ export function Sidebar() {
           )}
         </button>
 
-        {/* Workspace Dropdown */}
+        {/* Workspace Dropdown - inline below the button when the sidebar is
+            expanded, a fixed flyout beside the rail when collapsed (fixed so
+            the inner wrapper's overflow-hidden cannot clip it). */}
         {wsOpen && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setWsOpen(false)} />
             <div
-              className="absolute left-3 right-3 z-50 mt-1 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
-              style={{ borderColor: "var(--color-border)" }}
+              data-testid="workspace-menu"
+              className={`${
+                wsFlyout
+                  ? "anim-pop-in fixed w-64 overflow-y-auto"
+                  : "absolute left-3 right-3 mt-1"
+              } z-50 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg`}
+              style={{
+                borderColor: "var(--color-border)",
+                ...(wsFlyout
+                  ? {
+                      top: wsFlyout.top,
+                      left: wsFlyout.left,
+                      maxHeight: FLYOUT_MAX_H,
+                      transformOrigin: "top left",
+                    }
+                  : {}),
+              }}
             >
               {workspaces.map((ws) => {
                 const wsSync = wsSyncMap[ws.id];
@@ -566,7 +610,7 @@ export function Sidebar() {
                       <span className="block truncate">{ws.name}</span>
                       {ws.storage && ws.storage.total > 0 && (
                         <span className="block truncate text-[10px] leading-tight text-[var(--color-text-muted)]">
-                          {formatBytes(Math.max(0, ws.storage.total - ws.storage.used))} free of {formatBytes(ws.storage.total)}
+                          {formatBytes(Math.max(0, ws.storage.free ?? ws.storage.total - ws.storage.used))} free of {formatBytes(ws.storage.total)}
                         </span>
                       )}
                     </div>

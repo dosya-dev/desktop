@@ -77,7 +77,12 @@ function buildHandlers(e: SyncEngine): Record<EngineRpcMethod, (args: unknown[])
       e.resolveConflict(a[0] as string, a[1] as "keep-local" | "keep-remote" | "keep-both"),
     setAppVisible: (a) => e.setAppVisible(a[0] as boolean),
     notifyNetworkOnline: () => e.notifyNetworkOnline(),
+    notifySessionRefreshed: () => e.notifySessionRefreshed(),
     getFolderTree: (a) => e.getFolderTree(a[0] as string),
+    retryFileErrors: (a) => e.retryFileErrors(a[0] as string),
+    clearFileErrors: (a) => e.clearFileErrors(a[0] as string),
+    confirmPendingDeletion: (a) => e.confirmPendingDeletion(a[0] as string),
+    dismissPendingDeletion: (a) => e.dismissPendingDeletion(a[0] as string),
   };
 }
 

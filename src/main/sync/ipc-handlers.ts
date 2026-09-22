@@ -3,6 +3,7 @@ import { isAbsolute } from "path";
 import type { SyncEngineHandle } from "./engine-host";
 import type { SyncPair, SyncMode } from "./types";
 import { estimateFolder } from "./folder-estimate";
+import { hasPair } from "./status-assembly";
 
 const VALID_SYNC_MODES: SyncMode[] = ["two-way", "push", "push-safe", "pull", "pull-safe"];
 const VALID_CONFLICT_STRATEGIES = ["last-write-wins", "keep-both"];
@@ -161,6 +162,29 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
   });
 
   ipcMain.handle("sync:get-conflicts", () => engine.getConflicts());
+
+  /**
+   * A renderer that has been open across a pair removal can still name a pair
+   * that no longer exists. That is stale UI, not an error worth throwing at
+   * a button - log it and do nothing.
+   */
+  const withPair = (channel: string, run: (pairId: string) => unknown) =>
+    ipcMain.handle(channel, (_e, { pairId }) => {
+      assertString(pairId, "pairId");
+      if (!hasPair(engine.getStatus(), pairId)) {
+        console.warn(`[sync] ${channel}: no such sync folder (${pairId}) - ignoring`);
+        return;
+      }
+      return run(pairId);
+    });
+
+  // "N files not synced" pill actions (Contract 9).
+  withPair("sync:retry-file-errors", (pairId) => engine.retryFileErrors(pairId));
+  withPair("sync:clear-file-errors", (pairId) => engine.clearFileErrors(pairId));
+
+  // A large local deletion held back from the cloud: the user decides.
+  withPair("sync:confirm-pending-deletion", (pairId) => engine.confirmPendingDeletion(pairId));
+  withPair("sync:dismiss-pending-deletion", (pairId) => engine.dismissPendingDeletion(pairId));
 
   // Forward engine events to renderer
   function broadcast(channel: string, data: unknown): void {

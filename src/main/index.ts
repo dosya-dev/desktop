@@ -1,5 +1,6 @@
 // Patch fs to handle EMFILE (too many open files) gracefully - must run before anything touches fs.
 import { gracefulify } from "graceful-fs";
+import { launchedHidden, shouldShowOnReady } from "./window-show";
 import fs, { statSync } from "fs";
 gracefulify(fs);
 
@@ -27,6 +28,7 @@ import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { linuxProtocolInstallPlan } from "./linux-protocol";
 import { setupSession } from "./session";
 import { isUnexpectedSessionLoss } from "./session-events";
+import { isSessionCookieName, HOST_SESSION_COOKIE, LEGACY_SESSION_COOKIE } from "./session-cookie";
 import { originAllowed } from "./trusted-origins";
 import { createMenu } from "./menu";
 import { createTray } from "./tray";
@@ -203,14 +205,18 @@ function handleDosyaUrl(url: string): void {
       }
       pendingOAuthNonce = null; // single use
 
-      // Store the session cookie manually (same as login flow)
+      // Store the session cookie manually (same as login flow). Use the name
+      // the API trusts for this origin: the untossable __Host- cookie against
+      // https (prod), the plain name against http (dev, where __Host- - which
+      // requires Secure - is not allowed). `path: "/"` keeps the prefix valid.
       session.defaultSession.cookies.set({
         url: API_BASE,
-        name: "dosya_session",
+        name: API_BASE.startsWith("https:") ? HOST_SESSION_COOKIE : LEGACY_SESSION_COOKIE,
         value: token,
         httpOnly: true,
         secure: true,
         sameSite: "no_restriction",
+        path: "/",
         expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
       }).then(() => {
         // Pre-ready (cold start) there is no window yet and none is created
@@ -334,7 +340,15 @@ async function installLinuxProtocolHandler(): Promise<void> {
   }
 }
 
-function createWindow(): void {
+/**
+ * True when this process was started as a hidden login item. Decided once at
+ * startup; every later createWindow() (tray click, dock, deep link, reclaim
+ * recreate) is the user asking for the window and shows it.
+ */
+let startedHidden = false;
+
+function createWindow(opts: { showOnReady?: boolean } = {}): void {
+  const showOnReady = opts.showOnReady ?? true;
   // Reopen where the user left the window - reclaim recreates windows, so
   // without this every reopen-from-tray snapped back to 1200x800 centered.
   const stateDir = app.getPath("userData");
@@ -393,6 +407,10 @@ function createWindow(): void {
   if (savedMaximized) win.maximize();
 
   win.on("ready-to-show", () => {
+    // A hidden login launch stays in the tray (field report 2026-09-02,
+    // desktop #13); the window is created so the renderer and sync start,
+    // and memory reclaim tears it down again if nobody opens it.
+    if (!showOnReady) return;
     win.show();
     win.focus();
   });
@@ -596,7 +614,13 @@ if (!gotTheLock) {
     }
 
     createMenu();
-    createWindow();
+    {
+      let wasOpenedAsHidden: boolean | undefined;
+      try { wasOpenedAsHidden = app.getLoginItemSettings().wasOpenedAsHidden; } catch { wasOpenedAsHidden = undefined; }
+      startedHidden = launchedHidden({ argv: process.argv, wasOpenedAsHidden });
+      if (startedHidden) console.log("[app] Hidden launch (login item) - window stays in the tray");
+    }
+    createWindow({ showOnReady: shouldShowOnReady({ openedAsHidden: startedHidden }) });
     initAutoUpdater();
     installQuickAction();
 
@@ -632,6 +656,53 @@ if (!gotTheLock) {
           : new SyncEngineHost(API_BASE, join(__dirname, "engine.js"));
       registerSyncIpcHandlers(syncEngine);
 
+      // ── Troubleshooting (Settings) ─────────────────────────────────
+      // The escape hatches for "the app is in a bad state": a safe cache
+      // clear, and a full reset that deletes everything local and starts
+      // over. Registered here because the reset must stop the sync engine
+      // before deleting its data out from under it.
+      ipcMain.handle("app:clear-cache", async () => {
+        const ses = session.defaultSession;
+        await ses.clearCache();
+        await ses.clearCodeCaches({});
+        return { ok: true };
+      });
+
+      ipcMain.handle("app:factory-reset", async () => {
+        console.log("[reset] Factory reset requested from Settings");
+        try {
+          await syncEngine?.stop();
+        } catch (err) {
+          console.error("[reset] Engine stop failed, continuing:", err);
+        }
+        // Sync configuration and per-pair state - everything under
+        // <userData>/sync. Deleted while the engine is stopped so nothing
+        // rewrites it on the way down.
+        try {
+          await fs.promises.rm(join(app.getPath("userData"), "sync"), {
+            recursive: true,
+            force: true,
+          });
+        } catch (err) {
+          console.error("[reset] Sync data removal failed:", err);
+        }
+        const ses = session.defaultSession;
+        // Cookies included: a reset signs the user out by design.
+        try {
+          await ses.clearStorageData();
+        } catch (err) {
+          console.error("[reset] Storage clear failed:", err);
+        }
+        try {
+          await ses.clearCache();
+        } catch {}
+        // The harness cannot track a relaunched instance - it would outlive
+        // the test run as an orphan - so test runs stop at quitting.
+        if (process.env.NODE_ENV !== "test") app.relaunch();
+        markQuitting();
+        app.exit(0);
+      });
+
       // Keep the OS from suspending the app mid-transfer (App Nap, timer
       // coalescing). Display sleep stays allowed - this only prevents app
       // suspension, so an unattended 12-hour sync actually runs for 12 hours.
@@ -657,6 +728,9 @@ if (!gotTheLock) {
       // The tray outlives any window generation, so it gets accessors that
       // recreate a reclaimed window instead of a reference that can go stale.
       createTray({ showWindow: showMainWindow, sendToWindow }, syncEngine);
+      // A window that was never shown never fires "show", so the pollers
+      // would run at foreground cadence for a user who is not looking.
+      if (startedHidden) syncEngine.setAppVisible(false);
       // Sync must not start before the renderer has painted: state loading,
       // snapshot fetch and reconcile all block the main thread's IPC and the
       // window would sit blank. This waited a flat 3s for that, which both
@@ -686,10 +760,21 @@ if (!gotTheLock) {
 
     // Watch for login/logout by monitoring the dosya_session cookie.
     // Start sync engine on login, stop on logout.
+    let lastSessionCookieValue: string | null = null;
     session.defaultSession.cookies.on("changed", (_event, cookie, cause, removed) => {
-      if (cookie.name !== "dosya_session" || !syncEngine) return;
+      if (!isSessionCookieName(cookie.name) || !syncEngine) return;
 
       if (removed) {
+        // A cookie overwrite arrives as removed(cause "overwrite") for the
+        // old value followed immediately by a set for the new one. That is a
+        // session REPLACEMENT (re-login, token refresh), not a logout.
+        // Stopping the engine here tore down every pair mid-flight and raced
+        // the restart against whatever the user did right after signing in -
+        // observed as "startPair skipped - engine not started" for a folder
+        // added just after re-login, which then never synced. The paired
+        // "set" event below decides what actually needs doing.
+        if (cause === "overwrite" || cause === "expired-overwrite") return;
+        lastSessionCookieValue = null;
         // Logout: stop the sync engine
         console.log(`[sync] Session cookie removed (${cause}) - stopping sync engine`);
         syncEngine.stop().catch(() => {});
@@ -705,10 +790,21 @@ if (!gotTheLock) {
         }
       } else if (!syncEngine.isRunning()) {
         // Login: start the sync engine
+        lastSessionCookieValue = cookie.value;
         console.log("[sync] Session cookie set - starting sync engine");
         syncEngine.start().catch((err) => {
           console.error("[sync] Failed to start after login:", err);
         });
+      } else if (cookie.value !== lastSessionCookieValue) {
+        // Re-login while the engine is running. A server-side revocation
+        // never removes the cookie - the renderer just starts seeing 401s -
+        // so no stop/start cycle happens here. Without this nudge the client
+        // rides out its 60s cookie cache and errored pairs wait for the 30s
+        // recovery timer, all while the user is looking at a signed-in app
+        // whose sync still says "Session expired. Please log in again."
+        lastSessionCookieValue = cookie.value;
+        console.log("[sync] Session cookie replaced - refreshing sync session");
+        syncEngine.notifySessionRefreshed();
       }
     });
 

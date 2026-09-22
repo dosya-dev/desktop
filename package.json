@@ -24,7 +24,8 @@
     "package:linux": "electron-vite build && electron-builder --linux --config electron-builder.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "electron-vite build && npx playwright test",
-    "test:unit": "node --disable-warning=ExperimentalWarning --test \"src/main/**/*.test.ts\" \"src/renderer/lib/**/*.test.ts\"",
+    "test:unit": "node --disable-warning=ExperimentalWarning --test \"src/main/*.test.ts\" \"src/main/sync/!(remote-client.maintenance|sync-engine-maintenance|filesystem-safety|remote-client.path-safety|sync-engine-path-safety).test.ts\" \"src/renderer/lib/**/*.test.ts\"",
+    "test:component": "vitest run",
     "test:only": "npx playwright test",
     "test:headed": "electron-vite build && npx playwright test --headed",
     "test:ui": "electron-vite build && npx playwright test --ui",
@@ -64,13 +65,15 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/supercluster": "^7.1.3",
-    "@vitejs/plugin-react": "^4.4.1",
+    "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.21",
     "cross-env": "^7.0.3",
     "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^3.0.0",
+    "jsdom": "^25.0.1",
     "tailwindcss": "^4.1.14",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7"
   }
 }

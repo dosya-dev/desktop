@@ -421,6 +421,37 @@ export class SyncIndex {
     return Number(res.changes);
   }
 
+  /** The TRUE number of failed files for a pair (the UI list is capped). */
+  countErrors(pairId: string): number {
+    const row = this.s("SELECT COUNT(*) AS n FROM file_errors WHERE pair_id = ?").get(pairId) as Row;
+    return Number(row.n);
+  }
+
+  /** Newest attempt first, at most `limit` rows - what the Sync page shows. */
+  listErrors(pairId: string, limit: number): SyncFileError[] {
+    const rows = this.s(
+      "SELECT * FROM file_errors WHERE pair_id = ? ORDER BY last_attempt_at DESC, rel_path ASC LIMIT ?",
+    ).all(pairId, limit) as Row[];
+    return rows.map((r) => SyncIndex.errorFromRow(r));
+  }
+
+  /**
+   * Put every failed file back on the retry ladder, permanent ones included.
+   * The rows stay (so the UI keeps showing them until they succeed and the
+   * executor clears them); only the counters that make the executors skip a
+   * file are reset. Returns rows touched.
+   */
+  resetErrorsForRetry(pairId: string): number {
+    const res = this.s("UPDATE file_errors SET retry_count = 0, permanent = 0 WHERE pair_id = ?").run(pairId);
+    return Number(res.changes);
+  }
+
+  /** Drop the whole ledger for a pair ("Clear" on the Sync page). Returns rows removed. */
+  clearErrors(pairId: string): number {
+    const res = this.s("DELETE FROM file_errors WHERE pair_id = ?").run(pairId);
+    return Number(res.changes);
+  }
+
   // ── pair meta ─────────────────────────────────────────────────────
 
   getPairMeta(pairId: string): PairMeta {

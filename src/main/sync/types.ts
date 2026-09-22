@@ -119,7 +119,11 @@ export type SyncPairStatus =
   | "paused"
   | "error"
   | "offline"
-  | "rate-limited";
+  | "rate-limited"
+  /** Held: a large local deletion is waiting for the user to confirm or
+   *  keep the cloud copies (see PendingDeletionStatus). Nothing syncs until
+   *  they decide. */
+  | "needs-confirmation";
 
 export type TransferDirection = "upload" | "download";
 
@@ -158,11 +162,44 @@ export interface SyncStatus {
   activeTransfers: ActiveTransfer[];
   unresolvedConflicts: SyncConflict[];
   recentLogs: SyncLogEntry[];
+  /** Files that failed to sync across every pair (Contract 9). The tray's
+   *  "All synced" is a lie whenever this is non-zero. */
+  fileErrorCount: number;
+  /** A platform switch has paused this surface - see remote-client.ts's
+   *  MaintenanceError and SyncEngine.setMaintenance. Cleared the same way an
+   *  offline pair clears: the next successful round trip proves the switch
+   *  is back on. */
+  maintenance?: boolean;
+}
+
+/** One failed file as the UI sees it (Contract 9). */
+export interface SyncFileErrorStatus {
+  path: string;
+  message: string;
+  /** True when retrying by itself will not help (permission, quota, or the
+   *  retry ladder ran out). The Sync page's Retry resets it. */
+  permanent: boolean;
+  /** Epoch ms of the last attempt. */
+  at: number;
+}
+
+/**
+ * A large local deletion the engine refused to mirror to the cloud until the
+ * user says so. Held in the runtime and surfaced on the pair's status; the
+ * Sync page renders the question and calls confirm/dismiss.
+ */
+export interface PendingDeletionStatus {
+  /** Files that disappeared locally and would be deleted from the cloud. */
+  count: number;
+  /** A few of their relative paths, for the banner. */
+  sample: string[];
+  /** Epoch ms when the deletion was held. */
+  heldAt: number;
 }
 
 /** A non-fatal, user-visible condition attached to a pair. */
 export interface SyncNotice {
-  kind: "degraded-watch" | "files-skipped" | "conflict-copy";
+  kind: "degraded-watch" | "files-skipped" | "conflict-copy" | "deletions-held";
   message: string;
 }
 
@@ -183,6 +220,14 @@ export interface SyncPairRuntimeStatus {
    * they had nowhere to surface and only ever reached a console warning.
    */
   notices: SyncNotice[];
+  /** Files that failed to sync, newest first, capped (see status-assembly). */
+  fileErrors: SyncFileErrorStatus[];
+  /** The TRUE number of failed files for this pair - the list above is capped. */
+  fileErrorCount: number;
+  /** Non-null while status is "needs-confirmation". */
+  pendingDeletion: PendingDeletionStatus | null;
+  /** Files still waiting to be transferred this cycle (queued ops, or the
+   *  batch remainder for the two-way executor). 0 when idle. */
   filesInQueue: number;
   /** Total files in the current batch operation (scan/reconcile). 0 when idle. */
   totalFilesInBatch: number;
@@ -220,6 +265,10 @@ export interface RemoteFileInfo {
   folder_id: string | null;
   updated_at: number;
   current_version: number;
+  /** The file's own modification time (unix seconds) as the uploader
+   *  declared it - applied to downloads so the date survives the round
+   *  trip. Absent or null when the server does not know it. */
+  source_modified_at?: number | null;
 }
 
 export interface RemoteFolderInfo {

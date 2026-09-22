@@ -1,6 +1,6 @@
 // Types mirror GET /api/workspace-dashboard (apps/api/src/lib/workspace-dashboard.ts).
 export interface DashboardSource {
-  kind: 'plan' | 'package' | 'custom' | 'referral';
+  kind: 'plan' | 'package' | 'custom' | 'license' | 'referral';
   label: string;
   bytes: number;
   meta: Record<string, unknown>;
@@ -38,7 +38,7 @@ export const WS_SEGMENT_COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#
 
 // Source-dot palette for the "where your space comes from" list.
 export const SOURCE_DOT: Record<string, string> = {
-  plan: '#3b82f6', package: '#8b5cf6', custom: '#f59e0b', referral: '#22c55e',
+  plan: '#3b82f6', package: '#8b5cf6', custom: '#f59e0b', license: '#ec4899', referral: '#22c55e',
 };
 
 /** Overall usage-bar color, matching the sidebar/billing thresholds. */

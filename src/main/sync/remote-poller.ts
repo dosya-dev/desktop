@@ -285,14 +285,13 @@ export class RemotePoller extends EventEmitter {
         // ADDITIVE set, not the authoritative full list - see the comment
         // there). Note where that safety ends: there is no folder-DELETION
         // consumer today (handleRemoteChanges/reconcile only ever CREATE
-        // local folders from a remote snapshot, never remove one), but that
-        // is not the same as having no on-disk effect. The map is still read
-        // for path building, and the reconciler resolves an unknown folder id
-        // to "" - so a file entry left pointing at a folder dropped here
-        // reroutes to the sync root, where it can surface as a spurious
-        // delete-remote or a download written to the wrong path. What keeps
-        // that from happening is that the same delta carries the matching
-        // file tombstones; anything that weakens that pairing breaks this.
+        // local folders from a remote snapshot, never remove one), but the
+        // map is still read for path building. A file entry left pointing at
+        // a folder dropped here has an UNKNOWN parent: remote-paths.ts leaves
+        // it out of the plan (a previously synced one keeps its last known
+        // path) and the engine records a retryable "parent folder not yet
+        // known" row - it is never rerouted to the sync root any more. The
+        // matching file tombstones in the same delta normally make this moot.
         for (const id of fast.deleted.folders) {
           this.cachedSnapshot.folders.delete(id);
         }

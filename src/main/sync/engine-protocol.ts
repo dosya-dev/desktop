@@ -41,13 +41,18 @@ export const ENGINE_RPC_METHODS = [
   "resolveConflict",
   "setAppVisible",
   "notifyNetworkOnline",
+  "notifySessionRefreshed",
   "getFolderTree",
+  "retryFileErrors",
+  "clearFileErrors",
+  "confirmPendingDeletion",
+  "dismissPendingDeletion",
 ] as const;
 
 export type EngineRpcMethod = (typeof ENGINE_RPC_METHODS)[number];
 
 /** The capabilities the child can only get by asking the parent for them. */
-export const HOST_METHODS = ["getSessionCookies", "resolveProxy"] as const;
+export const HOST_METHODS = ["getSessionCookies", "resolveProxy", "trashItem"] as const;
 export type HostMethod = (typeof HOST_METHODS)[number];
 
 /** The engine events the renderer subscribes to. Nothing else crosses. */

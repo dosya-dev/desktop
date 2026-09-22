@@ -1,5 +1,6 @@
-import { app, session } from "electron";
+import { app, session, shell } from "electron";
 import type { EnvProvider } from "./env-provider";
+import { HOST_SESSION_COOKIE, LEGACY_SESSION_COOKIE } from "../session-cookie";
 
 /**
  * The Electron-backed EnvProvider - the only place the transport's host
@@ -13,8 +14,17 @@ import type { EnvProvider } from "./env-provider";
 export function createElectronEnv(): EnvProvider {
   return {
     async getSessionCookies() {
-      const cookies = await session.defaultSession.cookies.get({ name: "dosya_session" });
-      return cookies.map((c) => ({ value: c.value, domain: c.domain ?? "" }));
+      // Both names: the __Host- cookie (prod) and the legacy one (dev / a
+      // session that predates the migration).
+      const [host, legacy] = await Promise.all([
+        session.defaultSession.cookies.get({ name: HOST_SESSION_COOKIE }),
+        session.defaultSession.cookies.get({ name: LEGACY_SESSION_COOKIE }),
+      ]);
+      return [...host, ...legacy].map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain ?? "",
+      }));
     },
 
     async resolveProxy(url: string): Promise<string | null> {
@@ -30,6 +40,10 @@ export function createElectronEnv(): EnvProvider {
       } catch {
         return null;
       }
+    },
+
+    async trashItem(absPath: string): Promise<void> {
+      await shell.trashItem(absPath);
     },
 
     get isDev(): boolean {

@@ -18,6 +18,10 @@ const electronAPI = {
   maximize: (): void => ipcRenderer.send("app:maximize"),
   close: (): void => ipcRenderer.send("app:close"),
 
+  // Troubleshooting (Settings)
+  clearAppCache: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("app:clear-cache"),
+  factoryReset: (): Promise<void> => ipcRenderer.invoke("app:factory-reset"),
+
   // Auth
   getApiBase: (): Promise<string> => ipcRenderer.invoke("auth:get-api-base"),
   clearSession: (): Promise<void> => ipcRenderer.invoke("auth:clear-session"),
@@ -41,12 +45,16 @@ const electronAPI = {
   openFile: (fileId: string, fileName: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke("file:open", { fileId, fileName }),
 
+  // `archiveEntryIndex` addresses one entry inside a stored zip by its
+  // central-directory index (never by name - that is what keeps traversal
+  // unreachable). Omitted, this downloads the file itself.
   downloadFile: (
     fileId: string,
     fileName: string,
     version?: number,
+    archiveEntryIndex?: number,
   ): Promise<{ ok: boolean; canceled?: boolean; path?: string }> =>
-    ipcRenderer.invoke("file:download", { fileId, fileName, version }),
+    ipcRenderer.invoke("file:download", { fileId, fileName, version, archiveEntryIndex }),
 
   downloadArchive: (
     fileIds: string[],
@@ -116,6 +124,10 @@ const electronAPI = {
   resolveConflict: (conflictId: string, resolution: string) => ipcRenderer.invoke("sync:resolve-conflict", { conflictId, resolution }),
   openSyncFolder: (pairId: string) => ipcRenderer.invoke("sync:open-sync-folder", { pairId }),
   getSyncConflicts: () => ipcRenderer.invoke("sync:get-conflicts"),
+  retryFileErrors: (pairId: string): Promise<void> => ipcRenderer.invoke("sync:retry-file-errors", { pairId }),
+  clearFileErrors: (pairId: string): Promise<void> => ipcRenderer.invoke("sync:clear-file-errors", { pairId }),
+  confirmPendingDeletion: (pairId: string): Promise<void> => ipcRenderer.invoke("sync:confirm-pending-deletion", { pairId }),
+  dismissPendingDeletion: (pairId: string): Promise<void> => ipcRenderer.invoke("sync:dismiss-pending-deletion", { pairId }),
   onSyncStatusChanged: (cb: (status: any) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, status: any) => cb(status);
     ipcRenderer.on("sync:status-changed", handler);

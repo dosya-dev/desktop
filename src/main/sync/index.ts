@@ -1,21 +1,33 @@
 import { EventEmitter } from "events";
 import { access, readdir, stat, statfs, unlink, mkdir } from "fs/promises";
 import { join, resolve, sep, basename, dirname } from "path";
-import { toRelPath, normalizeRel, pathKey, absKey, longPath, isPathWithinRoot } from "./paths";
+import { toRelPath, normalizeRel, pathKey, absKey, longPath } from "./paths";
+import { prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
 import { loadConfig, saveConfig, loadPairState, deletePairState, openSyncIndex, syncStateDir, setSyncDataDir } from "./config";
 import type { SyncIndex, PairMeta } from "./index-db";
 import { migrateJsonStateIfNeeded } from "./index-migrate";
 import { mergeStatusPairs } from "./status-merge";
+import { toFileErrorStatus, pendingFileCount, assembleSyncStatus, FILE_ERROR_LIST_CAP } from "./status-assembly";
 import { plan, filterOpsForMode, type BaseView, type LocalFile, type PlanOp } from "./planner";
 import { Backpressure } from "./async-queue";
 import type { QueuedOp } from "./index-db";
 import { forbiddenSyncRootReason } from "./system-paths";
 import { homedir, tmpdir, hostname } from "os";
-import { RemoteClient, RateLimitError } from "./remote-client";
+import { RemoteClient, RateLimitError, MaintenanceError } from "./remote-client";
 import { directConcurrencyFor } from "./transfer-concurrency";
 import { LocalWatcher, type WatchEvent, shouldIgnoreEntry, ignoreReason } from "./local-watcher";
 import { RemotePoller, type RemoteSnapshot } from "./remote-poller";
 import { reconcile, reconcileRemoteOnly } from "./reconciler";
+import {
+  collectLocalDeletions, deletionDecision, exceedsDeletionThreshold, removeLocalFile,
+  trackedSnapshot, deletionSuppressedNotice, type SuppressionReason,
+} from "./deletion-guard";
+import { applyDownloadedMtime, expectedVersionFor, isVersionConflict, shouldSendVersionGuard, sourceMtimeSeconds } from "./upload-metadata";
+import { OFFLINE_MESSAGE, isNetworkErrorMessage, isOfflineError } from "./network-errors";
+import {
+  buildRemotePaths, unknownParentError, isUnknownParentError,
+  resolveParentFolderId, missingParentError,
+} from "./remote-paths";
 import { hashFile } from "./hash";
 import { chunkFile } from "./chunker";
 import { blockTrackingApplies, shouldAttemptDelta, deltaIsWorthIt } from "./delta-eligibility";
@@ -39,6 +51,7 @@ import type {
   SyncFileRecord,
   SyncFolderRecord,
   SyncFileError,
+  PendingDeletionStatus,
 } from "./types";
 
 // ── Concurrency semaphore ───��───────────────────────────────────────
@@ -104,17 +117,6 @@ const DEGRADED_RESCAN_MS = 10 * 60 * 1000;
  * "EPERM: operation not permitted" contains "permitted", not "permission",
  * but EACCES messages do read "permission denied".
  */
-/**
- * Whether a pair's error message describes a connectivity failure - i.e. one
- * that resolves by itself once the network is back, so the pair should be
- * retried rather than left parked until the app restarts.
- */
-function isNetworkErrorMessage(message: string | null | undefined): boolean {
-  if (!message) return false;
-  return /\b(ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|EPIPE|EAI_AGAIN|UND_ERR|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_NAME_NOT_RESOLVED)\b/i.test(message)
-    || /\b(fetch failed|network error|socket hang up|request timed out)\b/i.test(message);
-}
-
 function isPermanentUploadError(message: string): boolean {
   if (/\b(EPERM|EACCES|EBUSY|ETXTBSY|EAGAIN|EMFILE|ENFILE)\b/.test(message)) return false;
   if (message.includes("quota")) return true;
@@ -146,6 +148,13 @@ interface PairRuntime {
   /** Non-fatal conditions surfaced to the UI, keyed by kind so a repeating
    *  condition updates its notice instead of stacking duplicates. */
   notices: Map<SyncNotice["kind"], SyncNotice>;
+  /**
+   * A large local deletion held back from the cloud until the user decides
+   * (status "needs-confirmation"). In-memory on purpose: if the app dies
+   * with the question open, the next start rescans and the cloud copies are
+   * simply kept - the safe default. See holdPendingDeletion().
+   */
+  pendingDeletion: PendingDeletion | null;
   /** Total files in the current batch operation (scan/reconcile). 0 when idle. */
   totalFilesInBatch: number;
   /** Files completed so far in the current batch. */
@@ -174,6 +183,14 @@ interface PairRuntime {
   lastProgressAt: number;
   /** Throttle for periodic "still scanning/fetching…" progress logs. */
   lastProgressLogAt: number;
+}
+
+/** A held local deletion: what would be removed from the cloud on confirm. */
+interface PendingDeletion {
+  files: { remoteId: string; localPath: string }[];
+  /** Tracked folder rel paths under the deleted trees, dropped with the files. */
+  folders: string[];
+  heldAt: number;
 }
 
 /** One file the push scan queued for upload. */
@@ -210,6 +227,11 @@ export class SyncEngine extends EventEmitter {
   private activeTransfers = new Set<ActiveTransfer>();
   private started = false;
   private conflicts: SyncConflict[] = [];
+
+  /** Set when a platform switch has paused this surface (see setMaintenance).
+   *  Cleared in clearOffline: the same recovery probe that proves the
+   *  network is back also proves the switch is back on. */
+  private maintenance = false;
 
   /** Paths recently written by download - watcher events for these are suppressed. */
   private recentDownloads = new Map<string, number>();
@@ -350,6 +372,19 @@ export class SyncEngine extends EventEmitter {
     };
   }
 
+  /**
+   * The base tree by remote id, straight from the index.
+   *
+   * `rt.state.files` is NOT this: loadPairState returns an empty map and every
+   * write goes through the index, so anything reading storedState.files sees
+   * nothing (fix round 1, F2).
+   */
+  private baseByIdFor(rt: PairRuntime): (remoteId: string) => SyncFileRecord | undefined {
+    const pairId = rt.pair.id;
+    const idx = this.index;
+    return (remoteId) => idx.getFileById(pairId, remoteId);
+  }
+
   /** Update pair-level markers in both the working copy and the index. */
   private putPairMeta(rt: PairRuntime, meta: Partial<PairMeta>): void {
     if (meta.lastRemotePollAt !== undefined) rt.state.lastRemotePollAt = meta.lastRemotePollAt;
@@ -364,8 +399,11 @@ export class SyncEngine extends EventEmitter {
    * Electron-backed implementation, so nothing changes today - but it is what
    * lets the engine eventually run somewhere Electron's APIs do not exist.
    */
+  private env: EnvProvider;
+
   constructor(private apiBase: string, env: EnvProvider = createElectronEnv()) {
     super();
+    this.env = env;
     // Point persistence at the host's data directory before anything opens a
     // file under it.
     if (env.userDataDir) setSyncDataDir(env.userDataDir);
@@ -606,7 +644,7 @@ export class SyncEngine extends EventEmitter {
       // RATE_LIMITED were ever retried, so losing wifi mid-sync parked the pair
       // in `error` until the user restarted the app - the single most common
       // failure there is also the one that used to need manual intervention.
-      else if (rt.status === "error" && isNetworkErrorMessage(rt.errorMessage)) {
+      else if (rt.status === "offline" || (rt.status === "error" && isNetworkErrorMessage(rt.errorMessage))) {
         try {
           await this.client.getWorkspaceRegion(rt.pair.workspaceId);
           this.log(pairId, "Connection restored - resuming sync");
@@ -633,6 +671,101 @@ export class SyncEngine extends EventEmitter {
       `${relPaths.length} file${relPaths.length === 1 ? " is" : "s are"} too large to sync and ${relPaths.length === 1 ? "was" : "were"} skipped. See Activity for the list.`);
   }
 
+  /**
+   * Remote files left out of this cycle because their folder is not in the
+   * snapshot (remote-paths.ts). Recorded as retryable ledger rows so the
+   * Sync page can show them; they used to be downloaded to the sync root.
+   */
+  private recordUnknownParents(rt: PairRuntime, files: RemoteFileInfo[]): void {
+    if (files.length === 0) return;
+    const now = Date.now();
+    for (const f of files) this.putError(rt, unknownParentError(f, now));
+    const shown = files.slice(0, 3).map((f) => `"${f.name}"`).join(", ");
+    this.log(rt.pair.id, `${files.length} file${files.length === 1 ? "" : "s"} waiting for a folder the server has not listed yet (${shown}${files.length > 3 ? ", ..." : ""}) - will retry next cycle`);
+    this.emitStatus();
+  }
+
+  /** The unknown-parent rows describe ONE snapshot; drop them before the next. */
+  private clearUnknownParentErrors(rt: PairRuntime): void {
+    for (const err of [...this.index.iterErrors(rt.pair.id)]) {
+      if (isUnknownParentError(err)) this.dropError(rt, err.filePath);
+    }
+  }
+
+  /**
+   * The pair cannot reach the server.
+   *
+   * `offline` has been in SyncPairStatus from the start and nothing ever
+   * assigned it: the poller's error handler recognised session expiry and
+   * rate limits and dropped everything else, so a machine with no network and
+   * no local changes sat at `idle` reporting "Synced" while the poller backed
+   * off in silence. Recovery is the same 30s loop that already retried
+   * network-parked pairs (checkRecovery), plus the OS "we are online again"
+   * signal.
+   */
+  private setOffline(rt: PairRuntime): void {
+    if (this.stopped || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
+    if (rt.status === "offline") return; // already said so - don't churn the log
+    rt.status = "offline";
+    rt.errorMessage = OFFLINE_MESSAGE;
+    rt.syncing = false;
+    this.log(rt.pair.id, "Lost the connection to dosya.dev - sync will resume by itself when it is back");
+    this.emitStatus();
+  }
+
+  /**
+   * A pair is leaving "offline" - whatever paused it (a real network outage
+   * or a platform switch) is over. Resets it to a working baseline and clears
+   * the engine-level maintenance flag.
+   *
+   * Round 3 fix: `this.maintenance` used to be cleared only inside
+   * clearOffline, but the DOMINANT recovery path - checkRecovery's periodic
+   * getWorkspaceRegion() probe - calls resumeAfterRecovery directly and never
+   * went through clearOffline, so the tray's "Sync paused - maintenance"
+   * could stay stuck until the app restarted even though the pair itself had
+   * plainly recovered. Both paths now go through here.
+   */
+  private leaveOffline(rt: PairRuntime): void {
+    rt.status = "idle";
+    rt.errorMessage = null;
+    this.maintenance = false;
+    this.emitStatus();
+  }
+
+  /** A successful round trip proves the connection is back. */
+  private clearOffline(rt: PairRuntime): void {
+    if (rt.status !== "offline") return;
+    this.log(rt.pair.id, "Connection restored");
+    this.leaveOffline(rt);
+  }
+
+  /**
+   * A platform switch has paused this surface. Reuses the offline pause and
+   * its recovery loop rather than inventing a new state: the next successful
+   * getWorkspaceRegion() probe (checkRecovery, or a snapshot arriving) calls
+   * clearOffline exactly as it would for a real network outage, and that is
+   * also where the maintenance flag is cleared.
+   */
+  private setMaintenance(rt: PairRuntime, message: string): void {
+    if (this.stopped || rt.status === "paused") return;
+    const errorMessage = `Paused for maintenance: ${message}`;
+    // Already said so - don't churn the log or re-emit on every failed poll
+    // during the maintenance window (mirrors setOffline's own guard above).
+    if (rt.status === "offline" && this.maintenance && rt.errorMessage === errorMessage) return;
+    rt.status = "offline"; // reuses the recovery loop: a successful probe clears it
+    rt.errorMessage = errorMessage;
+    rt.syncing = false;
+    this.maintenance = true;
+    this.log(rt.pair.id, `dosya.dev is paused for maintenance - sync will resume by itself (${message})`);
+    this.emitStatus();
+  }
+
+  /** Tell the user about deletions the safety valve withheld this cycle. */
+  private reportSuppressedDeletions(rt: PairRuntime, count: number, reason: SuppressionReason): void {
+    if (count <= 0) return;
+    this.addNotice(rt, "deletions-held", deletionSuppressedNotice(count, reason));
+  }
+
   /** Raise (or update) a non-fatal notice on a pair and push it to the UI. */
   private addNotice(rt: PairRuntime, kind: SyncNotice["kind"], message: string): void {
     const existing = rt.notices.get(kind);
@@ -644,11 +777,9 @@ export class SyncEngine extends EventEmitter {
   /** Put a pair that recovered from an error back to work. Distinct from the
    *  public resumePair(), which un-pauses a user-paused pair. */
   private resumeAfterRecovery(pairId: string, rt: PairRuntime): void {
-    rt.status = "idle";
-    rt.errorMessage = null;
+    this.leaveOffline(rt); // also clears the engine-level maintenance flag
     rt.watcher?.start();
     rt.poller?.start();
-    this.emitStatus();
     const mode = rt.pair.syncMode || "push-safe";
     if (["two-way", "push", "push-safe"].includes(mode)) {
       this.runInitialScan(pairId);
@@ -661,6 +792,22 @@ export class SyncEngine extends EventEmitter {
    * the moments when a parked pair is most likely to succeed.
    */
   notifyNetworkOnline(): void {
+    if (this.stopped) return;
+    void this.checkRecovery();
+  }
+
+  /**
+   * A new session cookie replaced the old one while the engine was running.
+   * A server-side revocation never REMOVES the cookie - the requests just
+   * start failing - so re-login arrives as an overwrite, with no stop/start
+   * cycle. Drop the client's cached cookie so the next request reads the
+   * fresh one instead of riding out the 60s cache TTL, then probe errored
+   * pairs now instead of waiting for the 30s recovery timer: the user is
+   * looking at a signed-in app while their pairs still say "Session
+   * expired. Please log in again."
+   */
+  notifySessionRefreshed(): void {
+    this.client.clearCookieCache();
     if (this.stopped) return;
     void this.checkRecovery();
   }
@@ -712,7 +859,13 @@ export class SyncEngine extends EventEmitter {
    * be silently discarded, not shown as sync failures.
    */
   private setError(rt: PairRuntime, message: string): void {
-    if (this.stopped || rt.status === "paused" || rt.status === "rate-limited") return;
+    if (this.stopped || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
+    // A connectivity failure is not a fault of this pair's: it has its own
+    // status, its own message, and a recovery loop that retries it.
+    if (isNetworkErrorMessage(message)) {
+      this.setOffline(rt);
+      return;
+    }
     rt.status = "error";
     rt.errorMessage = message;
   }
@@ -740,17 +893,74 @@ export class SyncEngine extends EventEmitter {
     }
   }
 
-  // ── Path safety ───────────────────────────────────────────────────
+  // ── Local removal (trash first) ───────────────────────────────────
 
   /**
-   * Returns true if relPath resolves inside syncRoot.
-   * Prevents path traversal attacks from malicious remote file names.
-   *
-   * Delegates to paths.ts so the rule is one exported, directly tested function
-   * rather than a private method no test can reach.
+   * Remove a local file the plan says is gone on the server. Trash first so a
+   * wrong decision is recoverable; unlink only when the trash refuses. The
+   * trash call is the env's (shell.trashItem in-process, a host RPC in the
+   * utility process); the unlink gets the long-path form Windows needs.
    */
-  private isPathSafe(syncRoot: string, relPath: string): boolean {
-    return isPathWithinRoot(syncRoot, relPath);
+  private async removeLocalFile(rt: PairRuntime, absPath: string): Promise<"trashed" | "unlinked" | "missing"> {
+    const relPath = toRelPath(rt.pair.localPath, absPath);
+    const safePath = await prepareSafeSyncPath(rt.pair.localPath, relPath, {
+      kind: "file", createParents: false, allowMissingParents: true,
+    });
+    if (safePath === null) return "missing";
+    return removeLocalFile(safePath, {
+      trash: (p) => this.env.trashItem(p),
+      unlink: (p) => unlink(longPath(p)),
+    });
+  }
+
+  // ── Path safety ───────────────────────────────────────────────────
+
+  private recordUnsafePath(rt: PairRuntime, relPath: string, error: UnsafeSyncPathError): void {
+    this.putError(rt, {
+      filePath: relPath,
+      error: error.message,
+      retryCount: 0,
+      lastAttemptAt: Date.now(),
+      permanent: false,
+    });
+    this.log(rt.pair.id, `Skipped unsafe sync path: ${relPath}`);
+  }
+
+  private recordLocalDeletionFailure(rt: PairRuntime, relPath: string, error: unknown): void {
+    if (error instanceof UnsafeSyncPathError) {
+      this.recordUnsafePath(rt, relPath, error);
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const existing = this.index.getError(rt.pair.id, relPath);
+    this.putError(rt, {
+      filePath: relPath,
+      error: `Could not remove local file: ${message}`,
+      retryCount: (existing?.retryCount ?? 0) + 1,
+      lastAttemptAt: Date.now(),
+      permanent: false,
+    });
+    console.error(`[sync] Could not remove local ${relPath}:`, message);
+  }
+
+  private async prepareDownloadTarget(rt: PairRuntime, relPath: string): Promise<{
+    absPath: string;
+    assertPathSafe: () => Promise<void>;
+  }> {
+    const absPath = await prepareSafeSyncPath(rt.pair.localPath, relPath, {
+      kind: "file", createParents: true,
+    });
+    return {
+      absPath,
+      assertPathSafe: async () => {
+        const checked = await prepareSafeSyncPath(rt.pair.localPath, relPath, {
+          kind: "file", createParents: false,
+        });
+        if (checked !== absPath) {
+          throw new UnsafeSyncPathError(relPath, "sync root changed during download");
+        }
+      },
+    };
   }
 
   // ── Path index helpers (O(1) lookups) ─────────────────────────────
@@ -819,6 +1029,7 @@ export class SyncEngine extends EventEmitter {
         rateLimitResumeTimer: null,
       rescanTimer: null,
       notices: new Map(),
+      pendingDeletion: null,
         totalFilesInBatch: 0,
         completedFilesInBatch: 0,
         totalBytesInBatch: 0,
@@ -921,6 +1132,7 @@ export class SyncEngine extends EventEmitter {
       rateLimitResumeTimer: null,
       rescanTimer: null,
       notices: new Map(),
+      pendingDeletion: null,
       totalFilesInBatch: 0,
       completedFilesInBatch: 0,
       totalBytesInBatch: 0,
@@ -945,14 +1157,23 @@ export class SyncEngine extends EventEmitter {
       // 2. Then start watcher + poller for ongoing changes
       if (poller) {
         poller.on("snapshot", (snapshot: RemoteSnapshot) => {
+          this.clearOffline(rt); // a snapshot arrived, so the server is reachable
           this.runReconcile(pair.id, snapshot);
         });
         poller.on("error", (err: Error) => {
           if (err.message === "SESSION_EXPIRED") {
             this.setError(rt, "Session expired. Please log in again.");
             this.emitStatus();
+          } else if (err instanceof MaintenanceError) {
+            this.setMaintenance(rt, err.message);
           } else if (isRateLimitError(err)) {
             this.pauseForRateLimit(rt, getRetryAfterMs(err));
+          } else if (isOfflineError(err)) {
+            // The poller backs off quietly on its own; without this the pair
+            // stayed "idle" and the tray kept saying everything was synced.
+            this.setOffline(rt);
+          } else {
+            this.log(pair.id, `Could not check the server for changes: ${err.message}`);
           }
         });
       }
@@ -1005,14 +1226,21 @@ export class SyncEngine extends EventEmitter {
       // ── Pull / pull-safe modes: poller handles downloads ─��
       if (poller && !needsLocalWatch) {
         poller.on("snapshot", (snapshot: RemoteSnapshot) => {
+          this.clearOffline(rt);
           this.handleRemoteChanges(pair.id, snapshot);
         });
         poller.on("error", (err: Error) => {
           if (err.message === "SESSION_EXPIRED") {
             this.setError(rt, "Session expired. Please log in again.");
             this.emitStatus();
+          } else if (err instanceof MaintenanceError) {
+            this.setMaintenance(rt, err.message);
           } else if (isRateLimitError(err)) {
             this.pauseForRateLimit(rt, getRetryAfterMs(err));
+          } else if (isOfflineError(err)) {
+            this.setOffline(rt);
+          } else {
+            this.log(pair.id, `Could not check the server for changes: ${err.message}`);
           }
         });
         poller.start();
@@ -1037,7 +1265,7 @@ export class SyncEngine extends EventEmitter {
     rt.rescanTimer = setInterval(() => {
       const cur = this.runtimes.get(pairId);
       if (!cur || this.stopped) return;
-      if (cur.status === "paused" || cur.status === "rate-limited" || cur.syncing) return;
+      if (cur.status === "paused" || cur.status === "rate-limited" || cur.status === "needs-confirmation" || cur.syncing) return;
       this.runInitialScan(pairId);
     }, DEGRADED_RESCAN_MS);
   }
@@ -1069,7 +1297,7 @@ export class SyncEngine extends EventEmitter {
 
   private async runReconcile(pairId: string, snapshot: RemoteSnapshot): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.syncing) return;
+    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.syncing) return;
 
     rt.syncing = true;
     rt.status = "syncing";
@@ -1085,21 +1313,27 @@ export class SyncEngine extends EventEmitter {
       const needsFullScan = rt.localDirty || Date.now() - rt.lastFullLocalScanAt > FULL_SCAN_INTERVAL;
 
       let actions: SyncAction[];
+      this.clearUnknownParentErrors(rt);
+      // Re-raised below if this cycle withholds deletions too.
+      rt.notices.delete("deletions-held");
       if (needsFullScan) {
         rt.statusText = "Scanning for changes...";
         this.emitStatus();
-        actions = await reconcile(rt.pair, rt.state, snapshot, (files, folders) => {
+        actions = await reconcile(rt.pair, rt.state, snapshot, this.baseByIdFor(rt), (files, folders) => {
           rt.scannedFiles = files;
           rt.scannedFolders = folders;
           this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
           this.emitStatus();
-        }, (skipped) => this.reportSkippedTooLarge(rt, skipped));
+        }, (skipped) => this.reportSkippedTooLarge(rt, skipped), (files) => this.recordUnknownParents(rt, files),
+           (count, reason) => this.reportSuppressedDeletions(rt, count, reason));
         rt.localDirty = false;
         rt.lastFullLocalScanAt = Date.now();
       } else {
         // Remote-only diff: only check for new/changed/deleted remote files
         // against stored state. No local filesystem walk.
-        actions = await reconcileRemoteOnly(rt.pair, rt.state, snapshot);
+        actions = await reconcileRemoteOnly(rt.pair, rt.state, snapshot, this.baseByIdFor(rt),
+          (files) => this.recordUnknownParents(rt, files),
+          (count, reason) => this.reportSuppressedDeletions(rt, count, reason));
       }
 
       await this.executeActions(rt, actions);
@@ -1176,8 +1410,15 @@ export class SyncEngine extends EventEmitter {
         if (action.type !== "create-local-folder") return;
         const folderPath = join(action.localDir, action.name);
         const relPath = toRelPath(rt.pair.localPath, folderPath);
-        if (!this.isPathSafe(rt.pair.localPath, relPath)) return;
-        await mkdir(longPath(folderPath), { recursive: true });
+        try {
+          await prepareSafeSyncPath(rt.pair.localPath, relPath, {
+            kind: "directory", createParents: true,
+          });
+          this.dropError(rt, relPath);
+        } catch (error) {
+          if (!(error instanceof UnsafeSyncPathError)) throw error;
+          this.recordUnsafePath(rt, relPath, error);
+        }
       }));
     }
 
@@ -1228,21 +1469,23 @@ export class SyncEngine extends EventEmitter {
             relPath = toRelPath(rt.pair.localPath, absPath);
           } else continue;
 
-          if (!this.isPathSafe(rt.pair.localPath, relPath)) continue;
           const dlErr = this.index.getError(rt.pair.id, relPath);
           if (dlErr?.permanent) continue;
           if (dlErr && dlErr.retryCount >= MAX_FILE_RETRIES) { this.putError(rt, { ...dlErr, permanent: true }); continue; }
 
           try {
-            await mkdir(longPath(dirname(absPath)), { recursive: true });
+            const destination = await this.prepareDownloadTarget(rt, relPath);
+            absPath = destination.absPath;
             const presigned = presignedMap.get(action.remoteFile.id);
             if (presigned) {
               // Direct download from R2 via presigned URL - no Worker proxy
               await this.client.downloadFromPresignedUrl(
-                presigned.url, absPath, action.remoteFile.size_bytes,
+                presigned.url, absPath, action.remoteFile.size_bytes, undefined,
+                destination.assertPathSafe,
               );
-              // Update state
-              const s = await stat(longPath(absPath));
+              // Give the file its real date (Contract 2), then record THAT
+              // mtime so the next scan does not read the touch as an edit.
+              const s = await applyDownloadedMtime(longPath(absPath), action.remoteFile.source_modified_at);
               this.markRecentDownload(absPath);
               this.putFile(rt, {
                 remoteId: action.remoteFile.id,
@@ -1264,6 +1507,10 @@ export class SyncEngine extends EventEmitter {
           } catch (dlE: any) {
             if (dlE.message === "SESSION_EXPIRED") { dlFatalErr = dlE; return; }
             if (isRateLimitError(dlE)) { dlFatalErr = dlE; return; }
+            if (dlE instanceof UnsafeSyncPathError) {
+              this.recordUnsafePath(rt, relPath, dlE);
+              continue;
+            }
             const prev = this.index.getError(rt.pair.id, relPath);
             this.putError(rt, {
               filePath: relPath, error: dlE.message,
@@ -1336,33 +1583,61 @@ export class SyncEngine extends EventEmitter {
         switch (action.type) {
           case "move-local": {
             const newRelPath = toRelPath(rt.pair.localPath, action.newLocalPath);
-            // newLocalPath is built from the REMOTE name (planner.ts's
-            // toRelPath: remoteFile.relPath), so it carries the same traversal
-            // risk as a download target and needs the same guard the other
-            // sinks already apply. Without it a remote rename to ".." moves a
-            // synced file out of the root - and the catch below would DOWNLOAD
-            // the remote file to that escaped path.
-            if (!this.isPathSafe(rt.pair.localPath, newRelPath)) {
-              this.log(rt.pair.id, `Skipped move to unsafe path: ${newRelPath}`);
+            const oldRelPath = toRelPath(rt.pair.localPath, action.oldLocalPath);
+            let oldPath: string;
+            try {
+              oldPath = await prepareSafeSyncPath(rt.pair.localPath, oldRelPath, {
+                kind: "file", createParents: false,
+              });
+            } catch (error) {
+              if (!(error instanceof UnsafeSyncPathError)) throw error;
+              this.recordUnsafePath(rt, oldRelPath, error);
+              break;
+            }
+            let newPath: string;
+            try {
+              newPath = await prepareSafeSyncPath(rt.pair.localPath, newRelPath, {
+                kind: "file", createParents: true,
+              });
+            } catch (error) {
+              if (!(error instanceof UnsafeSyncPathError)) throw error;
+              this.recordUnsafePath(rt, newRelPath, error);
               break;
             }
             try {
-              await mkdir(longPath(dirname(action.newLocalPath)), { recursive: true });
+              const checkedOld = await prepareSafeSyncPath(rt.pair.localPath, oldRelPath, {
+                kind: "file", createParents: false,
+              });
+              const checkedNew = await prepareSafeSyncPath(rt.pair.localPath, newRelPath, {
+                kind: "file", createParents: false,
+              });
+              if (checkedOld !== oldPath || checkedNew !== newPath) {
+                throw new UnsafeSyncPathError(newRelPath, "sync root changed during move");
+              }
               const { rename: fsRename } = await import("fs/promises");
-              await fsRename(longPath(action.oldLocalPath), longPath(action.newLocalPath));
+              await fsRename(longPath(oldPath), longPath(newPath));
               action.record.localPath = newRelPath;
               action.record.remoteName = action.remoteFile.name;
               action.record.remoteFolderId = action.remoteFile.folder_id;
-              this.markRecentDownload(action.newLocalPath);
-            } catch {
-              await mkdir(longPath(dirname(action.newLocalPath)), { recursive: true });
-              await this.downloadRemoteFile(rt, action.remoteFile, action.newLocalPath, newRelPath);
+              this.markRecentDownload(newPath);
+              this.dropError(rt, newRelPath);
+            } catch (error) {
+              if (error instanceof UnsafeSyncPathError) {
+                this.recordUnsafePath(rt, newRelPath, error);
+                break;
+              }
+              await this.downloadRemoteFile(rt, action.remoteFile, newPath, newRelPath);
             }
             break;
           }
           case "delete-local": {
-            await unlink(longPath(action.localPath)).catch(() => {});
-            this.dropFile(rt, action.record.remoteId);
+            try {
+              await this.removeLocalFile(rt, action.localPath);
+              this.dropFile(rt, action.record.remoteId);
+              this.dropError(rt, action.record.localPath);
+            } catch (error) {
+              this.recordLocalDeletionFailure(rt, action.record.localPath, error);
+            }
             break;
           }
           case "delete-remote": {
@@ -1372,39 +1647,7 @@ export class SyncEngine extends EventEmitter {
             break;
           }
           case "conflict": {
-            // A conflict is raised by the reconciler, which re-runs every poll
-            // cycle and re-reaches the same conclusion until the user resolves
-            // it. Re-adding the same file would stack an identical card every
-            // 30 seconds. Keep the first one - it holds the earliest
-            // detectedAt, and resolution acts on the path, not on the card.
-            const already = this.conflicts.some(
-              (c) => c.pairId === action.conflict.pairId && c.localPath === action.conflict.localPath,
-            );
-            if (already) break;
-            this.conflicts.push(action.conflict);
-            this.emit("conflict-detected", action.conflict);
-            console.log(`[sync] Conflict detected: ${action.conflict.remoteName}`);
-
-            // keep-both resolves itself: the local version is renamed to a
-            // conflict copy and uploaded alongside, and the server's version
-            // comes back down to the original path on the next cycle. Waiting
-            // for the user to click would leave the two versions diverging in
-            // the meantime, and the whole point of keep-both is that neither
-            // is thrown away. What happened is reported as a notice, so the
-            // second file in the folder is never a mystery.
-            if ((rt.pair.conflictStrategy || "keep-both") === "keep-both") {
-              const original = basename(action.conflict.localPath);
-              try {
-                await this.resolveConflict(action.conflict.id, "keep-both");
-                this.addNotice(rt, "conflict-copy",
-                  `"${original}" was changed in two places. Both versions were kept - look for a "conflict copy" beside it and delete the one you do not want.`);
-                this.log(rt.pair.id, `Kept both versions of "${original}" - it changed here and on the server`);
-              } catch (err: any) {
-                // resolveConflict re-queues the conflict on failure, so the
-                // user can still resolve it by hand.
-                console.error(`[sync] Automatic conflict copy failed for ${original}:`, err?.message ?? err);
-              }
-            }
+            await this.raiseConflict(rt, action.conflict);
             break;
           }
         }
@@ -1419,13 +1662,53 @@ export class SyncEngine extends EventEmitter {
     }
   }
 
+  /**
+   * Register a conflict and, for keep-both pairs, resolve it on the spot.
+   *
+   * Raised by the reconciler (which re-runs every poll and re-reaches the
+   * same conclusion until the user resolves it) and by an upload the server
+   * refused with 409 version_conflict. Re-adding the same file would stack an
+   * identical card every 30 seconds, so the first one is kept - it holds the
+   * earliest detectedAt, and resolution acts on the path, not on the card.
+   *
+   * keep-both resolves itself: the local version is renamed to a conflict
+   * copy and uploaded alongside, and the server's version comes back down to
+   * the original path on the next cycle. Waiting for the user to click would
+   * leave the two versions diverging in the meantime, and the whole point of
+   * keep-both is that neither is thrown away. What happened is reported as a
+   * notice, so the second file in the folder is never a mystery.
+   */
+  private async raiseConflict(rt: PairRuntime, conflict: SyncConflict): Promise<void> {
+    const already = this.conflicts.some(
+      (c) => c.pairId === conflict.pairId && c.localPath === conflict.localPath,
+    );
+    if (already) return;
+    this.conflicts.push(conflict);
+    this.emit("conflict-detected", conflict);
+    console.log(`[sync] Conflict detected: ${conflict.remoteName}`);
+
+    if ((rt.pair.conflictStrategy || "keep-both") === "keep-both") {
+      const original = basename(conflict.localPath);
+      try {
+        await this.resolveConflict(conflict.id, "keep-both");
+        this.addNotice(rt, "conflict-copy",
+          `"${original}" was changed in two places. Both versions were kept - look for a "conflict copy" beside it and delete the one you do not want.`);
+        this.log(rt.pair.id, `Kept both versions of "${original}" - it changed here and on the server`);
+      } catch (err: any) {
+        // resolveConflict re-queues the conflict on failure, so the
+        // user can still resolve it by hand.
+        console.error(`[sync] Automatic conflict copy failed for ${original}:`, err?.message ?? err);
+      }
+    }
+  }
+
   // ── Initial scan: upload all local files not yet tracked ──────────
 
   private async runInitialScan(pairId: string): Promise<void> {
     const rt = this.runtimes.get(pairId);
     // Also bail while stopped or paused: a trigger racing a logout/pause
     // must not flip the pair back to "syncing" mid-teardown.
-    if (!rt || this.stopped || rt.syncing || rt.status === "paused" || rt.status === "rate-limited") return;
+    if (!rt || this.stopped || rt.syncing || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
     console.log("[sync] runInitialScan:", pairId);
 
     // Check if the server still has sync enabled for this folder
@@ -1904,10 +2187,19 @@ export class SyncEngine extends EventEmitter {
       if (!record) { this.index.completeOp(e.queued.id, now()); continue; }
       try {
         const newName = op.toRelPath.split("/").pop()!;
-        const parentRelPath = op.toRelPath.split("/").slice(0, -1).join("/");
-        const targetFolderId = parentRelPath
-          ? (this.index.getFolder(pair.id, parentRelPath)?.remoteId ?? pair.remoteFolderId)
-          : pair.remoteFolderId;
+        // Same rule as the upload path: a move whose destination folder is
+        // not on the server yet is deferred, never redirected to the root.
+        const target = resolveParentFolderId(op.toRelPath, {
+          rootFolderId: pair.remoteFolderId,
+          folderIdFor: (p) => this.index.getFolder(pair.id, p)?.remoteId,
+        });
+        if (!target.known) {
+          this.putError(rt, missingParentError(op.toRelPath, target.parentRelPath, now(), this.index.getError(pair.id, op.toRelPath)));
+          this.log(pair.id, `Waiting to move "${op.fromRelPath}" - the folder "${target.parentRelPath}" is not on the server yet`);
+          this.index.failOp(e.queued.id, now(), false);
+          continue;
+        }
+        const targetFolderId = target.folderId;
         if (targetFolderId !== record.remoteFolderId) {
           await this.client.moveFile(op.remoteId, targetFolderId);
         }
@@ -2057,6 +2349,10 @@ export class SyncEngine extends EventEmitter {
     sizeBytes: number,
     existingFileId: string | null,
     remoteFolderId: string | null,
+    /** Contract 1, threaded through the delta door too (fix round 1, F1). */
+    expectedVersion: number | null,
+    /** Contract 2: the local mtime in unix seconds, from the caller's stat. */
+    sourceModifiedAt: number | null,
     // Same shape uploadFile returns, so the caller treats both identically.
   ): Promise<{ fileId: string; name: string; version?: number; updatedAt?: number } | null> {
     const pair = rt.pair;
@@ -2111,6 +2407,8 @@ export class SyncEngine extends EventEmitter {
         contentType: "application/octet-stream",
         ext,
         chunks: chunks.map((c) => ({ hash: c.hash, size: c.size })),
+        expectedVersion,
+        sourceModifiedAt,
       });
 
       // The chunk list we just proved is what the next delta diffs against.
@@ -2125,6 +2423,9 @@ export class SyncEngine extends EventEmitter {
       return { fileId: committed.fileId, name, version: committed.version };
     } catch (err: any) {
       if (err?.message === "SESSION_EXPIRED") throw err;
+      // A version conflict is an ANSWER, not a failure: falling back to the
+      // whole-file upload would re-ask the same question and 409 again.
+      if (isVersionConflict(err)) throw err;
       // Any other failure: say so once and let the normal upload handle it.
       console.error(`[sync] Delta upload failed for ${relPath}, sending whole file:`, err?.message ?? err);
       return null;
@@ -2443,23 +2744,72 @@ export class SyncEngine extends EventEmitter {
           if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
           const cChunk = uploaded.slice(cStart, cStart + COMMIT_BATCH);
+          // One stat per file, taken BEFORE the commit so its mtime can ride
+          // along as source_modified_at (Contract 2) and be reused for the
+          // record below - this loop used to stat after the commit instead.
+          const statsByPath = new Map<string, import("fs").Stats | null>();
+          for (const u of cChunk) {
+            const entry = mChunkByPath.get(u.relPath);
+            statsByPath.set(u.relPath, entry ? await stat(entry.absPath).catch(() => null) : null);
+          }
+          // A guard only makes sense when the manifest handed back the id we
+          // already track for that path - a fresh id is a create, and
+          // guarding it against our old file's version would be nonsense.
+          const guards = shouldSendVersionGuard({ conflictStrategy: pair.conflictStrategy, reason: "sync" });
+          const guardForCommit = (u: { relPath: string; fileId: string }): number | null => {
+            const base = this.index.getFileByPath(pair.id, u.relPath);
+            return expectedVersionFor({
+              baseVersion: base?.remoteVersion,
+              isUpdate: base?.remoteId === u.fileId,
+              sendGuard: guards,
+            });
+          };
           try {
             const commitRes = await this.client.commitUploads(
               pair.workspaceId,
               pair.region,
-              cChunk.map(u => ({
-                file_id: u.fileId,
-                r2_key: u.r2Key,
-                name: u.name,
-                size: u.size,
-                folder_id: u.folderId,
-                content_type: u.contentType,
-                ext: u.ext,
-              })),
+              cChunk.map(u => {
+                const st = statsByPath.get(u.relPath);
+                return {
+                  file_id: u.fileId,
+                  r2_key: u.r2Key,
+                  name: u.name,
+                  size: u.size,
+                  folder_id: u.folderId,
+                  content_type: u.contentType,
+                  ext: u.ext,
+                  source_modified_at: st ? sourceMtimeSeconds(st.mtimeMs) : null,
+                  expected_version: guardForCommit(u),
+                };
+              }),
             );
+
+            // A file the server refused as version_conflict is a decision for
+            // the planner, exactly as on the init path - not a failed upload.
+            for (const [fileId, currentVersion] of commitRes.conflicts) {
+              const u = cChunk.find((x) => x.fileId === fileId);
+              const base = this.index.getFileById(pair.id, fileId);
+              if (!u || !base) continue;
+              const abs = join(pair.localPath, u.relPath);
+              const st = statsByPath.get(u.relPath) ?? null;
+              this.log(pair.id, `"${u.relPath}" changed on the server since it was last synced (server version ${currentVersion ?? "?"}, ours ${base.remoteVersion}) - treating as a conflict`);
+              await this.raiseConflict(rt, {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+                pairId: pair.id,
+                localPath: abs,
+                remoteName: base.remoteName,
+                remoteId: fileId,
+                localMtimeMs: st?.mtimeMs ?? base.localMtimeMs,
+                remoteUpdatedAt: base.remoteUpdatedAt,
+                localSizeBytes: st?.size ?? base.localSizeBytes,
+                remoteSizeBytes: base.remoteSizeBytes,
+                detectedAt: Date.now(),
+              });
+            }
 
             // Update local state (prefer server-authoritative version/updated_at)
             for (const u of cChunk) {
+              if (commitRes.conflicts.has(u.fileId)) continue; // raised above
               // A refused file did NOT land (oversized, or the name is already
               // taken in that folder) - marking it synced here is how refusals
               // used to become phantoms that never retried and never surfaced.
@@ -2476,8 +2826,7 @@ export class SyncEngine extends EventEmitter {
                 });
                 continue;
               }
-              const entry = mChunkByPath.get(u.relPath);
-              const s = entry ? await stat(entry.absPath).catch(() => null) : null;
+              const s = statsByPath.get(u.relPath) ?? null;
               const srv = commitRes.results.get(u.fileId);
               this.putFile(rt, {
                 remoteId: u.fileId,
@@ -2580,7 +2929,7 @@ export class SyncEngine extends EventEmitter {
 
   private async handleLocalChanges(pairId: string, events: WatchEvent[]): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.status === "paused" || rt.status === "rate-limited") return;
+    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
 
     if (rt.syncing) {
       // Buffer events (deduped by path) to process AFTER the current sync so
@@ -2688,10 +3037,21 @@ export class SyncEngine extends EventEmitter {
         const existing = this.lookupByPath(rt, oldRel);
         if (!existing) continue;
 
-        const newParentRelPath = newRel.split("/").slice(0, -1).join("/");
-        const newFolderId = newParentRelPath
-          ? (this.index.getFolder(rt.pair.id, newParentRelPath)?.remoteId ?? rt.pair.remoteFolderId)
-          : rt.pair.remoteFolderId;
+        // A move into a folder the server does not have yet is deferred, not
+        // redirected to the sync root. Both paths stay in handledPaths, so the
+        // fall-through delete+re-upload does NOT run either: the remote copy
+        // stays where it is until the folder exists, rather than being deleted
+        // and re-uploaded to the wrong place.
+        const newParent = resolveParentFolderId(newRel, {
+          rootFolderId: rt.pair.remoteFolderId,
+          folderIdFor: (p) => this.index.getFolder(rt.pair.id, p)?.remoteId,
+        });
+        if (!newParent.known) {
+          this.putError(rt, missingParentError(newRel, newParent.parentRelPath, Date.now(), this.index.getError(rt.pair.id, newRel)));
+          this.log(rt.pair.id, `Waiting to move "${oldRel}" - the folder "${newParent.parentRelPath}" is not on the server yet`);
+          continue;
+        }
+        const newFolderId = newParent.folderId;
         const newFileName = newRel.split("/").pop()!;
 
         try {
@@ -2714,6 +3074,43 @@ export class SyncEngine extends EventEmitter {
           handledPaths.delete(oldRel);
           handledPaths.delete(newRel);
           moves.delete(oldRel);
+        }
+      }
+
+      // ── Mass-deletion valve (whole batch, before any delete is issued) ──
+      // Chokidar reports a vanished tree as one unlink per file and one
+      // unlinkDir per folder, in no fixed order; judging each event alone
+      // meant most of the cloud copies were already deleted one by one before
+      // a folder event could be looked at. Count what the WHOLE batch would
+      // delete first. Over the threshold - an unplugged drive, a lost mount,
+      // an accidental drag - the pair is held and the user decides.
+      {
+        const mode = rt.pair.syncMode || "push-safe";
+        if (mode === "two-way" || mode === "push") {
+          const deletionEvents = events
+            .filter((ev): ev is Extract<WatchEvent, { type: "unlink" | "unlinkDir" }> => ev.type === "unlink" || ev.type === "unlinkDir")
+            .map((ev) => ({ type: ev.type, relPath: toRelPath(rt.pair.localPath, ev.path) }))
+            .filter((ev) => !handledPaths.has(ev.relPath));
+          if (deletionEvents.length > 0) {
+            const pairId = rt.pair.id;
+            // ONE pass over the index for the whole batch. The callbacks
+            // this replaced each materialised every tracked file per call,
+            // so a 300-event batch over 5,000 files did ~1.5M row reads
+            // before deciding anything (fix round 1, F3).
+            const held = collectLocalDeletions(
+              deletionEvents,
+              trackedSnapshot(this.index.iterFiles(pairId), [...this.index.iterFolders(pairId)].map((f) => f.localPath)),
+            );
+            if (deletionDecision(held.files.length, this.index.countFiles(pairId)) === "confirm") {
+              // The rest of this batch (adds, edits) is deliberately NOT
+              // buffered: stopping the watcher drops its own debounced queue
+              // too, so a partial replay would be a half-truth. Both decision
+              // paths end in a full rescan instead, which re-derives every
+              // add, edit and rename from the disk - see resumeAfterDecision.
+              this.holdPendingDeletion(rt, held);
+              return;
+            }
+          }
         }
       }
 
@@ -2849,11 +3246,13 @@ export class SyncEngine extends EventEmitter {
       rt.syncing = false;
       this.emitStatus();
 
-      // Don't re-trigger scan if paused, stopped, rate-limited, or in error
+      // Don't re-trigger scan if paused, stopped, rate-limited, in error, or
+      // held for a deletion decision (the decision handlers replay instead).
       const canRescan = !this.stopped
         && (rt.status as SyncPairStatus) !== "paused"
         && (rt.status as SyncPairStatus) !== "rate-limited"
-        && (rt.status as SyncPairStatus) !== "error";
+        && (rt.status as SyncPairStatus) !== "error"
+        && (rt.status as SyncPairStatus) !== "needs-confirmation";
       if (rt.queuedSync && canRescan) {
         rt.queuedSync = false;
         if (rt.queuedOverflow || rt.queuedEvents.size === 0) {
@@ -2875,7 +3274,7 @@ export class SyncEngine extends EventEmitter {
 
   private async handleRemoteChanges(pairId: string, snapshot: RemoteSnapshot): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.syncing) return;
+    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.syncing) return;
 
     const mode = rt.pair.syncMode || "push-safe";
     if (!["pull", "pull-safe"].includes(mode)) return;
@@ -2887,30 +3286,14 @@ export class SyncEngine extends EventEmitter {
 
 
     try {
-      // Build path map from remote files
-      const folderPaths = new Map<string, string>();
-      // Cycle/depth guard: a corrupt or cyclic parent_id chain would otherwise
-      // recurse until the stack overflows (matches reconciler.buildRemotePaths).
-      const buildingFolder = new Set<string>();
-      const MAX_REMOTE_FOLDER_DEPTH = 100;
-      for (const [id] of snapshot.folders) {
-        const buildPath = (fid: string, depth: number): string => {
-          if (folderPaths.has(fid)) return folderPaths.get(fid)!;
-          if (buildingFolder.has(fid) || depth > MAX_REMOTE_FOLDER_DEPTH) return ""; // cycle or runaway depth
-          buildingFolder.add(fid);
-          const f = snapshot.folders.get(fid);
-          if (!f) return "";
-          if (!f.parent_id || f.parent_id === rt.pair.remoteFolderId) {
-            folderPaths.set(fid, f.name);
-            return f.name;
-          }
-          const parentPath = buildPath(f.parent_id, depth + 1);
-          const p = parentPath ? `${parentPath}/${f.name}` : f.name;
-          folderPaths.set(fid, p);
-          return p;
-        };
-        buildPath(id, 0);
-      }
+      // Build path map from remote files - the shared builder, so an unknown
+      // folder_id is reported rather than resolved to the sync root.
+      this.clearUnknownParentErrors(rt);
+      const { filePathMap, unknownParent } = buildRemotePaths(
+        snapshot.files, snapshot.folders, rt.pair.remoteFolderId, normalizeRel,
+      );
+      const unresolved: RemoteFileInfo[] = [];
+      const unknownIds = new Set(unknownParent.map((f) => f.id));
 
       // Guard disk space up-front - pull can otherwise fill the volume.
       let neededBytes = 0;
@@ -2925,33 +3308,31 @@ export class SyncEngine extends EventEmitter {
       // Download new/changed remote files
       for (const [remoteId, file] of snapshot.files) {
         if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
-        const folderId = file.folder_id;
-        let relDir = "";
-        if (folderId && folderId !== rt.pair.remoteFolderId) {
-          relDir = folderPaths.get(folderId) ?? "";
+        const existing = this.index.getFileById(rt.pair.id, remoteId);
+        // A file whose folder is not in this snapshot: keep a previously
+        // synced copy at its last known path (content may still update in
+        // place); a never-seen file waits for its folder.
+        const resolved = filePathMap.get(remoteId);
+        if (resolved === undefined || unknownIds.has(remoteId)) {
+          if (!existing) { unresolved.push(file); continue; }
         }
-        const relPath = normalizeRel(relDir ? `${relDir}/${file.name}` : file.name);
-
-        // FIX: Path traversal validation
-        if (!this.isPathSafe(rt.pair.localPath, relPath)) {
-          console.error("[sync] Path traversal blocked:", relPath);
-          continue;
-        }
+        const relPath = resolved ?? existing!.localPath;
 
         const absPath = join(rt.pair.localPath, relPath);
-        const existing = this.index.getFileById(rt.pair.id, remoteId);
-
-        if (!existing) {
-          await mkdir(longPath(dirname(absPath)), { recursive: true });
-          await this.downloadRemoteFile(rt, file, absPath, relPath);
-        } else if (
-          file.updated_at !== existing.remoteUpdatedAt ||
-          file.size_bytes !== existing.remoteSizeBytes
-        ) {
-          await this.downloadRemoteFile(rt, file, absPath, relPath);
+        if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
+          try {
+            await this.downloadRemoteFile(rt, file, absPath, relPath);
+          } catch (error) {
+            if (error instanceof UnsafeSyncPathError) {
+              this.recordUnsafePath(rt, relPath, error);
+              continue;
+            }
+            throw error;
+          }
         }
 
       }
+      if (unresolved.length > 0) this.recordUnknownParents(rt, unresolved);
 
       // Handle remote deletions (only in pull, not pull-safe).
       // Safety check: if the snapshot has significantly fewer files than stored
@@ -2963,24 +3344,29 @@ export class SyncEngine extends EventEmitter {
         const missingCount = [...this.index.iterFiles(rt.pair.id)].map((r) => r.remoteId).filter(id => !remoteIds.has(id)).length;
 
         // If more than 50% of tracked files are missing from the snapshot
-        // and there are more than 5 missing, assume the snapshot is incomplete.
-        const snapshotLooksIncomplete = storedCount > 10 && missingCount > 5 && missingCount > storedCount * 0.5;
+        // and there are more than 5 missing, assume the snapshot is incomplete
+        // (the same valve the reconciler and the watcher path use).
+        const snapshotLooksIncomplete = exceedsDeletionThreshold(missingCount, storedCount);
 
         if (snapshotLooksIncomplete) {
           console.warn(
             `[sync] Skipping pull deletions: ${missingCount}/${storedCount} files missing from snapshot. ` +
             `This likely indicates an incomplete remote snapshot.`,
           );
+          // Silently withholding work is the same defect as claiming work that
+          // did not happen - say so where the user can see it.
+          this.reportSuppressedDeletions(rt, missingCount, "over-threshold");
         } else {
           for (const [id, record] of [...this.index.iterFiles(rt.pair.id)].map((r) => [r.remoteId, r] as const)) {
             if (!remoteIds.has(id)) {
               const absPath = join(rt.pair.localPath, record.localPath);
               try {
-                await unlink(longPath(absPath));
+                const how = await this.removeLocalFile(rt, absPath);
                 this.dropFile(rt, id);
-                console.log(`[sync] Deleted local: ${record.localPath}`);
-              } catch {
-                this.dropFile(rt, id);
+                this.dropError(rt, record.localPath);
+                console.log(`[sync] Deleted local (${how}): ${record.localPath}`);
+              } catch (error) {
+                this.recordLocalDeletionFailure(rt, record.localPath, error);
               }
             }
           }
@@ -3059,6 +3445,8 @@ export class SyncEngine extends EventEmitter {
     relPath: string,
   ): Promise<void> {
     if (this.stopped) return;
+    const destination = await this.prepareDownloadTarget(rt, relPath);
+    absPath = destination.absPath;
     await this.transferSemaphore.acquire();
     if (this.stopped) { this.transferSemaphore.release(); return; }
 
@@ -3090,9 +3478,12 @@ export class SyncEngine extends EventEmitter {
             this.emitStatus();
           }
         },
+        destination.assertPathSafe,
       );
 
-      const s = await stat(longPath(absPath));
+      // The server's source mtime becomes the file's mtime (Contract 2); the
+      // fresh stat is what the record stores, so the touch is not an edit.
+      const s = await applyDownloadedMtime(longPath(absPath), file.source_modified_at);
 
       // Mark as recently downloaded to suppress watcher re-upload
       this.markRecentDownload(absPath);
@@ -3120,7 +3511,14 @@ export class SyncEngine extends EventEmitter {
 
   // ── Upload a single file ──────��───────────────────────────────────
 
-  private async uploadLocalFile(rt: PairRuntime, absPath: string, relPath: string): Promise<void> {
+  private async uploadLocalFile(
+    rt: PairRuntime,
+    absPath: string,
+    relPath: string,
+    /** "keep-local" = the user overruled the server, so send no version guard
+     *  (fix round 1, F4) - otherwise the retry 409s forever. */
+    opts: { reason?: "sync" | "keep-local" } = {},
+  ): Promise<void> {
     if (this.stopped) return;
     await this.transferSemaphore.acquire();
 
@@ -3137,11 +3535,24 @@ export class SyncEngine extends EventEmitter {
       const fileName = relPath.split("/").pop()!;
       const s = await stat(longPath(absPath));
 
-      // Find the remote folder ID for this file's parent directory
-      const parentRelPath = relPath.split("/").slice(0, -1).join("/");
-      const remoteFolderId = parentRelPath
-        ? (this.index.getFolder(rt.pair.id, parentRelPath)?.remoteId ?? rt.pair.remoteFolderId)
-        : rt.pair.remoteFolderId;
+      // The remote folder this file belongs in. An unknown parent used to
+      // resolve to the PAIR ROOT, so a large file under a directory whose
+      // remote folder was never created was written to the top of the sync
+      // folder - the same flattening the download side was fixed for, in the
+      // direction that writes to the user's cloud. Defer it instead; the next
+      // scan creates the folder tree first and this file then goes where it
+      // belongs. (uploadSmallFiles has always deferred; this is the path every
+      // large file and every watcher `add` event takes.)
+      const parent = resolveParentFolderId(relPath, {
+        rootFolderId: rt.pair.remoteFolderId,
+        folderIdFor: (p) => this.index.getFolder(rt.pair.id, p)?.remoteId,
+      });
+      if (!parent.known) {
+        this.putError(rt, missingParentError(relPath, parent.parentRelPath, Date.now(), this.index.getError(rt.pair.id, relPath)));
+        this.log(rt.pair.id, `Waiting to upload "${relPath}" - its folder "${parent.parentRelPath}" is not on the server yet`);
+        return;
+      }
+      const remoteFolderId = parent.folderId;
 
       const t: ActiveTransfer = {
         pairId: rt.pair.id,
@@ -3159,28 +3570,64 @@ export class SyncEngine extends EventEmitter {
       const existing = this.lookupByPath(rt, relPath);
       const existingFileId = existing?.remoteId ?? null;
 
-      // Send only the changed parts when that is possible and cheaper. Returns
-      // null for anything doubtful, and the proven whole-file path runs
-      // instead - an optimization may cost time, never data.
-      const delta = await this.tryDeltaUpload(rt, absPath, relPath, s.size, existingFileId, remoteFolderId);
+      // ONE decision, then it travels with whichever door the file takes.
+      const expectedVersion = expectedVersionFor({
+        baseVersion: existing?.record.remoteVersion,
+        isUpdate: existingFileId !== null,
+        sendGuard: shouldSendVersionGuard({
+          conflictStrategy: rt.pair.conflictStrategy,
+          reason: opts.reason ?? "sync",
+        }),
+      });
 
       let lastUploadEmit = 0;
-      const result = delta ?? await this.client.uploadFile(
-        absPath,
-        rt.pair.workspaceId,
-        remoteFolderId,
-        rt.pair.region,
-        existingFileId,
-        (bytes) => {
-          t.bytesTransferred = bytes;
-          const now = Date.now();
-          if (now - lastUploadEmit > 500) {
-            lastUploadEmit = now;
-            this.markProgress(rt); // bytes flowing = progress (keeps watchdog quiet)
-            this.emitStatus();
-          }
-        },
-      );
+      let result: { fileId: string; name: string; version?: number; updatedAt?: number };
+      try {
+        // Send only the changed parts when that is possible and cheaper.
+        // Returns null for anything doubtful, and the proven whole-file path
+        // runs instead - an optimization may cost time, never data. Inside
+        // the try because it reaches the server first and can therefore be
+        // the door that answers 409.
+        const delta = await this.tryDeltaUpload(rt, absPath, relPath, s.size, existingFileId, remoteFolderId, expectedVersion, sourceMtimeSeconds(s.mtimeMs));
+        result = delta ?? await this.client.uploadFile(
+          absPath,
+          rt.pair.workspaceId,
+          remoteFolderId,
+          rt.pair.region,
+          existingFileId,
+          (bytes) => {
+            t.bytesTransferred = bytes;
+            const now = Date.now();
+            if (now - lastUploadEmit > 500) {
+              lastUploadEmit = now;
+              this.markProgress(rt); // bytes flowing = progress (keeps watchdog quiet)
+              this.emitStatus();
+            }
+          },
+          // Contract 1: say which version this update replaces. The server
+          // answers 409 when the file moved on, and that is handled below as
+          // a conflict for the planner, not as a failed upload.
+          { expectedVersion },
+        );
+      } catch (err: any) {
+        if (isVersionConflict(err) && existing) {
+          this.log(rt.pair.id, `"${fileName}" changed on the server since it was last synced (server version ${err.currentVersion ?? "?"}, ours ${existing.record.remoteVersion}) - treating as a conflict`);
+          await this.raiseConflict(rt, {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            pairId: rt.pair.id,
+            localPath: absPath,
+            remoteName: existing.record.remoteName,
+            remoteId: existing.remoteId,
+            localMtimeMs: s.mtimeMs,
+            remoteUpdatedAt: existing.record.remoteUpdatedAt,
+            localSizeBytes: s.size,
+            remoteSizeBytes: existing.record.remoteSizeBytes,
+            detectedAt: Date.now(),
+          });
+          return;
+        }
+        throw err;
+      }
 
       // Re-stat after upload to get the actual mtime (file may have been modified during upload)
       const postStat = await stat(longPath(absPath)).catch(() => s);
@@ -3334,6 +3781,20 @@ export class SyncEngine extends EventEmitter {
   getStatus(): SyncStatus {
     const pairs: SyncPairRuntimeStatus[] = [];
     for (const [, rt] of this.runtimes) {
+      // The error ledger is exported here (Contract 9) instead of staying a
+      // private retry counter. Two cheap indexed queries per pair per tick;
+      // the list is capped, the count is exact.
+      let fileErrors: SyncPairRuntimeStatus["fileErrors"] = [];
+      let fileErrorCount = 0;
+      let queuedOps = 0;
+      try {
+        fileErrorCount = this.index.countErrors(rt.pair.id);
+        if (fileErrorCount > 0) fileErrors = toFileErrorStatus(this.index.listErrors(rt.pair.id, FILE_ERROR_LIST_CAP));
+        if (rt.syncing) queuedOps = this.index.countOpsByState(rt.pair.id, "pending") + this.index.countOpsByState(rt.pair.id, "running");
+      } catch (err: any) {
+        // A status read must never throw - the tray builds its menu from it.
+        console.error("[sync] status: could not read the error ledger:", err?.message ?? err);
+      }
       pairs.push({
         pairId: rt.pair.id,
         workspaceId: rt.pair.workspaceId,
@@ -3344,7 +3805,14 @@ export class SyncEngine extends EventEmitter {
         status: rt.status,
         lastSyncedAt: rt.state.lastFullSyncAt || null,
         errorMessage: rt.errorMessage,
-        filesInQueue: 0,
+        fileErrors,
+        fileErrorCount,
+        pendingDeletion: this.pendingDeletionStatus(rt),
+        filesInQueue: pendingFileCount({
+          queuedOps,
+          totalFilesInBatch: rt.totalFilesInBatch,
+          completedFilesInBatch: rt.completedFilesInBatch,
+        }),
         totalFilesInBatch: rt.totalFilesInBatch,
         completedFilesInBatch: rt.completedFilesInBatch,
         totalBytesInBatch: rt.totalBytesInBatch,
@@ -3358,7 +3826,7 @@ export class SyncEngine extends EventEmitter {
         notices: [...rt.notices.values()],
       });
     }
-    return {
+    return assembleSyncStatus({
       // Merge in configured pairs that have no runtime (engine not started,
       // pausedGlobally, or a startPair failure) so the UI can never disagree
       // with the duplicate-folder check, which reads the same config.
@@ -3367,7 +3835,147 @@ export class SyncEngine extends EventEmitter {
       activeTransfers: [...this.activeTransfers],
       unresolvedConflicts: this.conflicts,
       recentLogs: this.logs.slice(-50),
+      maintenance: this.maintenance,
+    });
+  }
+
+  /** The user-facing view of a held deletion, or null when nothing is held. */
+  private pendingDeletionStatus(rt: PairRuntime): PendingDeletionStatus | null {
+    const held = rt.pendingDeletion;
+    if (!held) return null;
+    return {
+      count: held.files.length,
+      sample: held.files.slice(0, 5).map((f) => f.localPath),
+      heldAt: held.heldAt,
     };
+  }
+
+  // ── Held local deletions (needs-confirmation) ──────────────────────
+
+  /**
+   * Park a large local deletion instead of mirroring it to the cloud. The
+   * watcher is stopped so nothing else acts on the vanished tree; the pair
+   * reports "needs-confirmation" with the count, and the Sync page asks.
+   */
+  private holdPendingDeletion(rt: PairRuntime, held: { files: { remoteId: string; localPath: string }[]; folders: string[] }): void {
+    // Exactly one hold can be open at a time: the watcher is stopped below and
+    // handleLocalChanges returns early while the pair is needs-confirmation,
+    // so no second batch can arrive to merge with this one.
+    rt.pendingDeletion = { files: held.files, folders: held.folders, heldAt: Date.now() };
+    rt.status = "needs-confirmation";
+    rt.errorMessage = null;
+    rt.watcher?.stop();
+    const n = rt.pendingDeletion.files.length;
+    this.log(rt.pair.id, `Paused: ${n.toLocaleString()} file${n === 1 ? "" : "s"} disappeared locally. Waiting for you to decide whether to delete them from the cloud too.`);
+    console.warn(`[sync] Holding ${n} local deletion(s) for pair ${rt.pair.id} - over the mass-deletion threshold`);
+    this.emitStatus();
+  }
+
+  /** "Delete them from the cloud too": apply the held deletion, then carry on. */
+  async confirmPendingDeletion(pairId: string): Promise<void> {
+    const rt = this.runtimes.get(pairId);
+    if (!rt) return;
+    const held = rt.pendingDeletion;
+    if (!held) return;
+    rt.pendingDeletion = null;
+    rt.status = "syncing";
+    rt.syncing = true; // keeps the rescan timer and poller out until this settles
+    rt.statusText = `Deleting ${held.files.length.toLocaleString()} files from the cloud...`;
+    this.emitStatus();
+    try {
+      await this.client.deleteFilesBatch(rt.pair.workspaceId, held.files.map((f) => f.remoteId));
+      for (const f of held.files) this.dropFile(rt, f.remoteId);
+      for (const rel of held.folders) this.dropFolder(rt, rel);
+      this.log(pairId, `Deleted ${held.files.length.toLocaleString()} file${held.files.length === 1 ? "" : "s"} from the cloud (removed locally)`);
+    } catch (err: any) {
+      // Nothing was dropped from the index, so the question can be asked
+      // again as-is once the cause (session, rate limit, network) clears.
+      rt.pendingDeletion = held;
+      rt.statusText = "";
+      rt.syncing = false;
+      if (err?.message === "SESSION_EXPIRED") {
+        rt.status = "needs-confirmation";
+        this.log(pairId, "Could not delete from the cloud: session expired. Sign in again, then retry.");
+      } else if (isRateLimitError(err)) {
+        rt.status = "needs-confirmation";
+        this.log(pairId, "Could not delete from the cloud: rate limit reached. Try again in a minute.");
+      } else {
+        rt.status = "needs-confirmation";
+        this.log(pairId, `Could not delete from the cloud: ${err?.message ?? err}`);
+      }
+      this.emitStatus();
+      throw err;
+    }
+    rt.statusText = "";
+    this.resumeAfterDecision(rt);
+  }
+
+  /** "Keep the cloud copies": forget the held deletion and rescan instead. */
+  async dismissPendingDeletion(pairId: string): Promise<void> {
+    const rt = this.runtimes.get(pairId);
+    if (!rt) return;
+    if (!rt.pendingDeletion) return;
+    const n = rt.pendingDeletion.files.length;
+    rt.pendingDeletion = null;
+    // The buffered adds/edits are covered by the full rescan below.
+    rt.queuedEvents.clear();
+    rt.queuedOverflow = false;
+    rt.queuedSync = false;
+    this.log(pairId, `Kept ${n.toLocaleString()} cloud cop${n === 1 ? "y" : "ies"} - the local deletion was not mirrored`);
+    this.resumeAfterDecision(rt);
+  }
+
+  /**
+   * Back to work after confirm/dismiss: watcher on, then a FULL rescan on
+   * both paths.
+   *
+   * Always a rescan, never a replay of buffered events: holding the pair
+   * stopped the watcher, and LocalWatcher.stop() clears its own debounced
+   * queue, so whatever was in flight at that moment is gone on both paths. A
+   * rescan re-derives all of it from what is actually on disk - which is also
+   * the only honest source after the user has just told us the disk changed
+   * in a way we did not expect.
+   */
+  private resumeAfterDecision(rt: PairRuntime): void {
+    rt.status = "idle";
+    rt.syncing = false;
+    rt.queuedEvents.clear();
+    rt.queuedOverflow = false;
+    rt.queuedSync = false;
+    // The tree changed under us; a remote-only fast pass would miss it.
+    rt.localDirty = true;
+    rt.lastFullLocalScanAt = 0;
+    rt.watcher?.start();
+    this.emitStatus();
+    const mode = rt.pair.syncMode || "push-safe";
+    if (mode === "two-way" && rt.poller) rt.poller.triggerNow();
+    else this.runInitialScan(rt.pair.id);
+  }
+
+  // ── File error ledger (Sync page "N files not synced" actions) ─────
+
+  /**
+   * Put every failed file for a pair back on the retry ladder - permanent
+   * ones included, which is the point: "permanent" only ever meant "stop
+   * retrying on your own", and the user asking IS the new information. Then
+   * run a sync so the retry happens now rather than at the next poll.
+   */
+  async retryFileErrors(pairId: string): Promise<void> {
+    const reset = this.index.resetErrorsForRetry(pairId);
+    if (reset > 0) this.log(pairId, `Retrying ${reset.toLocaleString()} file${reset === 1 ? "" : "s"} that failed to sync`);
+    this.emitStatus();
+    this.syncNow(pairId);
+  }
+
+  /**
+   * Drop the pair's error ledger. A cleared file is not skipped any more, so
+   * the next scan attempts it again from a fresh count - "Clear" is a
+   * dismissal of the list, not a promise never to touch those files.
+   */
+  async clearFileErrors(pairId: string): Promise<void> {
+    const cleared = this.index.clearErrors(pairId);
+    if (cleared > 0) this.log(pairId, `Cleared ${cleared.toLocaleString()} sync error${cleared === 1 ? "" : "s"}`);
+    this.emitStatus();
   }
 
   async addPair(pair: SyncPair): Promise<void> {
@@ -3517,6 +4125,13 @@ export class SyncEngine extends EventEmitter {
         clearTimeout(rt.rateLimitResumeTimer);
         rt.rateLimitResumeTimer = null;
       }
+      // A held deletion outlives a pause: resuming re-asks rather than
+      // silently applying or silently forgetting it.
+      if (rt.pendingDeletion) {
+        rt.status = "needs-confirmation";
+        this.emitStatus();
+        return;
+      }
       // No path index to rebuild any more - lookups read the index directly.
       rt.watcher?.start();
       rt.poller?.start();
@@ -3637,41 +4252,64 @@ export class SyncEngine extends EventEmitter {
     try {
       if (resolution === "keep-local") {
         const relPath = toRelPath(rt.pair.localPath, conflict.localPath);
-        await this.uploadLocalFile(rt, conflict.localPath, relPath);
+        const safePath = await prepareSafeSyncPath(rt.pair.localPath, relPath, {
+          kind: "file", createParents: false,
+        });
+        // The user chose the local copy over the server's. Sending the base
+        // record's (now stale) version would 409 again and the resolution
+        // would never take (fix round 1, F4).
+        await this.uploadLocalFile(rt, safePath, relPath, { reason: "keep-local" });
       } else if (resolution === "keep-remote") {
+        const relPath = toRelPath(rt.pair.localPath, conflict.localPath);
+        await prepareSafeSyncPath(rt.pair.localPath, relPath, {
+          kind: "file", createParents: false,
+        });
         // Delete local state so the next reconcile treats the remote file as new and downloads it.
         const existing = this.index.getFileById(rt.pair.id, conflict.remoteId);
         if (existing) {
-          // Delete the local file so the download doesn't think it's unchanged
-          await unlink(longPath(conflict.localPath)).catch(() => {});
+          // Remove the local file (to the trash, so "keep remote" is not a
+          // one-way door) so the download doesn't think it's unchanged.
+          await this.removeLocalFile(rt, conflict.localPath);
           this.dropFile(rt, conflict.remoteId);
+          this.dropError(rt, relPath);
         }
         // Trigger immediate poll instead of waiting up to 30s
         if (rt.poller) rt.poller.triggerNow();
       } else if (resolution === "keep-both") {
+        const originalRelPath = toRelPath(rt.pair.localPath, conflict.localPath);
+        const safeOriginal = await prepareSafeSyncPath(rt.pair.localPath, originalRelPath, {
+          kind: "file", createParents: false,
+        });
         // The copy's name has to say WHEN this forked and WHERE the other
         // version came from - that is what the user needs to pick a side.
         // Date alone collided on a fast edit-sync-edit cycle; the naming rules
         // (and the numbered tie-break) live in conflict-name.ts.
-        const dir = dirname(conflict.localPath);
+        const dir = dirname(safeOriginal);
         const copyName = conflictCopyName({
           fileName: basename(conflict.localPath),
           at: new Date(),
           device: hostname(),
           taken: (candidate) => existsSync(longPath(join(dir, candidate))),
         });
-        const conflictPath = join(dir, copyName);
+        const conflictRelPath = toRelPath(rt.pair.localPath, join(dirname(conflict.localPath), copyName));
+        const conflictPath = await prepareSafeSyncPath(rt.pair.localPath, conflictRelPath, {
+          kind: "file", createParents: false,
+        });
 
         const { rename: fsRename } = await import("fs/promises");
-        await fsRename(longPath(conflict.localPath), longPath(conflictPath));
+        await prepareSafeSyncPath(rt.pair.localPath, originalRelPath, { kind: "file", createParents: false });
+        await prepareSafeSyncPath(rt.pair.localPath, conflictRelPath, { kind: "file", createParents: false });
+        await fsRename(longPath(safeOriginal), longPath(conflictPath));
 
-        const conflictRelPath = toRelPath(rt.pair.localPath, conflictPath);
         await this.uploadLocalFile(rt, conflictPath, conflictRelPath);
       }
 
       console.log(`[sync] Conflict resolved (${resolution}): ${conflict.remoteName}`);
     } catch (err: any) {
       console.error(`[sync] Failed to resolve conflict: ${err.message}`);
+      if (err instanceof UnsafeSyncPathError) {
+        this.recordUnsafePath(rt, toRelPath(rt.pair.localPath, conflict.localPath), err);
+      }
       // Re-add conflict if resolution failed so user can retry
       this.conflicts.push(conflict);
       this.emitStatus();
@@ -3740,35 +4378,19 @@ export class SyncEngine extends EventEmitter {
       folders: new Map(fast.folders.map(f => [f.id, f] as const)),
     };
 
-    // Build folder path map
-    const folderPaths = new Map<string, string>();
-    // Cycle/depth guard: a corrupt or cyclic parent_id chain would otherwise
-    // recurse until the stack overflows (matches reconciler.buildRemotePaths).
-    const buildingFolder = new Set<string>();
-    const MAX_REMOTE_FOLDER_DEPTH = 100;
-    for (const [id] of snapshot.folders) {
-      const buildPath = (fid: string, depth: number): string => {
-        if (folderPaths.has(fid)) return folderPaths.get(fid)!;
-        if (buildingFolder.has(fid) || depth > MAX_REMOTE_FOLDER_DEPTH) return ""; // cycle or runaway depth
-        buildingFolder.add(fid);
-        const folder = snapshot.folders.get(fid);
-        if (!folder) return "";
-        const name = normalizeRel(folder.name);
-        if (!folder.parent_id || folder.parent_id === pair.remoteFolderId) {
-          folderPaths.set(fid, name);
-          return name;
-        }
-        const parentPath = buildPath(folder.parent_id, depth + 1);
-        const p = parentPath ? `${parentPath}/${name}` : name;
-        folderPaths.set(fid, p);
-        return p;
-      };
-      buildPath(id, 0);
-    }
+    // Build the path maps with the shared builder: a file whose folder is
+    // not in the snapshot is NOT adopted at the root - it stays untracked
+    // and is recorded, so the first real cycle handles it once the folder
+    // is known.
+    this.clearUnknownParentErrors(rt);
+    const { filePathMap, folderPathMap, unknownParent } = buildRemotePaths(
+      snapshot.files, snapshot.folders, pair.remoteFolderId, normalizeRel,
+    );
+    if (unknownParent.length > 0) this.recordUnknownParents(rt, unknownParent);
 
     // Pre-populate folder state
     for (const [id, f] of snapshot.folders) {
-      const relPath = folderPaths.get(id);
+      const relPath = folderPathMap.get(id);
       if (relPath) {
         this.putFolder(rt, {
           remoteId: id, remoteName: f.name, remoteParentId: f.parent_id,
@@ -3779,9 +4401,8 @@ export class SyncEngine extends EventEmitter {
 
     // Pre-populate file state with localMtimeMs=0 sentinel
     for (const [id, f] of snapshot.files) {
-      const dir = f.folder_id && f.folder_id !== pair.remoteFolderId
-        ? folderPaths.get(f.folder_id) ?? "" : "";
-      const relPath = normalizeRel(dir ? `${dir}/${f.name}` : f.name);
+      const relPath = filePathMap.get(id);
+      if (relPath === undefined) continue; // unknown parent - see above
       this.putFile(rt, {
         remoteId: id, remoteName: f.name, remoteFolderId: f.folder_id,
         remoteSizeBytes: f.size_bytes, remoteUpdatedAt: f.updated_at,
@@ -3848,13 +4469,16 @@ export class SyncEngine extends EventEmitter {
       // Run reconciler
       rt.statusText = "Scanning local files...";
       this.emitStatus();
-      const actions = await reconcile(rt.pair, rt.state, snapshot, (files, folders) => {
+      this.clearUnknownParentErrors(rt);
+      rt.notices.delete("deletions-held");
+      const actions = await reconcile(rt.pair, rt.state, snapshot, this.baseByIdFor(rt), (files, folders) => {
         rt.scannedFiles = files;
         rt.scannedFolders = folders;
         rt.statusText = `Scanning local files... ${files.toLocaleString()} files, ${folders.toLocaleString()} folders`;
         this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
         this.emitStatus();
-      }, (skipped) => this.reportSkippedTooLarge(rt, skipped));
+      }, (skipped) => this.reportSkippedTooLarge(rt, skipped), (files) => this.recordUnknownParents(rt, files),
+         (count, reason) => this.reportSuppressedDeletions(rt, count, reason));
 
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 

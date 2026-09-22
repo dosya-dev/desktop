@@ -1,12 +1,22 @@
-import { createReadStream, createWriteStream, readFileSync } from "fs";
-import { stat, readFile, writeFile as fsWriteFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
+import { constants, createReadStream, readFileSync } from "fs";
+import { lstat, open, stat, readFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
 import { basename, extname } from "path";
-import { randomBytes } from "crypto";
 import { Transform, type Readable } from "stream";
 import { longPath } from "./paths";
+import { UnsafeSyncPathError } from "./filesystem-safety";
 import type { EnvProvider } from "./env-provider";
+import { HOST_SESSION_COOKIE } from "../session-cookie";
 import { syncDir } from "./config";
 import { DEVICE_ID_HEADER, currentDeviceId, ensureDeviceId } from "./device-id";
+import {
+  buildChunksCommitBody,
+  buildCommitEntry,
+  buildUploadInitBody,
+  collectEntryVersionConflicts,
+  sourceMtimeHeaders,
+  sourceMtimeSeconds,
+  versionConflictFrom,
+} from "./upload-metadata";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
 import http from "http";
 import https from "https";
@@ -185,6 +195,24 @@ export class RateLimitError extends Error {
   }
 }
 
+/**
+ * Thrown when a platform switch has paused this surface: the API answers
+ * every gated request with HTTP 503 and `{ code: "surface_disabled" }`
+ * instead of the usual generic 5xx. Retrying on the normal backoff ladder
+ * cannot fix this, so it is rethrown immediately (see fetch()'s catch) rather
+ * than burning the 1s/3s/8s retry attempts on a condition that only clears
+ * when the switch is flipped back on.
+ */
+export class MaintenanceError extends Error {
+  readonly surface: string;
+
+  constructor(surface: string, message: string | null) {
+    super(message ?? "Paused for maintenance");
+    this.name = "MaintenanceError";
+    this.surface = surface;
+  }
+}
+
 /** Rate limit budget tracked from server response headers. */
 export interface RateBudget {
   remaining: number;
@@ -319,8 +347,10 @@ export class RemoteClient {
   }
 
   private async getSessionCookie(): Promise<string | null> {
-    // Return cached cookie if still fresh - avoids IPC round-trip per request.
-    // For a 10K-file sync this saves ~30K–40K async IPC calls.
+    // Returns a ready `name=value` Cookie pair - the API validates the exact
+    // name it issued (`__Host-dosya_session` in prod, `dosya_session` in dev),
+    // so the name must travel with the value. Cached to avoid an IPC round-trip
+    // per request; for a 10K-file sync this saves ~30K–40K async IPC calls.
     if (this.cachedCookie && Date.now() - this.cookieCachedAt < RemoteClient.COOKIE_CACHE_TTL) {
       return this.cachedCookie;
     }
@@ -328,31 +358,30 @@ export class RemoteClient {
     const apiHost = new URL(this.apiBase).hostname;
     const allSession = await this.env.getSessionCookies();
 
-    let value: string | null = null;
-
-    // Exact domain match
-    const exact = allSession.find(c => c.domain === apiHost);
-    if (exact) {
-      value = exact.value;
-    } else {
-      // Dot-prefixed domain match (e.g. ".dosya.dev" for https://dosya.dev)
-      const dotMatch = allSession.find(c => {
+    // Exact host match first, else a dot-suffix domain match
+    // (e.g. ".dosya.dev" for https://dosya.dev).
+    let pool = allSession.filter(c => c.domain === apiHost);
+    if (pool.length === 0) {
+      pool = allSession.filter(c => {
         if (!c.domain) return false;
         const bare = c.domain.replace(/^\./, "");
         return apiHost === bare || apiHost.endsWith(`.${bare}`);
       });
-      if (dotMatch) value = dotMatch.value;
     }
 
-    if (value) {
-      this.cachedCookie = value;
+    // Prefer the untossable __Host- cookie when the store holds both.
+    const chosen = pool.find(c => c.name === HOST_SESSION_COOKIE) ?? pool[0] ?? null;
+    const header = chosen ? `${chosen.name}=${chosen.value}` : null;
+
+    if (header) {
+      this.cachedCookie = header;
       this.cookieCachedAt = Date.now();
     } else {
       this.cachedCookie = null;
       this.cookieCachedAt = 0;
     }
 
-    return value;
+    return header;
   }
 
   // ── Core fetch for JSON API calls ─────────────────────────────────
@@ -391,7 +420,7 @@ export class RemoteClient {
     const deviceId = await ensureDeviceId(syncDir());
 
     const headers: Record<string, string> = {
-      Cookie: `dosya_session=${sessionCookie}`,
+      Cookie: sessionCookie,
       "X-Dosya-Sync": "1",
       "X-Dosya-Client": "desktop",
       [DEVICE_ID_HEADER]: deviceId,
@@ -424,7 +453,7 @@ export class RemoteClient {
             // FIX: Include cookie for same-host redirects (previously dropped)
             const isSameHost = rParsed.hostname === parsed.hostname;
             const rHeaders: Record<string, string> = {};
-            if (isSameHost) rHeaders.Cookie = `dosya_session=${sessionCookie}`;
+            if (isSameHost) rHeaders.Cookie = sessionCookie;
 
             // Redirect target may be a different host (e.g. R2) - resolve its
             // proxy independently rather than reusing the origin's agent.
@@ -518,6 +547,14 @@ export class RemoteClient {
           throw this.createRateLimitError(res.headers);
         }
 
+        // A platform switch, not a generic outage - never worth retrying.
+        if (res.status === 503) {
+          const body = await res.json().catch(() => null);
+          if (body && body.code === "surface_disabled") {
+            throw new MaintenanceError(String(body.surface ?? "desktop"), typeof body.message === "string" ? body.message : null);
+          }
+        }
+
         // Don't retry on client errors (4xx) - they won't change
         if (res.status >= 400 && res.status < 500) return res;
 
@@ -532,8 +569,9 @@ export class RemoteClient {
         return res;
       } catch (err: any) {
         lastErr = err;
-        // Don't retry auth/rate-limit errors
-        if (err instanceof RateLimitError) throw err;
+        if (err instanceof UnsafeSyncPathError) throw err;
+        // Don't retry auth/rate-limit/maintenance errors
+        if (err instanceof RateLimitError || err instanceof MaintenanceError) throw err;
         if (NON_RETRYABLE.has(err.message)) throw err;
 
         if (attempt < RETRY_DELAYS.length) {
@@ -557,6 +595,7 @@ export class RemoteClient {
     localPath: string,
     expectedSize: number = -1,
     onProgress?: (bytesTransferred: number) => void,
+    assertPathSafe?: () => Promise<void>,
   ): Promise<number> {
     localPath = longPath(localPath);
     const tmpPath = `${localPath}.dosya-sync-tmp`;
@@ -574,6 +613,7 @@ export class RemoteClient {
           localPath, tmpPath, metaPath, expectedSize,
           { cookie: sessionCookie, cookieHost: apiHostname },
           onProgress,
+          assertPathSafe,
         );
         return total;
       } catch (err: any) {
@@ -581,7 +621,9 @@ export class RemoteClient {
         // DON'T delete tmp file on retryable errors - we'll resume from it
         if (err instanceof RateLimitError) throw err;
         if (NON_RETRYABLE.has(err.message)) {
+          await assertPathSafe?.();
           await fsUnlink(tmpPath).catch(() => {});
+          await assertPathSafe?.();
           await fsUnlink(metaPath).catch(() => {});
           throw err;
         }
@@ -608,6 +650,43 @@ export class RemoteClient {
     return null;
   }
 
+  private async assertDownloadSidecars(
+    localPath: string,
+    tmpPath: string,
+    metaPath: string,
+    assertPathSafe?: () => Promise<void>,
+  ): Promise<void> {
+    await assertPathSafe?.();
+    for (const sidecar of [tmpPath, metaPath]) {
+      try {
+        const entry = await lstat(sidecar);
+        if (!entry.isFile() || entry.isSymbolicLink()) {
+          throw new UnsafeSyncPathError(localPath, "download sidecar is not a regular file");
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+
+  private async openDownloadSidecar(localPath: string, sidecar: string, flags: number) {
+    const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
+    let handle;
+    try {
+      handle = await open(sidecar, flags | noFollow, 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+        throw new UnsafeSyncPathError(localPath, "download sidecar became a symbolic link");
+      }
+      throw error;
+    }
+    if (!(await handle.stat()).isFile()) {
+      await handle.close();
+      throw new UnsafeSyncPathError(localPath, "download sidecar is not a regular file");
+    }
+    return handle;
+  }
+
   /**
    * Stream a URL to a temp file with SAFE HTTP Range resume, verify the size,
    * then atomically rename into place.
@@ -631,29 +710,39 @@ export class RemoteClient {
     expectedSize: number,
     ctx: { cookie?: string; cookieHost?: string },
     onProgress?: (bytes: number) => void,
+    assertPathSafe?: () => Promise<void>,
   ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const begin = async () => {
+        const assertSafe = () => this.assertDownloadSidecars(localPath, tmpPath, metaPath, assertPathSafe);
+        const unlinkSidecar = async (sidecar: string) => {
+          await assertPathSafe?.();
+          await fsUnlink(sidecar).catch(() => {});
+        };
+        await assertSafe();
         // Decide whether we can safely resume.
         let resumeFrom = 0;
         let validator: { etag?: string; lastModified?: string } | null = null;
         try {
           const tmpStat = await stat(tmpPath);
           if (tmpStat.isFile() && tmpStat.size > 0 && expectedSize > 0 && tmpStat.size < expectedSize) {
+            await assertSafe();
             validator = await this.readDownloadValidator(metaPath);
             if (validator) {
               resumeFrom = tmpStat.size;
             } else {
               // No validator - cannot prove the partial matches the current
               // remote content. Discard and start fresh.
-              await fsUnlink(tmpPath).catch(() => {});
+              await unlinkSidecar(tmpPath);
             }
           } else if (tmpStat.size >= expectedSize && expectedSize > 0) {
             // A "complete" tmp we can't verify by content - re-download to be safe.
-            await fsUnlink(tmpPath).catch(() => {});
-            await fsUnlink(metaPath).catch(() => {});
+            await unlinkSidecar(tmpPath);
+            await unlinkSidecar(metaPath);
           }
-        } catch { /* no tmp file - start from scratch */ }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
 
         const makeRequest = (url: string, redirectCount: number): void => {
           if (redirectCount > 5) { reject(new Error("Too many redirects")); return; }
@@ -662,7 +751,7 @@ export class RemoteClient {
           const reqLib = urlParsed.protocol === "https:" ? https : http;
           const headers: Record<string, string> = {};
           if (ctx.cookie && ctx.cookieHost && urlParsed.hostname === ctx.cookieHost) {
-            headers.Cookie = `dosya_session=${ctx.cookie}`;
+            headers.Cookie = ctx.cookie;
           }
           if (resumeFrom > 0 && validator) {
             headers.Range = `bytes=${resumeFrom}-`;
@@ -693,9 +782,9 @@ export class RemoteClient {
             // 416 - the partial is unusable (past end / range rejected). Reset and restart.
             if (status === 416) {
               res.resume();
-              fsUnlink(tmpPath).catch(() => {}).then(() => fsUnlink(metaPath).catch(() => {})).then(() => {
+              unlinkSidecar(tmpPath).then(() => unlinkSidecar(metaPath)).then(() => {
                 reject(new Error("Range not satisfiable - restarting download"));
-              });
+              }).catch(reject);
               return;
             }
             if (status >= 400) { res.resume(); reject(new Error(`Download failed: HTTP ${status}`)); return; }
@@ -717,9 +806,9 @@ export class RemoteClient {
               const totalOk = expectedSize < 0 || Number.isNaN(rangeTotal) || rangeTotal === expectedSize;
               if (!m || !startOk || !totalOk) {
                 res.resume();
-                fsUnlink(tmpPath).catch(() => {}).then(() => fsUnlink(metaPath).catch(() => {})).then(() => {
+                unlinkSidecar(tmpPath).then(() => unlinkSidecar(metaPath)).then(() => {
                   reject(new Error(`Resume range mismatch (Content-Range: "${contentRange}", expected start ${resumeFrom}) - restarting download`));
-                });
+                }).catch(reject);
                 return;
               }
               base = resumeFrom;
@@ -731,43 +820,60 @@ export class RemoteClient {
             const clHeader = res.headers["content-length"];
             const contentLength = typeof clHeader === "string" ? parseInt(clHeader, 10) : NaN;
 
-            // Persist a validator for a possible future resume of THIS content.
-            const etag = typeof res.headers.etag === "string" ? res.headers.etag : undefined;
-            const lm = typeof res.headers["last-modified"] === "string" ? res.headers["last-modified"] : undefined;
-            if (etag || lm) {
-              fsWriteFile(metaPath, JSON.stringify({ etag, lastModified: lm })).catch(() => {});
-            }
+            void (async () => {
+              await assertSafe();
+              // Persist the resume validator before streaming any bytes.
+              const etag = typeof res.headers.etag === "string" ? res.headers.etag : undefined;
+              const lm = typeof res.headers["last-modified"] === "string" ? res.headers["last-modified"] : undefined;
+              if (etag || lm) {
+                const metaHandle = await this.openDownloadSidecar(
+                  localPath, metaPath, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC,
+                );
+                try {
+                  await metaHandle.writeFile(JSON.stringify({ etag, lastModified: lm }));
+                } finally {
+                  await metaHandle.close();
+                }
+              }
 
-            const ws = createWriteStream(tmpPath, isResume ? { flags: "a" } : undefined);
-            let bytes = 0;
-            res.on("data", (chunk: Buffer) => { bytes += chunk.length; onProgress?.(base + bytes); });
-            // Throttle applies backpressure that slows the socket read → real
-            // download rate limit (no-op when the bucket is unlimited).
-            this.throttle(res, this.downloadBucket).pipe(ws);
-            ws.on("finish", async () => {
-              try {
-                const total = base + bytes;
-                // Short/truncated-transfer guard: `bytes` is what this response
-                // delivered; it must equal the advertised Content-Length.
-                if (!Number.isNaN(contentLength) && bytes !== contentLength) {
-                  await fsUnlink(tmpPath).catch(() => {});
-                  await fsUnlink(metaPath).catch(() => {});
-                  reject(new Error(`Download truncated: Content-Length ${contentLength}, received ${bytes}`));
-                  return;
-                }
-                if (expectedSize >= 0 && total !== expectedSize) {
-                  await fsUnlink(tmpPath).catch(() => {});
-                  await fsUnlink(metaPath).catch(() => {});
-                  reject(new Error(`Download size mismatch: expected ${expectedSize}, got ${total}`));
-                  return;
-                }
-                await fsRename(tmpPath, localPath);
-                await fsUnlink(metaPath).catch(() => {});
-                resolve(total);
-              } catch (err) { reject(err as Error); }
-            });
-            ws.on("error", (err) => { res.destroy(); reject(err); });
-            res.on("error", (err) => { ws.destroy(); reject(err); });
+              await assertSafe();
+              const flags = isResume
+                ? constants.O_WRONLY | constants.O_APPEND
+                : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
+              const tmpHandle = await this.openDownloadSidecar(localPath, tmpPath, flags);
+              const ws = tmpHandle.createWriteStream({ autoClose: true });
+              let bytes = 0;
+              res.on("data", (chunk: Buffer) => { bytes += chunk.length; onProgress?.(base + bytes); });
+              // Throttle applies backpressure that slows the socket read → real
+              // download rate limit (no-op when the bucket is unlimited).
+              this.throttle(res, this.downloadBucket).pipe(ws);
+              let streamFinished = false;
+              ws.on("finish", () => { streamFinished = true; });
+              ws.on("close", async () => {
+                if (!streamFinished) return;
+                try {
+                  const total = base + bytes;
+                  if (!Number.isNaN(contentLength) && bytes !== contentLength) {
+                    await unlinkSidecar(tmpPath);
+                    await unlinkSidecar(metaPath);
+                    reject(new Error(`Download truncated: Content-Length ${contentLength}, received ${bytes}`));
+                    return;
+                  }
+                  if (expectedSize >= 0 && total !== expectedSize) {
+                    await unlinkSidecar(tmpPath);
+                    await unlinkSidecar(metaPath);
+                    reject(new Error(`Download size mismatch: expected ${expectedSize}, got ${total}`));
+                    return;
+                  }
+                  await assertSafe();
+                  await fsRename(tmpPath, localPath);
+                  await unlinkSidecar(metaPath);
+                  resolve(total);
+                } catch (err) { reject(err as Error); }
+              });
+              ws.on("error", (err) => { res.destroy(); reject(err); });
+              res.on("error", (err) => { ws.destroy(err); });
+            })().catch((err) => { res.destroy(); reject(err); });
           });
 
           req.on("timeout", () => { req.destroy(); reject(new Error("Download timed out")); });
@@ -796,22 +902,24 @@ export class RemoteClient {
     region: string,
     fileId?: string | null,
     onProgress?: (bytesTransferred: number) => void,
+    opts: {
+      /** Contract 1: the base record's remote version this update replaces.
+       *  A 409 version_conflict surfaces as VersionConflictError. */
+      expectedVersion?: number | null;
+    } = {},
   ): Promise<{ fileId: string; name: string; version?: number; updatedAt?: number }> {
     const fileName = basename(localPath);
     localPath = longPath(localPath);
     const fileStat = await stat(localPath);
     const ext = extname(fileName).slice(1).toLowerCase();
     const mimeType = MIME_MAP[ext] || "application/octet-stream";
+    // Contract 2: the file's own mtime rides on the byte-carrying request.
+    const mtimeHeaders = sourceMtimeHeaders(fileStat.mtimeMs);
 
-    const initBody: Record<string, unknown> = {
-      workspace_id: workspaceId,
-      file_name: fileName,
-      file_size: fileStat.size,
-      mime_type: mimeType,
-      folder_id: folderId,
-      region,
-    };
-    if (fileId) initBody.file_id = fileId;
+    const initBody = buildUploadInitBody({
+      workspaceId, fileName, fileSize: fileStat.size, mimeType, folderId, region,
+      fileId, expectedVersion: opts.expectedVersion,
+    });
 
     const initRes = await this.fetch("/api/upload/init", {
       method: "POST",
@@ -821,6 +929,10 @@ export class RemoteClient {
 
     if (initRes.status === 401) throw new Error("SESSION_EXPIRED");
     const initData = await initRes.json();
+    // Someone else wrote a newer version since we last synced this file. Not
+    // an error to retry - the planner has to decide (conflict / keep-both).
+    const conflict = versionConflictFrom(initRes.status, initData);
+    if (conflict) throw conflict;
     if (!initData.ok) throw new Error(initData.error || "Upload init failed");
 
     const sessionId = initData.session_id;
@@ -917,7 +1029,7 @@ export class RemoteClient {
         try {
           const completeRes = await this.fetch(
             `/api/upload/${sessionId}/complete`,
-            { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+            { method: "POST", headers: { "Content-Type": "application/json", ...mtimeHeaders }, body: "{}" },
           );
           if (completeRes.status === 401) throw new Error("SESSION_EXPIRED");
           const completeData = await completeRes.json();
@@ -957,6 +1069,8 @@ export class RemoteClient {
           fileStat.size,
           sessionCookie,
           onProgress,
+          undefined,
+          mtimeHeaders,
         );
 
         if (!result.ok) throw new Error(result.error || "Upload failed");
@@ -1026,7 +1140,7 @@ export class RemoteClient {
         headers: {
           "Content-Type": "application/octet-stream",
           "Content-Length": String(length),
-          Cookie: `dosya_session=${cookie}`,
+          Cookie: cookie,
           "X-Dosya-Sync": "1",
           "X-Dosya-Client": "desktop",
           // Already resolved by the time any byte upload runs (every transfer
@@ -1077,108 +1191,18 @@ export class RemoteClient {
     });
   }
 
-  /** Batch size threshold: files smaller than this can be batched. */
-  static readonly BATCH_FILE_MAX = 5 * 1024 * 1024; // 5 MB
-  static readonly BATCH_MAX_FILES = 200;
-  /** Maximum total batch payload size to prevent OOM. */
-  static readonly BATCH_TOTAL_MAX = 50 * 1024 * 1024; // 50 MB
-
   /**
-   * Upload multiple small files in a single HTTP request.
-   * Uses multipart/form-data to bundle files + a JSON manifest.
-   * Returns an array of results matching the input order.
+   * Size threshold that splits the two upload strategies: at or below this a
+   * file goes through the presigned-manifest path (uploadSmallFiles), above
+   * it through the streaming path. Read by the engine.
+   *
+   * The multipart/form-data `uploadFilesBatch` that used to live here (and
+   * owned BATCH_MAX_FILES / BATCH_TOTAL_MAX) was removed in fix round 1: it
+   * had no callers left after the presigned manifest replaced it, so it was
+   * ~90 lines of untested request-building - including the only remaining use
+   * of /api/upload/batch from this client.
    */
-  async uploadFilesBatch(
-    files: { absPath: string; relPath: string; folderId: string | null; existingFileId: string | null }[],
-    workspaceId: string,
-    region: string,
-  ): Promise<{ fileId: string; name: string; relPath: string }[]> {
-    const sessionCookie = await this.getSessionCookie();
-    if (!sessionCookie) throw new Error("SESSION_EXPIRED");
-
-    // Verify total batch size won't exceed the cap to prevent OOM
-    let totalSize = 0;
-    for (const f of files) {
-      const s = await stat(f.absPath).catch(() => null);
-      totalSize += s?.size ?? 0;
-    }
-    if (totalSize > RemoteClient.BATCH_TOTAL_MAX) {
-      throw new Error(`Batch too large (${Math.round(totalSize / 1024 / 1024)} MB). Maximum is ${RemoteClient.BATCH_TOTAL_MAX / 1024 / 1024} MB.`);
-    }
-
-    // Build multipart/form-data manually using Node.js Buffers.
-    // We can't use FormData (it's a browser API) in the main process.
-    // Cryptographically random rather than time+Math.random(): a boundary that
-    // happens to occur inside a file's bytes silently corrupts the request, and
-    // the file contents here are arbitrary user data.
-    const boundary = `----DosyaBatch${randomBytes(16).toString("hex")}`;
-    const parts: Buffer[] = [];
-
-    const manifest = {
-      workspace_id: workspaceId,
-      region,
-      files: files.map((f, i) => ({
-        name: basename(f.absPath),
-        folder_id: f.folderId,
-        file_id: f.existingFileId,
-        field: `file_${i}`,
-      })),
-    };
-
-    // Manifest part
-    parts.push(Buffer.from(
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="manifest"\r\n` +
-      `Content-Type: application/json\r\n\r\n` +
-      JSON.stringify(manifest) + `\r\n`,
-    ));
-
-    // File parts
-    for (let i = 0; i < files.length; i++) {
-      const fileName = basename(files[i].absPath);
-      const fileData = await readFile(files[i].absPath);
-      parts.push(Buffer.from(
-        `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="file_${i}"; filename="${fileName}"\r\n` +
-        `Content-Type: application/octet-stream\r\n\r\n`,
-      ));
-      parts.push(fileData);
-      parts.push(Buffer.from(`\r\n`));
-    }
-
-    // Closing boundary
-    parts.push(Buffer.from(`--${boundary}--\r\n`));
-
-    const body = Buffer.concat(parts);
-
-    const res = await this.fetchOnce("/api/upload/batch", {
-      method: "POST",
-      headers: {
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-      },
-      body,
-      timeout: 120_000,
-    });
-
-    if (res.status === 401) throw new Error("SESSION_EXPIRED");
-    if (res.status === 429) throw this.createRateLimitError(res.headers);
-    this.updateBudget(res.headers);
-
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || "Batch upload failed");
-
-    const results: { fileId: string; name: string; relPath: string }[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const r = data.results?.[i];
-      if (r?.ok) {
-        results.push({ fileId: r.fileId, name: r.name, relPath: files[i].relPath });
-      } else {
-        throw new Error(r?.error || `Batch file ${i} failed`);
-      }
-    }
-
-    return results;
-  }
+  static readonly BATCH_FILE_MAX = 5 * 1024 * 1024; // 5 MB
 
   private streamUpload(
     path: string,
@@ -1187,6 +1211,7 @@ export class RemoteClient {
     cookie: string,
     onProgress?: (bytes: number) => void,
     signal?: AbortSignal,
+    extraHeaders: Record<string, string> = {},
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       const fullUrl = `${this.apiBase}${path}`;
@@ -1200,9 +1225,10 @@ export class RemoteClient {
         headers: {
           "Content-Type": "application/octet-stream",
           "Content-Length": String(fileSize),
-          Cookie: `dosya_session=${cookie}`,
+          Cookie: cookie,
           "X-Dosya-Sync": "1",
           "X-Dosya-Client": "desktop",
+          ...extraHeaders,
           // Already resolved by the time any byte upload runs (every transfer
           // is preceded by a manifest call through fetchOnce, which awaits it),
           // and omitted rather than awaited here because these headers are
@@ -1438,12 +1464,13 @@ export class RemoteClient {
     localPath: string,
     expectedSize: number,
     onProgress?: (bytes: number) => void,
+    assertPathSafe?: () => Promise<void>,
   ): Promise<number> {
     localPath = longPath(localPath);
     const tmpPath = `${localPath}.dosya-sync-tmp`;
     const metaPath = `${tmpPath}.meta`;
     // No cookie for presigned R2 URLs - they carry their own signed auth.
-    return this.downloadToFile(presignedUrl, localPath, tmpPath, metaPath, expectedSize, {}, onProgress);
+    return this.downloadToFile(presignedUrl, localPath, tmpPath, metaPath, expectedSize, {}, onProgress, assertPathSafe);
   }
 
   /** Fetch the current user's ID from /api/me. Returns null if not authenticated. */
@@ -1571,15 +1598,36 @@ export class RemoteClient {
   async commitUploads(
     workspaceId: string,
     region: string,
-    files: { file_id: string; r2_key: string; name: string; size: number; folder_id: string | null; content_type: string; ext: string | null }[],
-  ): Promise<{ committed: number; results: Map<string, { version: number; updatedAt: number }>; refused: Map<string, string> }> {
+    files: { file_id: string; r2_key: string; name: string; size: number; folder_id: string | null; content_type: string; ext: string | null; source_modified_at?: number | null; expected_version?: number | null }[],
+  ): Promise<{
+    committed: number;
+    results: Map<string, { version: number; updatedAt: number }>;
+    refused: Map<string, string>;
+    /** file id → the server's current version, for entries it refused as
+     *  version_conflict. The caller raises a conflict for each, exactly as
+     *  the init path does for a whole-response 409. */
+    conflicts: Map<string, number | null>;
+  }> {
     const res = await this.fetch("/api/sync/commit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace_id: workspaceId, region, files }),
+      body: JSON.stringify({
+        workspace_id: workspaceId,
+        region,
+        files: files.map((f) => buildCommitEntry({
+          fileId: f.file_id, r2Key: f.r2_key, name: f.name, size: f.size,
+          folderId: f.folder_id, contentType: f.content_type, ext: f.ext,
+          sourceModifiedAt: f.source_modified_at ?? null,
+          expectedVersion: f.expected_version,
+        })),
+      }),
     });
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
     const data = await res.json();
+    // A bulk endpoint answers 200 with per-file results, so both shapes have
+    // to be read: a whole-response 409 and per-entry version_conflict rows.
+    const wholeConflict = versionConflictFrom(res.status, data);
+    if (wholeConflict) throw wholeConflict;
     if (!data.ok) throw new Error(data.error || "Commit failed");
 
     // Capture server-authoritative version/updated_at when the endpoint
@@ -1599,7 +1647,14 @@ export class RemoteClient {
         if (r?.file_id) refused.set(r.file_id, String(r.error ?? "Refused by server"));
       }
     }
-    return { committed: data.committed ?? 0, results, refused };
+    // A version conflict is NOT a plain refusal: it is a decision for the
+    // planner, so it leaves the refused map and travels on its own.
+    const conflicts = new Map<string, number | null>([
+      ...collectEntryVersionConflicts(data.refused),
+      ...collectEntryVersionConflicts(rows),
+    ]);
+    for (const id of conflicts.keys()) refused.delete(id);
+    return { committed: data.committed ?? 0, results, refused, conflicts };
   }
 
   // ── Block-level delta sync (feature #3) ───────────────────────────
@@ -1706,24 +1761,22 @@ export class RemoteClient {
     contentType: string;
     ext: string | null;
     chunks: { hash: string; size: number }[];
+    /** Contract 1: the base record's remote version this update replaces. */
+    expectedVersion?: number | null;
+    /** Contract 2: the local file's mtime in unix seconds. */
+    sourceModifiedAt?: number | null;
   }): Promise<{ fileId: string; version: number; reusedChunks: number; uploadedChunks: number }> {
     const res = await this.fetch("/api/sync/chunks/commit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspace_id: opts.workspaceId,
-        region: opts.region,
-        file_id: opts.fileId,
-        folder_id: opts.folderId,
-        name: opts.name,
-        size: opts.size,
-        content_type: opts.contentType,
-        ext: opts.ext,
-        chunks: opts.chunks,
-      }),
+      body: JSON.stringify(buildChunksCommitBody(opts)),
     });
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
     const data = await res.json();
+    // The delta path reaches the server BEFORE /api/upload/init ever runs, so
+    // without this the guard covered the door least travelled (fix round 1).
+    const conflict = versionConflictFrom(res.status, data);
+    if (conflict) throw conflict;
     if (!data.ok) throw new Error(data.error || "chunks/commit failed");
     return {
       fileId: data.file_id,

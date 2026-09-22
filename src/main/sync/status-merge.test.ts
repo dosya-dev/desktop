@@ -99,3 +99,12 @@ test("synthesized entries carry every SyncPairRuntimeStatus field", () => {
   assert.equal(s.syncMode, "push-safe");
   assert.equal(s.statusText, "");
 });
+
+test("synthesized entries carry the truthful-status fields too (Contract 9)", () => {
+  // A placeholder pair has no runtime and therefore no ledger - but the shape
+  // must still be complete or the renderer's pill math reads undefined.
+  const s = synthesizePairStatus(pair(), false);
+  assert.deepEqual(s.fileErrors, []);
+  assert.equal(s.fileErrorCount, 0);
+  assert.equal(s.pendingDeletion, null);
+});

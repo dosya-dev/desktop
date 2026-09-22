@@ -26,6 +26,15 @@ const VIRTUAL_FS_ROOTS = new Set(["/proc", "/sys", "/dev", "/run"]);
 const IGNORED_PREFIXES = ["~$", ".~lock."];
 
 /**
+ * AppleDouble sidecars: macOS writes "._name" beside every file on volumes
+ * that cannot hold extended attributes (SMB, FAT, exFAT, many USB sticks).
+ * They are metadata about the user's file, not the file - syncing them
+ * scatters unreadable 4 KB files across every other device and they change
+ * on every Finder touch. Files only; a folder named "._x" is a real folder.
+ */
+const APPLEDOUBLE_PREFIX = "._";
+
+/**
  * Why an entry is excluded from sync, or null if it isn't.
  * Exported for the scanner so skips can be logged to the Activity tab with
  * their cause; shouldIgnoreEntry below is the boolean form.
@@ -53,6 +62,7 @@ export function ignoreReason(
       if (name.startsWith(prefix)) return "transient lock file";
     }
     if (name.endsWith("~")) return "editor backup file";
+    if (name.startsWith(APPLEDOUBLE_PREFIX)) return "AppleDouble metadata file";
   }
 
   if (isDirectory && absPath && VIRTUAL_FS_ROOTS.has(normalizeAbs(absPath))) {
@@ -172,6 +182,8 @@ export const CHOKIDAR_IGNORED = [
   "**/.~lock.*",
   // Editor backup files
   "**/*~",
+  // AppleDouble sidecars (see APPLEDOUBLE_PREFIX)
+  "**/._*",
   // Virtual filesystems (see VIRTUAL_FS_ROOTS): absolute paths only ever
   // match when the watched root actually contains them.
   "/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "/run", "/run/**",

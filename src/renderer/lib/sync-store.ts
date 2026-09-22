@@ -1,11 +1,27 @@
 import { create } from "zustand";
 import { queryClient } from "./query-client";
+import { LIBRARY_QUERY_ROOT } from "./library-request";
 import { syncJustSettled } from "./sync-settled";
 
 /** Mirrors SyncNotice in src/main/sync/types.ts. */
 export interface SyncNotice {
-  kind: "degraded-watch" | "files-skipped" | "conflict-copy";
+  kind: "degraded-watch" | "files-skipped" | "conflict-copy" | "deletions-held";
   message: string;
+}
+
+/** Mirrors SyncFileErrorStatus in src/main/sync/types.ts (Contract 9). */
+export interface SyncFileErrorStatus {
+  path: string;
+  message: string;
+  permanent: boolean;
+  at: number;
+}
+
+/** Mirrors PendingDeletionStatus in src/main/sync/types.ts. */
+export interface PendingDeletionStatus {
+  count: number;
+  sample: string[];
+  heldAt: number;
 }
 
 export interface SyncPairRuntimeStatus {
@@ -15,11 +31,16 @@ export interface SyncPairRuntimeStatus {
   remoteFolderName: string;
   localPath: string;
   syncMode: string;
-  status: "idle" | "syncing" | "paused" | "error" | "offline" | "rate-limited";
+  status: "idle" | "syncing" | "paused" | "error" | "offline" | "rate-limited" | "needs-confirmation";
   lastSyncedAt: number | null;
   errorMessage: string | null;
   /** Non-fatal conditions worth showing while the pair keeps working. */
   notices: SyncNotice[];
+  /** Files that failed to sync, newest first (capped); fileErrorCount is exact. */
+  fileErrors: SyncFileErrorStatus[];
+  fileErrorCount: number;
+  /** Non-null while status is "needs-confirmation". */
+  pendingDeletion: PendingDeletionStatus | null;
   filesInQueue: number;
   totalFilesInBatch: number;
   completedFilesInBatch: number;
@@ -69,6 +90,8 @@ export interface SyncStatus {
   activeTransfers: ActiveTransfer[];
   unresolvedConflicts: SyncConflict[];
   recentLogs: SyncLogEntry[];
+  /** Failed files across every pair (Contract 9). */
+  fileErrorCount: number;
 }
 
 interface SyncStore {
@@ -89,6 +112,7 @@ const EMPTY_STATUS: SyncStatus = {
   activeTransfers: [],
   unresolvedConflicts: [],
   recentLogs: [],
+  fileErrorCount: 0,
 };
 
 /** Cap on retained conflicts so a long session can't grow this unbounded. */
@@ -126,6 +150,10 @@ export const useSyncStore = create<SyncStore>((set) => ({
         // makes it the right seam to close that gap.
         if (syncJustSettled(useSyncStore.getState().status, s)) {
           void queryClient.invalidateQueries({ queryKey: ["files"] });
+          // Same gap for the library view (photos, videos, documents): a file pulled
+          // down by sync is in no folder listing the user is looking at, but it is in
+          // this one.
+          void queryClient.invalidateQueries({ queryKey: [LIBRARY_QUERY_ROOT] });
           void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
         }
         set({ status: s, loadFailed: false });

@@ -195,7 +195,7 @@ export function SignUpPage() {
               </button>
             </div>
             <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-              Must include uppercase, lowercase, number, and special character
+              At least 8 characters. A memorable passphrase works well.
             </p>
           </div>
 

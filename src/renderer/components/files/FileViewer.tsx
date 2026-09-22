@@ -9,7 +9,7 @@ import {
 import { toast } from "sonner";
 import { api } from "@/lib/api-client";
 import { fileRawUrl } from "@/lib/file-url";
-import { humanSize, extOf, isImage, isVideo, isAudio, isPdf, isVcard, isOfficeFile, isBook } from "@/lib/file-type";
+import { humanSize, extOf, isImage, isVideo, isAudio, isPdf, isVcard, isOfficeFile, isBook, isArchive } from "@/lib/file-type";
 import { isTextReadable, langFromExtension, looksBinary } from "@/lib/text-detect";
 import { parseCsvTable } from "@/lib/csv-table";
 import { parseMarkdown, type InlineToken, type MdBlock } from "@/lib/markdown";
@@ -20,6 +20,7 @@ import { TextFindBar } from "@/components/files/TextFindBar";
 import { VCardView } from "@/components/files/VCardView";
 import { OfficePreview } from "@/components/files/OfficePreview";
 import { BookViewer } from "@/components/files/BookViewer";
+import { ArchiveViewer } from "@/components/files/ArchiveViewer";
 import { AudioPlayer } from "@/components/files/audio/AudioPlayer";
 import { fileIconSrc } from "@/components/files/FileIcon";
 
@@ -80,9 +81,25 @@ function getThumbWindow(activeIdx: number, total: number) {
 /** Remembers whether the version panel is expanded, across files and launches. */
 const VERSIONS_OPEN_KEY = "dosya_viewer_versions_open";
 
-async function downloadViaDialog(file: ViewerFile, version?: number): Promise<void> {
+/**
+ * `archiveEntryIndex`/`archiveEntryName` are set only when this is downloading
+ * one entry out of a stored zip (ArchiveViewer's DownloadCard and its
+ * top-level "could not be opened" fallback) rather than the file itself - the
+ * entry's own name is what the save dialog should suggest, not the zip's.
+ */
+async function downloadViaDialog(
+  file: ViewerFile,
+  version?: number,
+  archiveEntryIndex?: number,
+  archiveEntryName?: string,
+): Promise<void> {
   try {
-    const res = await window.electronAPI.downloadFile(file.id, file.name, version);
+    const res = await window.electronAPI.downloadFile(
+      file.id,
+      archiveEntryName ?? file.name,
+      version,
+      archiveEntryIndex,
+    );
     if (res.canceled) return;
     if (res.ok && res.path) {
       const path = res.path;
@@ -193,6 +210,13 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Typing in a field must not drive the viewer. The archive pane's filter
+      // is the first place where arrow keys are the obvious way to fix a typo,
+      // and without this guard the left/right keys navigated to another file
+      // (closing the archive) and up/down changed the file's version. Same
+      // guard the web viewer's own handler carries.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.key === "Escape") { handleClose(); return; }
       if (e.key === "ArrowLeft" && hasPrev) onNavigate(files[idx - 1]);
       if (e.key === "ArrowRight" && hasNext) onNavigate(files[idx + 1]);
@@ -209,7 +233,21 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
     return () => { document.body.style.overflow = ""; };
   }, []);
 
-  const onDownload = useCallback(() => downloadViaDialog(file, previewVersion), [file, previewVersion]);
+  // Every other viewer in FileContent calls this with no arguments, downloading
+  // the file itself. ArchiveViewer is the one caller that passes an entry's
+  // index and name - `archiveEntryIndex` >= 0 is a real entry (0 is valid, so
+  // this cannot be a truthy check); -1 is its own sentinel for "not one entry,
+  // download the archive itself" (used by its top-level error card).
+  const onDownload = useCallback(
+    (archiveEntryIndex?: number, archiveEntryName?: string) => {
+      if (archiveEntryIndex !== undefined && archiveEntryIndex >= 0) {
+        void downloadViaDialog(file, previewVersion, archiveEntryIndex, archiveEntryName);
+      } else {
+        void downloadViaDialog(file, previewVersion);
+      }
+    },
+    [file, previewVersion],
+  );
 
   // ── Thumb strip ─────────────────────────────────────────
 
@@ -259,7 +297,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
               {versions.length}
             </button>
           )}
-          <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={onDownload} title="Download">
+          <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onDownload()} title="Download">
             <Download size={16} className="text-[var(--color-text-muted)]" />
           </button>
           <button className="ml-1 flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={handleClose} title="Close (Esc)">
@@ -272,8 +310,10 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
       <div className="flex min-h-0 flex-1">
         {/* File content */}
         {/* Audio owns the whole area - it is a surface, not an object sitting
-            on one - so it drops the centring and padding every other type wants. */}
-        <div className={`flex min-h-0 min-w-0 flex-1 bg-[var(--color-bg-secondary)] ${isAudio(file.name) ? "overflow-hidden" : "items-center justify-center overflow-auto p-6"}`}>
+            on one - so it drops the centring and padding every other type wants.
+            Archive joins it for the same reason: its own two-column layout
+            (tree + preview) is a surface, not an object sitting on one. */}
+        <div className={`flex min-h-0 min-w-0 flex-1 bg-[var(--color-bg-secondary)] ${isAudio(file.name) || isArchive(file.name) ? "overflow-hidden" : "items-center justify-center overflow-auto p-6"}`}>
           <FileContent file={file} files={files} rawUrl={rawUrl} version={previewVersion} onDownload={onDownload} onNavigate={onNavigate} />
         </div>
 
@@ -441,6 +481,13 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
     return <BookViewer file={file} />;
   }
 
+  // An archive is browsed, not rendered: the pane lists its entries and points
+  // the existing viewers at one entry at a time. After isBook on purpose -
+  // .cbz and .epub are zips too, and they already have a better home.
+  if (isArchive(file.name)) {
+    return <ArchiveViewer key={file.id} file={file} version={version} onDownload={onDownload} />;
+  }
+
   // Ahead of the text check: these are text with a better shape available
   // (same split the web and mobile viewers make). Both fall back to the
   // plain text viewer for degenerate content.
@@ -461,7 +508,7 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
       <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">{ext.toUpperCase() || "FILE"}</p>
       <p className="mb-5 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
       <button
-        onClick={onDownload}
+        onClick={() => onDownload()}
         className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
         style={{ background: "var(--color-primary)" }}
       >
@@ -550,7 +597,7 @@ function OversizeFallback({ file, onDownload, note }: { file: ViewerFile; onDown
       <p className="mb-2 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
       <p className="mb-5 text-xs text-[var(--color-text-muted)]">{note ?? `File too large to preview inline (${sizeStr}).`}</p>
       <button
-        onClick={onDownload}
+        onClick={() => onDownload()}
         className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
         style={{ background: "var(--color-primary)" }}
       >
@@ -582,7 +629,7 @@ function VideoPlayer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: s
           This app can't decode this video. Download it and open it in a player like VLC, which decodes everything.
         </p>
         <button
-          onClick={onDownload}
+          onClick={() => onDownload()}
           className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
           style={{ background: "var(--color-primary)" }}
         >

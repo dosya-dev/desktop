@@ -27,13 +27,26 @@ function reconcileAppearance(user: unknown): void {
   writeCache(pref);
 }
 
+/** A platform switch has paused this surface (503 + `surface_disabled`). */
+interface MaintenanceInfo {
+  surface: string;
+  message: string | null;
+}
+
 interface AuthState {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<LoginResult>;
   logout: () => Promise<void>;
-  refreshUser: () => Promise<void>;
+  /** Resolves true only when /api/me actually succeeded and `user` was set -
+   *  false on 401, on 503/surface_disabled, and on any other error. Callers
+   *  that need to know whether the surface is back (MaintenanceGate's
+   *  onRetry) MUST branch on this instead of assuming success from the
+   *  absence of a throw: this never throws, it swallows every error case. */
+  refreshUser: () => Promise<boolean>;
+  maintenance: MaintenanceInfo | null;
+  clearMaintenance: () => void;
 }
 
 interface LoginResult {
@@ -48,18 +61,34 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [maintenance, setMaintenance] = useState<MaintenanceInfo | null>(null);
+  const clearMaintenance = useCallback(() => setMaintenance(null), []);
 
-  const refreshUser = useCallback(async () => {
+  const refreshUser = useCallback(async (): Promise<boolean> => {
     try {
       const data = await api.get<{ user: User }>("/api/me");
       setUser(data.user);
+      // A successful round trip proves the surface is back - the same signal
+      // the sync engine's clearOffline uses to clear its own maintenance flag.
+      setMaintenance(null);
       reconcileAppearance(data.user);
+      return true;
     } catch (err) {
       // Only a confirmed 401 means "logged out". A transient error (network
       // blip, 5xx) must NOT force a logout - keep the current user as-is.
       if (err instanceof ApiError && err.status === 401) {
         setUser(null);
+      } else if (err instanceof ApiError && err.status === 503 && err.data.code === "surface_disabled") {
+        setMaintenance({
+          surface: String(err.data.surface ?? "desktop"),
+          message: typeof err.data.message === "string" ? err.data.message : null,
+        });
       }
+      // Every branch above (401, still-in-maintenance, or a plain transient
+      // error) means "did not succeed" - the caller must not treat this as
+      // "the surface is back". This never throws: MaintenanceGate's onRetry
+      // relies on the boolean, not on catching a rejection.
+      return false;
     }
   }, []);
 
@@ -80,6 +109,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (err instanceof ApiError && err.status === 401) {
             if (!cancelled) setUser(null);
             break; // definitively unauthenticated - no point retrying
+          }
+          if (err instanceof ApiError && err.status === 503 && err.data.code === "surface_disabled") {
+            setMaintenance({
+              surface: String(err.data.surface ?? "desktop"),
+              message: typeof err.data.message === "string" ? err.data.message : null,
+            });
+            if (!cancelled) setIsLoading(false);
+            break; // the maintenance screen takes over - no point retrying
           }
           // Transient: back off and retry (1s, 2s) before giving up.
           if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
@@ -181,6 +218,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         login,
         logout,
         refreshUser,
+        maintenance,
+        clearMaintenance,
       }}
     >
       {children}

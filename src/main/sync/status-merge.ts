@@ -26,6 +26,9 @@ export function synthesizePairStatus(pair: SyncPair, pausedGlobally: boolean): S
       ? null
       : 'This folder is set up but not syncing right now. Click "Sync now" or restart the app.',
     notices: [],
+    fileErrors: [],
+    fileErrorCount: 0,
+    pendingDeletion: null,
     filesInQueue: 0,
     totalFilesInBatch: 0,
     completedFilesInBatch: 0,
