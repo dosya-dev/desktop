@@ -3,7 +3,12 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { primeApiBase } from "./lib/api-client";
 import { applyTheme, readCache } from "./lib/theme";
+import { initSentryRenderer } from "./lib/sentry";
 import "./styles/index.css";
+
+// Before anything can throw: unhandled errors and rejections from here on are
+// captured and forwarded to the main process (see lib/sentry.ts).
+initSentryRenderer();
 
 // Apply the cached theme + mode to <html> synchronously, before any async
 // bootstrap or the first paint, so the app never flashes the default palette.

@@ -1,13 +1,52 @@
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { sentryVitePlugin } from "@sentry/vite-plugin";
+import { readFileSync } from "fs";
 import { resolve } from "path";
+import { releaseName } from "./src/main/telemetry-config";
+
+// Source maps go to Sentry only when the release workflow supplies a token
+// (never from a developer's ~/.sentryclirc by accident). Then, and only then,
+// each build emits hidden maps, uploads them keyed by debug id, and deletes
+// them again so nothing but the debug-id comment ships in the package. The
+// release name matches what src/main/telemetry.ts reports at runtime: the
+// workflow runs `npm version <input>` before building, so package.json is
+// exactly the version the app will announce.
+const SENTRY_UPLOAD = Boolean(process.env.SENTRY_AUTH_TOKEN);
+const { version: PKG_VERSION } = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8")) as { version: string };
+const sentryUpload = () =>
+  SENTRY_UPLOAD
+    ? [
+        sentryVitePlugin({
+          org: "dosya-pty-ltd",
+          project: "dosya-desktop",
+          url: "https://de.sentry.io/",
+          authToken: process.env.SENTRY_AUTH_TOKEN,
+          telemetry: false,
+          // A Sentry outage or a stale token must not block a release (the
+          // build is still correct, only symbolication is lost), but it must
+          // not pass silently either: the ::warning:: shows up as an
+          // annotation on the workflow run.
+          errorHandler: (err) => console.warn(`::warning::Sentry source-map upload failed: ${err.message}`),
+          release: { name: releaseName(PKG_VERSION) },
+          sourcemaps: { filesToDeleteAfterUpload: [resolve(__dirname, "out/**/*.map")] },
+        }),
+      ]
+    : [];
+const sourcemap = SENTRY_UPLOAD ? ("hidden" as const) : false;
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ["chokidar", "graceful-fs", "electron-updater", "qrcode", "http-proxy-agent", "https-proxy-agent"] })],
+    // @sentry/electron is in the exclude list (= bundled, not externalized)
+    // because the package ships no node_modules (electron-builder.yml `files`).
+    plugins: [
+      externalizeDepsPlugin({ exclude: ["chokidar", "graceful-fs", "electron-updater", "qrcode", "http-proxy-agent", "https-proxy-agent", "@sentry/electron"] }),
+      ...sentryUpload(),
+    ],
     build: {
       outDir: "out/main",
+      sourcemap,
       rollupOptions: {
         // Two entries: the main process, and the sync engine that main forks
         // into a utilityProcess. They share the main build because they share
@@ -22,7 +61,8 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    // Same reason as main: the Sentry IPC bridge has to be inside the bundle.
+    plugins: [externalizeDepsPlugin({ exclude: ["@sentry/electron"] })],
     build: {
       outDir: "out/preload",
       rollupOptions: {
@@ -31,7 +71,7 @@ export default defineConfig({
     },
   },
   renderer: {
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), ...sentryUpload()],
     root: resolve(__dirname, "src/renderer"),
     // The HEIC decode worker (lib/heic.worker.ts) is loaded via
     // `new Worker(new URL(...), { type: "module" })`. The renderer build uses
@@ -43,6 +83,7 @@ export default defineConfig({
     server: { port: 5174, strictPort: true },
     build: {
       outDir: "out/renderer",
+      sourcemap,
       rollupOptions: {
         input: resolve(__dirname, "src/renderer/index.html"),
         output: {
@@ -62,6 +103,7 @@ export default defineConfig({
             // visit.
             if (id.includes("maplibre") || id.includes("pmtiles") || id.includes("supercluster")) return "vendor-map";
             if (id.includes("shiki") || id.includes("oniguruma")) return "vendor-shiki";
+            if (id.includes("@sentry")) return "vendor-sentry";
             return "vendor";
           },
         },

@@ -17,6 +17,10 @@ files:
   - "out/renderer/**/*"
   - "build/*.png"
   - "!out/**/*.tsbuildinfo"
+  # Source maps exist only on a release build that uploads them to Sentry
+  # (electron.vite.config.ts deletes them after upload); this keeps a failed
+  # upload from shipping the app's full source inside the asar.
+  - "!out/**/*.map"
   - "!out/src/**"
   - "!out/apps/**"
   - "!out/packages/**"

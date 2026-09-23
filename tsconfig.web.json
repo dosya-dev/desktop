@@ -21,6 +21,7 @@
   "include": [
     "src/renderer/**/*.ts",
     "src/renderer/**/*.tsx",
+    "src/main/telemetry-config.ts",
     "../../packages/shared/src/**/*.ts",
     "vendor/audio-player/**/*.ts"
   ],

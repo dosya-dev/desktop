@@ -15,6 +15,8 @@
  * transitive import shows up as an instant startup crash, not a type error, so
  * that is the first thing to check if the child dies immediately.
  */
+import * as Sentry from "@sentry/electron/utility";
+import { scrubEvent } from "../main/telemetry-config";
 import { SyncEngine } from "../main/sync";
 import { setSyncDataDir } from "../main/sync/config";
 import { createParentEnv, type HostCall } from "./parent-env";
@@ -26,6 +28,13 @@ import {
   type HostMethod,
 } from "../main/sync/engine-protocol";
 import type { SyncConfig, SyncPair } from "../main/sync/types";
+
+// Crash reporting for this process. No DSN: the utility SDK posts envelopes to
+// the main process over a message port the main SDK hands it after fork, and
+// main applies its own enabled/DSN rules before anything leaves the machine.
+// Uncaught exceptions here are captured and then still kill the process, so
+// the engine host's restart policy is unchanged.
+Sentry.init({ dataCollection: { userInfo: false, httpBodies: [] }, beforeSend: scrubEvent });
 
 type Resolver = { resolve: (v: unknown) => void; reject: (e: Error) => void };
 
@@ -102,6 +111,7 @@ function init(apiBase: string, userDataDir: string, isDev: boolean): void {
 
   engine.on("status-changed", (data) => post({ t: "event", name: "status-changed", data }));
   engine.on("conflict-detected", (data) => post({ t: "event", name: "conflict-detected", data }));
+  engine.on("session-expired", () => post({ t: "event", name: "session-expired", data: null }));
   engine.on("error", (data) => post({ t: "event", name: "error", data: serializable(data) }));
 
   post({ t: "ready" });

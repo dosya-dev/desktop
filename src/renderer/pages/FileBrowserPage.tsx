@@ -34,7 +34,9 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { api, apiBase, ApiError } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
+import { isUploadCancelled, uploadFileInParts } from "@/lib/upload-in-parts";
+import { uploadTransport } from "@/lib/upload-transport";
 import {
   purgeTrashedFolder, purgeSummary, bulkPurgeSummary,
   type PurgeResponse, type PurgeMessage, type UnfinishedFolder,
@@ -655,28 +657,22 @@ export function FileBrowserPage() {
     let failed = 0;
     for (const { file, folderId: target } of targets) {
       try {
-        const initRes = await api.post<{ ok: boolean; session_id?: string; error?: string }>("/api/upload/init", {
-          workspace_id: active.id,
-          file_name: file.name,
-          file_size: file.size,
-          mime_type: file.type || "application/octet-stream",
-          folder_id: target,
-        });
-        if (!initRes.ok || !initRes.session_id) { failed++; continue; }
-        const res = await fetch(`${apiBase()}/api/upload/${initRes.session_id}`, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-          body: file,
-          credentials: "include",
-          signal: uploadAbortRef.current?.signal,
-        });
-        // A non-2xx PUT is a failed upload, not a success - count it as such.
-        if (res.ok) uploaded++;
-        else failed++;
+        // Single PUT under 50 MB, resumable parts above - the edge refuses
+        // any one request body over 100 MB, so a big file must be split.
+        await uploadFileInParts(
+          {
+            file, fileName: file.name, mimeType: file.type,
+            workspaceId: active.id, folderId: target,
+            lastModifiedMs: file.lastModified,
+            signal: uploadAbortRef.current?.signal,
+          },
+          uploadTransport,
+        );
+        uploaded++;
       } catch (err) {
         // Page unmounted (logout/navigation) mid-upload - stop silently,
         // don't count the aborted-and-unattempted rest as failures.
-        if ((err instanceof DOMException && err.name === "AbortError") || (err as { name?: string })?.name === "AbortError") break;
+        if (isUploadCancelled(err) || (err as { name?: string })?.name === "AbortError") break;
         failed++;
       }
     }
@@ -793,31 +789,24 @@ export function FileBrowserPage() {
   const handleVersionUpload = async (fileId: string, file: File) => {
     if (!active?.id) return;
     try {
-      const initRes = await api.post<{ ok: boolean; session_id?: string; error?: string }>("/api/upload/init", {
-        workspace_id: active.id,
-        file_id: fileId,
-        file_name: file.name,
-        file_size: file.size,
-        mime_type: file.type || "application/octet-stream",
-      });
-      if (!initRes.ok || !initRes.session_id) {
-        if (!pageAliveRef.current) return;
-        toast.error("Upload failed", { description: initRes.error ?? "The new version could not be uploaded." });
-        return;
-      }
-      await fetch(`${apiBase()}/api/upload/${initRes.session_id}`, {
-        method: "PUT",
-        headers: { "Content-Type": file.type || "application/octet-stream" },
-        body: file,
-        credentials: "include",
-        signal: uploadAbortRef.current?.signal,
-      });
+      // No folderId: a new version stays in the file's own folder. Big
+      // versions go through the part API like any other large upload.
+      await uploadFileInParts(
+        {
+          file, fileName: file.name, mimeType: file.type,
+          workspaceId: active.id, fileId,
+          lastModifiedMs: file.lastModified,
+          signal: uploadAbortRef.current?.signal,
+        },
+        uploadTransport,
+      );
       if (!pageAliveRef.current) return;
       toast.success("Version uploaded", { description: "The file now points to your new version." });
       refresh();
-    } catch {
-      if (!pageAliveRef.current) return;
-      toast.error("Upload failed", { description: "The new version could not be uploaded." });
+    } catch (err) {
+      if (!pageAliveRef.current || isUploadCancelled(err)) return;
+      const why = err instanceof Error && err.message ? err.message : "The new version could not be uploaded.";
+      toast.error("Upload failed", { description: why });
     }
   };
 

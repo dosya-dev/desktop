@@ -77,7 +77,10 @@ export function setupSession(apiBase: string): void {
             // and then quietly drops the book's typography and images.
             "style-src 'self' 'unsafe-inline' blob:",
             `img-src 'self' data: blob: ${apiBase} ${docsBase}`,
-            `connect-src 'self' ${apiBase} ${docsBase}`,
+            // sentry-ipc: is the crash reporter's renderer-to-main fallback
+            // (a fetch to a privileged in-process scheme, never the network)
+            // used only if the preload's IPC bridge is unavailable.
+            `connect-src 'self' sentry-ipc: ${apiBase} ${docsBase}`,
             // In-app file viewer: <video>/<audio> stream from the API, and the
             // PDF preview loads /raw in an <iframe>. Without these, media falls
             // back to default-src 'self' and gets blocked.
@@ -97,7 +100,7 @@ export function setupSession(apiBase: string): void {
             "worker-src 'self' blob: http://localhost:*",
             "style-src 'self' 'unsafe-inline' blob:",
             `img-src 'self' data: blob: http://localhost:* ${apiBase} ${docsBase}`,
-            `connect-src 'self' http://localhost:* ws://localhost:* ${apiBase} ${docsBase}`,
+            `connect-src 'self' sentry-ipc: http://localhost:* ws://localhost:* ${apiBase} ${docsBase}`,
             `media-src 'self' blob: data: http://localhost:* ${apiBase}`,
             `frame-src 'self' blob: http://localhost:* ${apiBase} ${docsBase}`,
             "font-src 'self' data: blob:",

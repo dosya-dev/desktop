@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, RotateCw } from "lucide-react";
+import { reportError } from "../lib/sentry";
 
 /**
  * Catches a render-time throw so one broken page cannot take down the app.
@@ -39,6 +40,9 @@ export class ErrorBoundary extends Component<Props, State> {
     console.error(
       `[render-error] ${this.props.where ?? "app"}: ${error.message}\n${error.stack ?? ""}\n${info.componentStack ?? ""}`,
     );
+    // React swallows a boundary-caught error before the SDK's global handler
+    // sees it, so without this line the crash never leaves the machine.
+    reportError(error, { where: this.props.where ?? "app", componentStack: info.componentStack ?? "" });
   }
 
   render(): ReactNode {

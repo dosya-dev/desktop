@@ -14,7 +14,9 @@ import {
   RefreshCw,
   AlertCircle,
 } from "lucide-react";
-import { api, apiBase, ApiError, apiRequest } from "@/lib/api-client";
+import { api, ApiError, apiRequest } from "@/lib/api-client";
+import { uploadFileInParts } from "@/lib/upload-in-parts";
+import { uploadTransport } from "@/lib/upload-transport";
 import { LIBRARY_QUERY_ROOT } from "@/lib/library-request";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes } from "@/lib/format";
@@ -117,64 +119,24 @@ export function UploadPage() {
     abortControllers.current.set(item.id, controller);
 
     try {
-      // Step 1: Init upload session
-      const initRes = await api.post<{ ok: boolean; session_id: string }>("/api/upload/init", {
-        workspace_id: item.workspaceId,
-        file_name: item.file.name,
-        file_size: item.file.size,
-        mime_type: item.file.type || "application/octet-stream",
-        folder_id: item.folderId,
-      });
-
-      if (controller.signal.aborted) throw new Error("Cancelled");
-
-      // Step 2: Stream upload with progress via XMLHttpRequest
-      // (fetch API doesn't support upload progress in browsers/Electron renderer)
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        // Uses the IPC-primed apiBase() (same pattern as FileBrowserPage's
-        // upload flow) - a bare relative path would resolve against the
-        // renderer's own app://bundle origin and get swallowed by the
-        // static-asset protocol handler instead of reaching the real API.
-        xhr.open("PUT", `${apiBase()}/api/upload/${initRes.session_id}`);
-        xhr.withCredentials = true;
-        xhr.setRequestHeader("Content-Type", "application/octet-stream");
-
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const pct = Math.round((e.loaded / e.total) * 100);
-            updateItem(item.id, { progress: pct, bytesUploaded: e.loaded });
-          }
-        };
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve();
-          } else {
-            try {
-              const data = JSON.parse(xhr.responseText);
-              reject(new Error(data.error || `Upload failed (${xhr.status})`));
-            } catch {
-              reject(new Error(`Upload failed (${xhr.status})`));
-            }
-          }
-        };
-
-        xhr.onerror = () => reject(new Error("Network error"));
-        xhr.ontimeout = () => reject(new Error("Upload timed out"));
-        // Aborting an XHR fires `abort` (not `error`), so settle the promise
-        // here - otherwise it hangs forever and the scheduler's in-flight
-        // counter never decrements for a cancelled/removed upload.
-        xhr.onabort = () => reject(new Error("Cancelled"));
-        xhr.timeout = 600_000; // 10 minutes
-
-        // Cancel support
-        controller.signal.addEventListener("abort", () => xhr.abort());
-
-        // Send the File object directly - XHR streams it, no arrayBuffer() needed.
-        // Memory: ~0 extra (browser/Electron handles File → stream internally)
-        xhr.send(item.file);
-      });
+      // Small files go up as one PUT; anything over 50 MB goes through the
+      // resumable part API - the edge refuses any single body over 100 MB.
+      await uploadFileInParts(
+        {
+          file: item.file,
+          fileName: item.file.name,
+          mimeType: item.file.type,
+          workspaceId: item.workspaceId,
+          folderId: item.folderId,
+          lastModifiedMs: item.file.lastModified,
+          signal: controller.signal,
+          onProgress: (bytes) => {
+            const pct = item.file.size > 0 ? Math.round((bytes / item.file.size) * 100) : 100;
+            updateItem(item.id, { progress: Math.min(100, pct), bytesUploaded: bytes });
+          },
+        },
+        uploadTransport,
+      );
 
       updateItem(item.id, { status: "done", progress: 100, bytesUploaded: item.file.size });
     } catch (err: unknown) {

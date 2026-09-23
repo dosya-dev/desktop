@@ -1,3 +1,7 @@
+// Sentry's renderer-to-main IPC bridge (window.__SENTRY_IPC__). Imported here
+// because the main-process SDK is bundled (the package ships no node_modules)
+// and so cannot inject its own preload script; sandbox-safe by design.
+import "@sentry/electron/preload";
 import { contextBridge, ipcRenderer } from "electron";
 
 /** Typed API exposed to the renderer via window.electronAPI */
@@ -102,6 +106,13 @@ const electronAPI = {
     const handler = () => callback();
     ipcRenderer.on("auth:oauth-complete", handler);
     return () => ipcRenderer.removeListener("auth:oauth-complete", handler);
+  },
+
+  // The sync engine hit a 401: the renderer re-checks /api/me and signs out.
+  onSessionExpired: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("auth:session-expired", handler);
+    return () => ipcRenderer.removeListener("auth:session-expired", handler);
   },
 
   // ── Sync ──────────────────────────────────────────────────────

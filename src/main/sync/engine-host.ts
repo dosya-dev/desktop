@@ -24,6 +24,8 @@ export interface SyncEngineHandle {
   on(event: "status-changed", cb: (s: SyncStatus) => void): this | void;
   on(event: "conflict-detected", cb: (c: SyncConflict) => void): this | void;
   on(event: "error", cb: (e: unknown) => void): this | void;
+  /** The engine saw a 401; main forwards it so the renderer can sign out. */
+  on(event: "session-expired", cb: () => void): this | void;
   start(): Promise<void>;
   stop(): Promise<void>;
   isRunning(): boolean;

@@ -33,6 +33,7 @@ export default defineConfig({
       // convention every other src/main/**/*.test.ts file uses.
       "src/main/sync/remote-client.maintenance.test.ts",
       "src/main/sync/sync-engine-maintenance.test.ts",
+      "src/main/sync/sync-engine-session-expired.test.ts",
       "src/main/sync/filesystem-safety.test.ts",
       "src/main/sync/sync-engine-path-safety.test.ts",
       "src/main/sync/remote-client.path-safety.test.ts",

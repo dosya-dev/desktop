@@ -56,7 +56,7 @@ export const HOST_METHODS = ["getSessionCookies", "resolveProxy", "trashItem"] a
 export type HostMethod = (typeof HOST_METHODS)[number];
 
 /** The engine events the renderer subscribes to. Nothing else crosses. */
-export const ENGINE_EVENTS = ["status-changed", "conflict-detected", "error"] as const;
+export const ENGINE_EVENTS = ["status-changed", "conflict-detected", "error", "session-expired"] as const;
 export type EngineEventName = (typeof ENGINE_EVENTS)[number];
 
 export type ParentToChild =

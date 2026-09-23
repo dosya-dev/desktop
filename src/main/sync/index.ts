@@ -220,6 +220,8 @@ function getRetryAfterMs(err: unknown): number {
  *   pull       - download remote changes, delete local on remote delete
  *   pull-safe  - download only, never delete local
  */
+const SESSION_EXPIRED_MESSAGE = "Session expired. Please log in again.";
+
 export class SyncEngine extends EventEmitter {
   private config: SyncConfig | null = null;
   private client: RemoteClient;
@@ -858,6 +860,17 @@ export class SyncEngine extends EventEmitter {
    * When the user pauses mid-sync, in-flight operations fail - those errors should
    * be silently discarded, not shown as sync failures.
    */
+  /** The server answered 401. Park the pair like any other error, and
+   *  raise `session-expired` ONCE so main/index.ts can tell the window -
+   *  before this, the renderer stayed signed in on a revoked session until
+   *  the next app launch. Repeat reports from the poller, the reconcile and
+   *  the transfer paths all land here and stay quiet after the first. */
+  private sessionExpired(rt: PairRuntime): void {
+    const already = rt.status === "error" && rt.errorMessage === SESSION_EXPIRED_MESSAGE;
+    this.setError(rt, SESSION_EXPIRED_MESSAGE);
+    if (!already && rt.errorMessage === SESSION_EXPIRED_MESSAGE) this.emit("session-expired");
+  }
+
   private setError(rt: PairRuntime, message: string): void {
     if (this.stopped || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
     // A connectivity failure is not a fault of this pair's: it has its own
@@ -1162,7 +1175,7 @@ export class SyncEngine extends EventEmitter {
         });
         poller.on("error", (err: Error) => {
           if (err.message === "SESSION_EXPIRED") {
-            this.setError(rt, "Session expired. Please log in again.");
+            this.sessionExpired(rt);
             this.emitStatus();
           } else if (err instanceof MaintenanceError) {
             this.setMaintenance(rt, err.message);
@@ -1231,7 +1244,7 @@ export class SyncEngine extends EventEmitter {
         });
         poller.on("error", (err: Error) => {
           if (err.message === "SESSION_EXPIRED") {
-            this.setError(rt, "Session expired. Please log in again.");
+            this.sessionExpired(rt);
             this.emitStatus();
           } else if (err instanceof MaintenanceError) {
             this.setMaintenance(rt, err.message);
@@ -1347,7 +1360,7 @@ export class SyncEngine extends EventEmitter {
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
-        this.setError(rt, "Session expired. Please log in again.");
+        this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
         this.pauseForRateLimit(rt, getRetryAfterMs(err));
         return; // pauseForRateLimit sets syncing = false
@@ -1727,7 +1740,7 @@ export class SyncEngine extends EventEmitter {
         }
       } catch (err: any) {
         if (err.message === "SESSION_EXPIRED") {
-          this.setError(rt, "Session expired. Please log in again.");
+          this.sessionExpired(rt);
           this.emitStatus();
           return;
         }
@@ -1794,7 +1807,7 @@ export class SyncEngine extends EventEmitter {
       }
       console.error("[sync] Initial scan failed:", pairId, err.message);
       if (err.message === "SESSION_EXPIRED") {
-        this.setError(rt, "Session expired. Please log in again.");
+        this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
         this.pauseForRateLimit(rt, getRetryAfterMs(err));
         return; // pauseForRateLimit sets syncing = false
@@ -3235,7 +3248,7 @@ export class SyncEngine extends EventEmitter {
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
-        this.setError(rt, "Session expired. Please log in again.");
+        this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
         this.pauseForRateLimit(rt, getRetryAfterMs(err));
         return;
@@ -3380,7 +3393,7 @@ export class SyncEngine extends EventEmitter {
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
-        this.setError(rt, "Session expired. Please log in again.");
+        this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
         this.pauseForRateLimit(rt, getRetryAfterMs(err));
         return;
@@ -4502,7 +4515,7 @@ export class SyncEngine extends EventEmitter {
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
       if (err.message === "SESSION_EXPIRED") {
-        this.setError(rt, "Session expired. Please log in again.");
+        this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
         this.pauseForRateLimit(rt, getRetryAfterMs(err));
         return;

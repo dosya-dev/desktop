@@ -4,20 +4,17 @@ import { launchedHidden, shouldShowOnReady } from "./window-show";
 import fs, { statSync } from "fs";
 gracefulify(fs);
 
-import { app, BrowserWindow, shell, powerMonitor, powerSaveBlocker, session, crashReporter, ipcMain, protocol, net, screen, Notification } from "electron";
+import { app, BrowserWindow, shell, powerMonitor, powerSaveBlocker, session, ipcMain, protocol, net, screen, Notification } from "electron";
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { dirname, join, resolve, sep } from "path";
 import { pathToFileURL } from "url";
+import { flushSentry, initSentryMain } from "./telemetry";
 
-// Enable crash reporter for native crashes (GPU, renderer, main).
-// Captures minidumps locally. Set submitURL to a collection endpoint when ready.
-crashReporter.start({
-  productName: "dosya",
-  submitURL: "", // empty = store locally only, no network upload
-  uploadToServer: false,
-  compress: true,
-});
+// Crash reporting first: this starts the native crashReporter (minidumps for
+// GPU, renderer and main crashes, uploaded on the next launch), and it has to
+// register its IPC scheme before registerSchemesAsPrivileged below runs.
+initSentryMain();
 import { registerIpcHandlers } from "./ipc";
 import { installFileLogger } from "./file-logger";
 import { isQuitting, markQuitting } from "./quit-state";
@@ -55,8 +52,10 @@ async function crashExit(err: unknown): Promise<void> {
   crashExitStarted = true;
   console.error("[crash] Uncaught exception - shutting down:", err);
   try {
+    // The SDK's own uncaughtException handler has already captured `err`;
+    // flushing here is what gets it out before app.exit() kills the socket.
     const stop = syncEngine?.stop().catch(() => {});
-    await Promise.race([stop, new Promise((r) => setTimeout(r, 3000))]);
+    await Promise.race([Promise.all([stop, flushSentry(2000)]), new Promise((r) => setTimeout(r, 3000))]);
   } catch {}
   await fileLog.flush().catch(() => {});
   app.exit(1);
@@ -710,6 +709,10 @@ if (!gotTheLock) {
       // don't flap the blocker.
       let psbId: number | null = null;
       let psbStopTimer: ReturnType<typeof setTimeout> | null = null;
+      // The engine talks to the server on a timer, so it is usually the
+      // first to learn a session was revoked. The renderer confirms against
+      // /api/me and signs out (auth-context.tsx).
+      syncEngine.on("session-expired", () => sendToWindow("auth:session-expired"));
       syncEngine.on("status-changed", (status: { pairs: { status: string }[]; activeTransfers: unknown[] }) => {
         const active = status.pairs.some((p) => p.status === "syncing") || status.activeTransfers.length > 0;
         if (active) {

@@ -5,6 +5,8 @@
  * automatically sends the dosya_session cookie.
  */
 
+import { isSessionLossResponse, sessionLoss } from "./session-loss";
+
 let _apiBase: string | null = null;
 
 async function getApiBase(): Promise<string> {
@@ -77,6 +79,9 @@ export async function apiRequest<T>(
   });
 
   if (!res.ok) {
+    // A dead session is a global fact, not this one caller's problem: the
+    // auth context confirms and signs out (see session-loss.ts).
+    if (isSessionLossResponse(path, res.status)) sessionLoss.report();
     let errorData: Record<string, unknown> = {};
     try {
       errorData = await res.json();

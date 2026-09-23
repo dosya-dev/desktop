@@ -9,6 +9,9 @@ import {
 } from "react";
 import { api, ApiError } from "./api-client";
 import { resetSessionState } from "./session-reset";
+import { SESSION_CHECK_INTERVAL_MS, SIGNED_OUT_NOTICE_KEY, sessionLoss } from "./session-loss";
+import { toast } from "sonner";
+import { setSentryUser } from "./sentry";
 import { applyTheme, writeCache, readCache, initSystemListener } from "./theme";
 import { isThemeId, isMode, DEFAULT_THEME, DEFAULT_MODE } from "./themes";
 import type { User } from "@dosya-dev/shared";
@@ -91,6 +94,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return false;
     }
   }, []);
+
+  // Tag crash reports with the opaque account id (never the email or name)
+  // so an issue can be tied back to a support thread; cleared on logout.
+  const userId = user?.id ?? null;
+  useEffect(() => {
+    setSentryUser(userId);
+  }, [userId]);
 
   // Check session on mount. Retry transient failures a few times before
   // concluding - otherwise a single network blip / 5xx at startup strands a
@@ -207,6 +217,77 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // boots onto onboarding because the session cookie is already cleared.
     window.location.hash = "#/onboarding";
     window.location.reload();
+  }, []);
+
+  // A session can end without this app doing anything: an admin revokes it
+  // from the portal, the user ends it from another device, or it expires.
+  // Before this, the renderer checked /api/me once at boot and never again,
+  // so a revoked session kept a fully usable, signed-in UI on screen. Three
+  // signals now converge here (see session-loss.ts): any API 401, the sync
+  // engine's own 401 over IPC, and a periodic + on-focus re-check for an idle
+  // window. Each is confirmed against /api/me before tearing down, so one
+  // flaky response cannot sign anyone out.
+  const userRef = useRef<User | null>(null);
+  userRef.current = user;
+  const checkingRef = useRef(false);
+  const lastCheckRef = useRef(0);
+
+  const endSession = useCallback(async (notice: string) => {
+    try { sessionStorage.setItem(SIGNED_OUT_NOTICE_KEY, notice); } catch { /* storage unavailable */ }
+    // Same teardown as logout(): drop the stale cookie (which also stops the
+    // sync engine), wipe caches, and reload so nothing of this account
+    // survives in memory. The server side is already gone.
+    try { await window.electronAPI.clearSession(); } catch { /* best effort */ }
+    setUser(null);
+    resetSessionState();
+    window.location.hash = "#/onboarding";
+    window.location.reload();
+  }, []);
+
+  const confirmSession = useCallback(async (opts: { throttle: boolean }) => {
+    if (!userRef.current || checkingRef.current) return;
+    // Focus and the timer are throttled; a reported 401 always re-checks.
+    if (opts.throttle && Date.now() - lastCheckRef.current < 30_000) return;
+    checkingRef.current = true;
+    lastCheckRef.current = Date.now();
+    try {
+      await api.get("/api/me");
+    } catch (err) {
+      // Only a confirmed 401 ends the session. Network blips and 5xx keep
+      // the user signed in, exactly like refreshUser above.
+      if (err instanceof ApiError && err.status === 401) {
+        await endSession("Your session was ended. Please sign in again.");
+      }
+    } finally {
+      checkingRef.current = false;
+    }
+  }, [endSession]);
+
+  useEffect(() => {
+    const offSignal = sessionLoss.subscribe(() => { void confirmSession({ throttle: false }); });
+    // Optional: component tests render this provider without a preload bridge.
+    const offIpc = window.electronAPI?.onSessionExpired?.(() => { void confirmSession({ throttle: false }); });
+    const onFocus = () => { void confirmSession({ throttle: true }); };
+    window.addEventListener("focus", onFocus);
+    const timer = setInterval(() => { void confirmSession({ throttle: true }); }, SESSION_CHECK_INTERVAL_MS);
+    return () => {
+      offSignal();
+      offIpc?.();
+      window.removeEventListener("focus", onFocus);
+      clearInterval(timer);
+    };
+  }, [confirmSession]);
+
+  // After the teardown reload, say why the user is looking at the sign-in
+  // screen. The Toaster is a child of this provider, so it is mounted by the
+  // time this effect runs.
+  useEffect(() => {
+    let notice: string | null = null;
+    try {
+      notice = sessionStorage.getItem(SIGNED_OUT_NOTICE_KEY);
+      if (notice) sessionStorage.removeItem(SIGNED_OUT_NOTICE_KEY);
+    } catch { /* storage unavailable */ }
+    if (notice) toast.info("Signed out", { description: notice });
   }, []);
 
   return (
