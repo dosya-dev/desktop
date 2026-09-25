@@ -43,7 +43,7 @@ test.describe("groups", () => {
     await openGroups(page);
     await page.getByTestId("group-new").click();
     await page.getByTestId("group-create-name").fill("Invoices");
-    await page.getByTestId("group-create-color-1D4ED8").click();
+    await page.getByTestId("group-create-color-blue").click();
     await page.getByTestId("group-create-submit").click();
 
     await expect(async () => {

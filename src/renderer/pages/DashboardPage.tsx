@@ -114,7 +114,7 @@ export function DashboardPage() {
         </div>
         <button
           onClick={() => navigate("/upload")}
-          className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+          className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
           <Upload size={16} />

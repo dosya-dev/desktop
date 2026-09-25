@@ -86,7 +86,7 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
         {unread > 0 && (
           <span
             data-testid="notification-badge"
-            className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 text-[9px] font-bold text-white"
+            className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 text-[9px] font-bold text-[var(--color-primary-fg)]"
             style={{ background: "var(--color-primary)" }}
           >
             {badgeLabel(unread)}

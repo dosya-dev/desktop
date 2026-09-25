@@ -460,14 +460,14 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
           Cancel
         </button>
         {resultUrl ? (
-          <button onClick={close} className="rounded-lg px-4 py-2 text-sm font-medium text-white" style={{ background: "var(--color-primary)" }}>
+          <button onClick={close} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]" style={{ background: "var(--color-primary)" }}>
             Done
           </button>
         ) : (
           <button
             onClick={handleSubmit}
             disabled={submitting}
-            className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
             style={{ background: "var(--color-primary)" }}
           >
             {submitting ? <Loader2 size={14} className="animate-spin" /> : tab === "email" ? <Mail size={14} /> : <Link2 size={14} />}

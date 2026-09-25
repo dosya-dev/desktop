@@ -6,18 +6,9 @@ import { groupLocations, pickPreselected, type RegionInfo } from "@/lib/location
 import { useWorkspace } from "@/lib/workspace-context";
 import { useAuth } from "@/lib/auth-context";
 import { FolderOpen, Upload, RefreshCw, Shield, Users, Zap, LogOut, ArrowRight } from "lucide-react";
-import logoSvg from "@/assets/logo.svg";
+import { Logo } from "@/components/Logo";
 import { toast } from "sonner";
-
-const COLORS = [
-  "#22c55e",
-  "#7C3AED",
-  "#2563EB",
-  "#EA580C",
-  "#059669",
-  "#DB2777",
-  "#1A1917",
-];
+import { SwatchPicker } from "../components/SwatchPicker";
 
 export function CreateWorkspacePage() {
   const { workspaces, setActive } = useWorkspace();
@@ -122,7 +113,7 @@ export function CreateWorkspacePage() {
       <div className="flex w-[40%] flex-col justify-center bg-[var(--color-bg)] px-12">
         <div className="max-w-sm">
           <div className="mb-8 flex items-center gap-2.5">
-            <img src={logoSvg} alt="dosya.dev" className="h-7 w-7" />
+            <Logo className="h-7 w-7" />
             <span className="text-base font-semibold text-[var(--color-text)]">
               dosya.dev
             </span>
@@ -164,24 +155,7 @@ export function CreateWorkspacePage() {
             {/* Color picker */}
             <div>
               <label className="mb-1.5 block text-sm font-medium">Color</label>
-              <div className="flex gap-2.5">
-                {COLORS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setColor(c)}
-                    className={`h-8 w-8 rounded-full transition-all ${
-                      color === c
-                        ? "ring-2 ring-offset-2 scale-110"
-                        : "hover:scale-110"
-                    }`}
-                    style={{
-                      background: c,
-                      "--tw-ring-color": c,
-                    } as React.CSSProperties}
-                  />
-                ))}
-              </div>
+              <SwatchPicker value={color} onChange={setColor} label="Workspace colour" />
             </div>
 
             {/* Location */}
@@ -269,7 +243,7 @@ export function CreateWorkspacePage() {
             <button
               type="submit"
               disabled={!canCreate}
-              className="w-full rounded-lg px-4 py-2.5 text-sm font-semibold text-white transition-colors disabled:opacity-50"
+              className="w-full rounded-lg px-4 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] transition-colors disabled:opacity-50"
               style={{ background: "var(--color-primary)" }}
             >
               {createMut.isPending ? "Creating..." : "Create workspace"}

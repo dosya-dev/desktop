@@ -1,24 +1,23 @@
 import { formatBytes, formatRelative } from "./format";
+import { EXTENSION_FAMILY, FILE_FAMILY, SWATCH_BY_NAME } from "./palette";
 
-// Ported from apps/web/src/lib/helpers.ts (subset) - keep in sync with the web copy.
 // File-type detection + small formatting helpers used by the files surfaces.
+// The colours come from the shared palette, so this no longer has to be kept in sync
+// with the web copy by hand - both read the same generated file.
 
 export function extOf(name: string): string {
   return name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
 }
 
-const EXT_COLORS: Record<string, string> = {
-  mp4: "#EF4444", mov: "#EF4444", avi: "#EF4444", mkv: "#EF4444", webm: "#EF4444",
-  fig: "#7C3AED", sketch: "#7C3AED", xd: "#7C3AED",
-  pdf: "#2563EB", doc: "#D97706", docx: "#D97706", pptx: "#D97706", ppt: "#D97706",
-  xls: "#059669", xlsx: "#059669", csv: "#374151",
-  zip: "#0891B2", rar: "#0891B2",
-  png: "#059669", jpg: "#059669", jpeg: "#059669", gif: "#059669", svg: "#059669", webp: "#059669",
-  heic: "#059669", heif: "#059669",
-};
-
-export function colorFor(name: string): string {
-  return EXT_COLORS[extOf(name)] ?? "#706E69";
+/**
+ * File-type colour. The extension-to-family map and the family-to-colour map both live
+ * in the shared palette now, so a `.xlsx` and a "spreadsheet" can no longer be coloured
+ * by two different lookups that disagree.
+ */
+export function colorFor(name: string, scheme: "light" | "dark" = "light"): string {
+  const family = EXTENSION_FAMILY[extOf(name)] ?? "other";
+  const swatch = SWATCH_BY_NAME[FILE_FAMILY[family] ?? "graphite"];
+  return swatch[scheme];
 }
 
 export function labelFor(name: string): string {

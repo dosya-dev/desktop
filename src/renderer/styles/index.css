@@ -1,3 +1,59 @@
+/* dosya brand faces - generated */
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("../assets/fonts/space-grotesk-latin.woff2") format("woff2");
+  font-weight: 100 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("../assets/fonts/space-grotesk-latin-ext.woff2") format("woff2");
+  font-weight: 100 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Space Mono";
+  src: url("../assets/fonts/space-mono-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+@font-face {
+  font-family: "Space Mono";
+  src: url("../assets/fonts/space-mono-latin-ext.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Space Mono";
+  src: url("../assets/fonts/space-mono-italic-latin.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+2074,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+@font-face {
+  font-family: "Space Mono";
+  src: url("../assets/fonts/space-mono-italic-latin-ext.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+/* end dosya brand faces */
+
 @import "tailwindcss";
 @import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -14,13 +70,13 @@
    apps/web/src/index.css and apps/web/src/lib/themes.ts. */
 
 :root {
-  --background: oklch(0.9813 0.0100 238.5069);
-  --foreground: oklch(0.1807 0.0207 239.8394);
-  --primary: oklch(0.6236 0.1833 147.4139);
-  --secondary: oklch(0.9396 0.0204 243.4220);
-  --muted-foreground: oklch(0.4501 0.0191 239.4931);
-  --border: oklch(0.8999 0.0196 240.7516);
-  --destructive: oklch(0.6207 0.2306 24.9164);
+  --background: #f5f5f5;
+  --foreground: #181818;
+  --primary: #181818;
+  --secondary: #f4f4f4;
+  --muted-foreground: #6b6b6b;
+  --border: #e4e4e4;
+  --destructive: #d42121;
 
   /* ── Desktop --color-* aliases (map onto the tokens above) ──────── */
   --color-bg: var(--background);
@@ -30,7 +86,14 @@
   --color-text: var(--foreground);
   --color-text-secondary: var(--muted-foreground);
   --color-text-muted: color-mix(in oklab, var(--muted-foreground) 62%, var(--background));
+  /* Strong ease-out for UI motion. The built-in `ease-out` is too weak to read
+     as deliberate at these durations. */
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
   --color-primary: var(--primary);
+  /* The label that goes ON --color-primary. It exists because the primary fill is no
+     longer green: it is graphite in light and paper in dark, so a hardcoded `text-white`
+     button renders white-on-white as soon as the user switches theme. */
+  --color-primary-fg: var(--primary-foreground);
   --color-primary-hover: color-mix(in oklab, var(--primary) 85%, var(--foreground));
   --color-danger: var(--destructive);
   --color-danger-hover: color-mix(in oklab, var(--destructive) 85%, var(--foreground));
@@ -48,6 +111,45 @@
      them. Zero everywhere else - Windows and Linux draw their own controls on
      the right, inside TitleBar. */
   --titlebar-inset-left: 0px;
+  --card: #ffffff;
+  --card-foreground: #181818;
+  --popover: #ffffff;
+  --popover-foreground: #181818;
+  --primary-foreground: #fafafa;
+  --secondary-foreground: #272727;
+  --muted: #f4f4f4;
+  --accent: #f4f4f4;
+  --accent-foreground: #181818;
+  --brand: #22c55e;
+  --brand-hover: #16a34a;
+  --brand-foreground: #052e16;
+  --brand-text: #15803d;
+  --destructive-foreground: #ffffff;
+  --input: #e4e4e4;
+  --ring: #a1a1a1;
+  --sidebar: #f3f3f3;
+  --sidebar-foreground: #181818;
+  --radius: 0.625rem;
+  --radius-card: 1rem;
+  --radius-panel: 0.875rem;
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --sidebar-primary: #181818;
+  --sidebar-primary-foreground: #f5f5f5;
+  --sidebar-accent: #f4f4f4;
+  --sidebar-accent-foreground: #181818;
+  --sidebar-border: #e4e4e4;
+  --sidebar-ring: #a1a1a1;
+  --chart-1: #22c55e;
+  --tone-yes-bg: oklch(96.2% 0.044 156.743);
+  --tone-yes-ink: oklch(44.8% 0.119 151.328);
+  --tone-no-bg: oklch(93.6% 0.032 17.717);
+  --tone-no-ink: oklch(50.5% 0.213 27.518);
+  --tone-warn-bg: oklch(96.2% 0.059 95.617);
+  --tone-warn-ink: oklch(47.3% 0.137 46.201);
+  --tone-note-bg: oklch(93.2% 0.032 255.585);
+  --tone-note-ink: oklch(42.4% 0.199 265.638);
+
 }
 
 /* Set from main.tsx once the platform is known. */
@@ -65,13 +167,52 @@
 }
 
 .dark {
-  --background: oklch(0.1289 0.0199 238.9108);
-  --foreground: oklch(0.9513 0.0101 238.5127);
-  --primary: oklch(0.7007 0.1804 148.9872);
-  --secondary: oklch(0.2414 0.0196 239.1401);
-  --muted-foreground: oklch(0.6499 0.0194 240.1577);
-  --border: oklch(0.2791 0.0203 242.6079);
-  --destructive: oklch(0.6207 0.2306 24.9164);
+  --background: #131313;
+  --foreground: #ededed;
+  --primary: #fafafa;
+  --secondary: #272727;
+  --muted-foreground: #a1a1a1;
+  --border: #272727;
+  --destructive: #f87171;
+  --card: #1d1d1d;
+  --card-foreground: #ededed;
+  --popover: #212121;
+  --popover-foreground: #ededed;
+  --primary-foreground: #181818;
+  --secondary-foreground: #ededed;
+  --muted: #272727;
+  --accent: #272727;
+  --accent-foreground: #ededed;
+  --brand: #22c55e;
+  --brand-hover: #16a34a;
+  --brand-foreground: #052e16;
+  --brand-text: #22c55e;
+  --destructive-foreground: #181818;
+  --input: #272727;
+  --ring: #717171;
+  --sidebar: #171717;
+  --sidebar-foreground: #ededed;
+  --radius: 0.625rem;
+  --radius-card: 1rem;
+  --radius-panel: 0.875rem;
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --sidebar-primary: #ededed;
+  --sidebar-primary-foreground: #131313;
+  --sidebar-accent: #272727;
+  --sidebar-accent-foreground: #ededed;
+  --sidebar-border: #272727;
+  --sidebar-ring: #717171;
+  --chart-1: #22c55e;
+  --tone-yes-bg: oklch(26.6% 0.065 152.934);
+  --tone-yes-ink: oklch(79.2% 0.209 151.711);
+  --tone-no-bg: oklch(25.8% 0.092 26.042);
+  --tone-no-ink: oklch(70.4% 0.191 22.216);
+  --tone-warn-bg: oklch(27.9% 0.077 45.635);
+  --tone-warn-ink: oklch(82.8% 0.189 84.429);
+  --tone-note-bg: oklch(28.2% 0.091 267.935);
+  --tone-note-ink: oklch(70.7% 0.165 254.624);
+
 }
 
 /* ── Mono ────────────────────────────────────────────────────────── */
@@ -161,12 +302,7 @@
 /* ── Font families ───────────────────────────────────────────────── */
 
 body {
-  font-family:
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  font-family: var(--font-sans);
   color: var(--color-text);
   background: var(--color-bg);
   overflow: hidden;
@@ -280,6 +416,50 @@ body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ── Sign-in flow transitions ─────────────────────────────────────────────
+   Signing in is a sequence, not a page: login leads to two-factor, or to
+   forgot-password and back. The arriving step says which way you moved -
+   forward enters from the right, back from the left - and that direction is
+   the whole reason this earns motion. It is also rare-tier: a user signs in
+   occasionally, never dozens of times a day. The dashboard behind it gets
+   none, deliberately, because you land there on every launch.
+
+   Entrance only. React Router unmounts the outgoing route immediately and this
+   app carries no motion library; an exit would mean holding two routes mounted
+   at once, which is not worth a dependency for 240ms on a centred card.
+
+   `data-auth-dir` sits on the page root (see useAuthDirection) so the lockup
+   and the card can animate as one without either page changing its layout. */
+.auth-step {
+  animation: auth-step-fwd 240ms var(--ease-out-strong) both;
+}
+[data-auth-dir="back"] .auth-step {
+  animation-name: auth-step-back;
+}
+
+@keyframes auth-step-fwd {
+  from { opacity: 0; transform: translate3d(16px, 0, 0); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes auth-step-back {
+  from { opacity: 0; transform: translate3d(-16px, 0, 0); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Reduced motion keeps the fade - it still reads as "this is a new step" - and
+   drops the travel. Needed explicitly because the blanket rule above collapses
+   every duration to 0.01ms, which is no animation rather than a gentler one. */
+@media (prefers-reduced-motion: reduce) {
+  .auth-step,
+  [data-auth-dir="back"] .auth-step {
+    animation: auth-step-fade 160ms ease both !important;
+  }
+}
+@keyframes auth-step-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 /* In-file find highlights (CSS Custom Highlight API) - ported from apps/web/src/index.css */

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Minus, Square, X, Pause, Play, RefreshCw, ArrowUpDown } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import { useSyncPaused, useSyncSyncing, useSyncHasPairs } from "@/lib/sync-store";
-import logoSvg from "@/assets/logo.svg";
+import { Logo } from "@/components/Logo";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import { ThemeMenu } from "@/components/ThemeMenu";
 
@@ -28,9 +28,11 @@ export function TitleBar() {
     }
   };
 
-  const Logo = (
+  // The mark plus the wordmark. Named for what it is, so it no longer collides with
+  // the <Logo> mark it renders.
+  const lockup = (
     <div className="titlebar-no-drag flex items-center gap-2">
-      <img src={logoSvg} alt="dosya.dev" className="h-5 w-5" />
+      <Logo className="h-5 w-5" />
       <span className="text-sm font-semibold text-[var(--color-text)]">
         dosya.dev
       </span>
@@ -88,7 +90,7 @@ export function TitleBar() {
         style={{ background: "var(--color-bg-secondary)", borderBottom: "1px solid var(--color-border)" }}
       >
         <div className="flex-1" />
-        {Logo}
+        {lockup}
         <div className="flex flex-1 items-center justify-end gap-1"><ThemeMenu />{LanButton}{SyncButton}<NotificationBell /></div>
       </div>
     );
@@ -102,7 +104,7 @@ export function TitleBar() {
         style={{ background: "var(--color-bg-secondary)", borderBottom: "1px solid var(--color-border)" }}
       >
         <div className="flex flex-1 items-center gap-1"><ThemeMenu align="left" />{LanButton}{SyncButton}<NotificationBell align="left" /></div>
-        <div className="flex-1 flex justify-center">{Logo}</div>
+        <div className="flex-1 flex justify-center">{lockup}</div>
         <div className="flex-1" />
       </div>
     );
@@ -115,7 +117,7 @@ export function TitleBar() {
       style={{ background: "var(--color-bg-secondary)" }}
     >
       <div className="flex flex-1 items-center gap-1">{LanButton}{SyncButton}<NotificationBell align="left" /></div>
-      <div className="flex-1 flex justify-center">{Logo}</div>
+      <div className="flex-1 flex justify-center">{lockup}</div>
       <div className="titlebar-no-drag flex flex-1 items-center justify-end gap-1">
         <button
           onClick={() => ipc.minimize()}

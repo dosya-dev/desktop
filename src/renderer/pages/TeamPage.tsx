@@ -165,7 +165,7 @@ export function TeamPage() {
           <h1 className="text-2xl font-semibold">Team</h1>
           <button
             onClick={() => setShowInvite(true)}
-            className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+            className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
             style={{ background: "var(--color-primary)" }}
           >
             <UserPlus size={16} />
@@ -215,7 +215,7 @@ export function TeamPage() {
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-3">
                             <div
-                              className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium text-white"
+                              className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium text-[var(--color-primary-fg)]"
                               style={{ background: "var(--color-primary)" }}
                             >
                               {m.name.charAt(0).toUpperCase()}
@@ -416,7 +416,7 @@ export function TeamPage() {
               <button
                 onClick={() => inviteMut.mutate()}
                 disabled={!isValidEmail(inviteEmail) || inviteMut.isPending}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 {inviteMut.isPending ? "Sending..." : "Send invite"}

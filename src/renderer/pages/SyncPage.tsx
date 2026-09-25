@@ -351,7 +351,7 @@ export function SyncPage() {
           </button>
           <button
             onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-white"
+            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)]"
             style={{ background: "var(--color-primary)" }}
           >
             <Plus size={14} /> Add sync folder
@@ -394,7 +394,7 @@ export function SyncPage() {
               <p className="text-sm font-medium">Sync is paused for all folders.</p>
               <button
                 onClick={() => { void window.electronAPI.resumeAllSync?.().then(() => refresh()); }}
-                className="rounded-lg px-3 py-1.5 text-xs font-medium text-white"
+                className="rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 Resume all
@@ -436,7 +436,7 @@ export function SyncPage() {
               </p>
               <button
                 onClick={() => setShowAdd(true)}
-                className="mt-4 flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="mt-4 flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 <Plus size={14} /> Add sync folder
@@ -650,7 +650,7 @@ export function SyncPage() {
             <div className="flex justify-end border-t px-6 py-4" style={{ borderColor: "var(--color-border)" }}>
               <button
                 onClick={() => setShowHelp(false)}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 Got it
@@ -1029,7 +1029,7 @@ function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatu
         <button
           disabled={busy !== null}
           onClick={() => decide("keep")}
-          className="rounded-lg px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+          className="rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
           style={{ background: "var(--color-primary)" }}
         >
           {busy === "keep" ? "Keeping..." : "Keep the cloud copies"}
@@ -1274,7 +1274,7 @@ function SyncSettings() {
         </div>
         <p className="text-xs text-[var(--color-text-muted)]">0 = unlimited. Limits apply across all transfers.</p>
         <PrefToggle label="Pause on battery" description="Stop syncing while running on battery power" checked={pauseOnBattery} onChange={setPauseOnBattery} />
-        <button onClick={save} className="rounded-lg px-4 py-2 text-sm font-medium text-white" style={{ background: "var(--color-primary)" }}>
+        <button onClick={save} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]" style={{ background: "var(--color-primary)" }}>
           Save settings
         </button>
       </div>
@@ -1482,7 +1482,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 <span
                   className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold transition-colors ${
                     step === s.num
-                      ? "bg-[var(--color-primary)] text-white"
+                      ? "bg-[var(--color-primary)] text-[var(--color-primary-fg)]"
                       : step > s.num
                         ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)]"
                         : "bg-[var(--color-bg-tertiary)] text-[var(--color-text-muted)]"
@@ -1716,7 +1716,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 <button
                   onClick={addPattern}
                   disabled={!newPattern.trim()}
-                  className="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  className="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                   style={{ background: "var(--color-primary)" }}
                 >
                   Add
@@ -1772,7 +1772,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
               <button
                 onClick={() => setStep(step + 1)}
                 disabled={step === 1 && !canProceedStep1}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 Continue
@@ -1781,7 +1781,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
               <button
                 onClick={submit}
                 disabled={!canSubmit || loading}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 {loading ? "Creating..." : "Start syncing"}

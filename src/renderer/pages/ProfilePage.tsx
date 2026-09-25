@@ -273,7 +273,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
             />
           ) : (
             <div
-              className="flex h-20 w-20 items-center justify-center rounded-full text-2xl font-semibold text-white"
+              className="flex h-20 w-20 items-center justify-center rounded-full text-2xl font-semibold text-[var(--color-primary-fg)]"
               style={{ background: "var(--color-primary)" }}
             >
               {user?.name?.charAt(0).toUpperCase() || "?"}
@@ -328,7 +328,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
           <button
             onClick={() => nameMut.mutate()}
             disabled={!name.trim() || name === user?.name || nameMut.isPending}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
             style={{ background: "var(--color-primary)" }}
           >
             {nameMut.isPending ? "Saving..." : "Save"}
@@ -391,7 +391,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
                 <button
                   onClick={() => requestEmailMut.mutate()}
                   disabled={!newEmail.trim() || !emailPassword || requestEmailMut.isPending}
-                  className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                   style={{ background: "var(--color-primary)" }}
                 >
                   {requestEmailMut.isPending ? "Sending..." : "Send code"}
@@ -422,7 +422,7 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
                 <button
                   onClick={() => confirmEmailMut.mutate()}
                   disabled={verifyCode.length !== 6 || confirmEmailMut.isPending}
-                  className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                   style={{ background: "var(--color-primary)" }}
                 >
                   {confirmEmailMut.isPending ? "Verifying..." : "Verify & update"}
@@ -556,7 +556,7 @@ function PasswordSection() {
           <div className="space-y-3">
             <p className="text-sm text-[var(--color-text-muted)]">2FA is not enabled. Enable it for extra security.</p>
             <div className="flex gap-2">
-              <button onClick={() => setupTotpMut.mutate()} disabled={setupTotpMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
+              <button onClick={() => setupTotpMut.mutate()} disabled={setupTotpMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
                 {setupTotpMut.isPending ? "Setting up..." : "Set up authenticator app"}
               </button>
               <button onClick={() => enableEmailMut.mutate()} disabled={enableEmailMut.isPending} className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
@@ -584,7 +584,7 @@ function PasswordSection() {
           </div>
           <div className="mt-5 flex justify-end gap-2">
             <button onClick={() => setShowPwModal(false)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>Cancel</button>
-            <button onClick={() => changePwMut.mutate()} disabled={!currentPw || !newPw || !!pwError || mismatch || changePwMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
+            <button onClick={() => changePwMut.mutate()} disabled={!currentPw || !newPw || !!pwError || mismatch || changePwMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
               {changePwMut.isPending ? "Changing..." : "Change password"}
             </button>
           </div>
@@ -620,7 +620,7 @@ function PasswordSection() {
           </div>
           <div className="flex justify-end gap-2">
             <button onClick={() => setTfaModal(null)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>Cancel</button>
-            <button onClick={() => verifyTotpMut.mutate()} disabled={totpCode.length !== 6 || verifyTotpMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
+            <button onClick={() => verifyTotpMut.mutate()} disabled={totpCode.length !== 6 || verifyTotpMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
               {verifyTotpMut.isPending ? "Verifying..." : "Verify & enable"}
             </button>
           </div>
@@ -652,7 +652,7 @@ function PasswordSection() {
               <Download size={12} /> Download
             </button>
           </div>
-          <button onClick={() => setTfaModal(null)} className="w-full rounded-lg px-4 py-2 text-sm font-medium text-white" style={{ background: "var(--color-primary)" }}>
+          <button onClick={() => setTfaModal(null)} className="w-full rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]" style={{ background: "var(--color-primary)" }}>
             I've saved these codes
           </button>
         </Modal>
@@ -681,7 +681,7 @@ function PasswordSection() {
           <PasswordInput label="Password" value={regenPw} onChange={setRegenPw} autoComplete="current-password" />
           <div className="mt-4 flex justify-end gap-2">
             <button onClick={() => { setTfaModal(null); setRegenPw(""); }} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>Cancel</button>
-            <button onClick={() => regenMut.mutate()} disabled={!regenPw || regenMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
+            <button onClick={() => regenMut.mutate()} disabled={!regenPw || regenMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
               {regenMut.isPending ? "Regenerating..." : "Regenerate codes"}
             </button>
           </div>
@@ -705,7 +705,7 @@ function ApiKeysSection() {
         </p>
         <button
           onClick={() => window.open(webAppUrl("/profile"), "_blank")}
-          className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+          className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
           <ExternalLink size={14} />
@@ -928,7 +928,7 @@ function BillingSection() {
         </p>
         <button
           onClick={openBilling}
-          className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+          className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
           <ExternalLink size={14} />
@@ -1173,7 +1173,7 @@ function AboutSection() {
             isLinux ? (
               <button
                 onClick={() => window.electronAPI.showUpdateFile()}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 <ExternalLink size={14} />
@@ -1182,7 +1182,7 @@ function AboutSection() {
             ) : (
               <button
                 onClick={() => window.electronAPI.installUpdate()}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 <ArrowDownCircle size={14} />

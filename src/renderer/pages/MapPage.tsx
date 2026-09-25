@@ -377,7 +377,7 @@ export function MapPage() {
               </p>
               <Link
                 to="/files"
-                className="mt-3 rounded-lg px-3 py-1.5 text-xs font-medium text-white"
+                className="mt-3 rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 Go to Files

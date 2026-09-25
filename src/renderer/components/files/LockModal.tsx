@@ -318,7 +318,7 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
           type="button"
           onClick={() => void submit()}
           disabled={!enabled}
-          className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
           style={{ background: "var(--color-primary)" }}
         >
           {saving && <Loader2 size={14} className="animate-spin" />}

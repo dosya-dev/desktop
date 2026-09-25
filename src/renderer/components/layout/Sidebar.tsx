@@ -43,6 +43,7 @@ import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
 import { activeFilter, filesHref, type FilterId } from "@/lib/files-params";
 import { toast } from "sonner";
+import { SwatchPicker } from "../SwatchPicker";
 
 // `perm` is the page-access permission that reveals the entry. Those six
 // access_* keys shipped in migration 0008 and were read by nothing anywhere -
@@ -247,7 +248,29 @@ export function Sidebar() {
     };
     measure();
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+
+    // The sidebar animates its own width over 200ms (collapse/expand, and the
+    // automatic collapse at narrow widths). A CSS transition fires no resize
+    // event, and this effect runs the instant `collapsed` flips - before the
+    // animation has moved a pixel - so a single measurement captures the width
+    // the sidebar is leaving, not the one it is going to.
+    //
+    // That left the pill at its expanded width (~200px) inside a nav that had
+    // become ~36px wide. The nav is `overflow-y-auto`, and a box with one axis
+    // scrollable and the other visible resolves BOTH to scrollable, so the
+    // stranded pill made the navigation scroll sideways - until a route change
+    // happened to re-run this effect and re-measure.
+    //
+    // Observing the nav fixes it at the source: the pill is re-measured
+    // whenever the box it is positioned inside actually changes size, for the
+    // whole length of the animation rather than once at the start.
+    const observer = new ResizeObserver(measure);
+    if (navRef.current) observer.observe(navRef.current);
+
+    return () => {
+      window.removeEventListener("resize", measure);
+      observer.disconnect();
+    };
     // filesOpen and collapsed change which row is active and how tall it is.
   }, [location.pathname, location.search, filesOpen, collapsed, visibleFilesChildren.length]);
 
@@ -470,7 +493,7 @@ export function Sidebar() {
     {switchingWs && (
       <div className="fixed inset-0 z-[9999] flex flex-col items-center justify-center gap-4 bg-[var(--color-bg)]">
         <div
-          className="flex h-16 w-16 items-center justify-center rounded-2xl text-xl font-bold text-white"
+          className="flex h-16 w-16 items-center justify-center rounded-2xl text-xl font-bold text-[var(--color-primary-fg)]"
           style={{ background: switchingWs.icon_color || "var(--color-primary)" }}
         >
           {switchingWs.icon_initials}
@@ -543,7 +566,7 @@ export function Sidebar() {
           title={collapsed ? active?.name || "Select workspace" : undefined}
         >
           <div
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-semibold text-white"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-semibold text-[var(--color-primary-fg)]"
             style={{ background: active?.icon_color || "var(--color-primary)" }}
           >
             {active?.icon_initials || "?"}
@@ -601,7 +624,7 @@ export function Sidebar() {
                     className="flex w-full items-center gap-2.5 px-3 py-2 text-sm hover:bg-[var(--color-bg-secondary)] transition-colors"
                   >
                     <div
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs font-semibold text-white"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs font-semibold text-[var(--color-primary-fg)]"
                       style={{ background: ws.icon_color || "var(--color-primary)" }}
                     >
                       {ws.icon_initials}
@@ -792,7 +815,7 @@ export function Sidebar() {
               />
             ) : (
               <div
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-medium text-white"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 {user?.name?.charAt(0).toUpperCase() || "?"}
@@ -852,18 +875,7 @@ export function Sidebar() {
             {/* Color picker */}
             <div className="mb-4">
               <p className="mb-2 text-xs font-medium text-[var(--color-text-secondary)]">Color</p>
-              <div className="flex gap-2">
-                {["#22c55e", "#7C3AED", "#2563EB", "#EA580C", "#059669", "#DB2777", "#1A1917"].map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setNewWsColor(c)}
-                    className={`h-7 w-7 rounded-full transition-all ${newWsColor === c ? "ring-2 ring-offset-2" : "hover:scale-110"}`}
-                    style={{ background: c, "--tw-ring-color": c } as React.CSSProperties}
-                    aria-label={c}
-                  />
-                ))}
-              </div>
+              <SwatchPicker value={newWsColor} onChange={setNewWsColor} label="Workspace colour" />
             </div>
             <div className="flex justify-end gap-2">
               <button
@@ -876,7 +888,7 @@ export function Sidebar() {
               <button
                 onClick={() => newWsName.trim() && createWsMut.mutate(newWsName.trim())}
                 disabled={!newWsName.trim() || createWsMut.isPending}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 {createWsMut.isPending ? "Creating..." : "Create"}
@@ -899,7 +911,7 @@ function SidebarAvatar({ src, name }: { src: string; name: string | undefined })
   if (failed) {
     return (
       <div
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-medium text-white"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-medium text-[var(--color-primary-fg)]"
         style={{ background: "var(--color-primary)" }}
       >
         {name?.charAt(0).toUpperCase() || "?"}

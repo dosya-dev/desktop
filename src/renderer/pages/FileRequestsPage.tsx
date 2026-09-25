@@ -161,7 +161,7 @@ export function FileRequestsPage() {
         <button
           data-testid="request-new"
           onClick={() => setShowCreate(true)}
-          className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+          className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
           <Plus size={14} /> New request
@@ -293,7 +293,7 @@ export function FileRequestsPage() {
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button data-testid="create-cancel" onClick={() => setShowCreate(false)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>Cancel</button>
-              <button data-testid="create-submit" onClick={() => createMut.mutate()} disabled={!title.trim() || createMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
+              <button data-testid="create-submit" onClick={() => createMut.mutate()} disabled={!title.trim() || createMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
                 {createMut.isPending ? "Creating..." : "Create request"}
               </button>
             </div>
@@ -527,7 +527,7 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                     addMut.mutate(value);
                   }}
                   disabled={addMut.isPending}
-                  className="rounded-lg p-1.5 text-white disabled:opacity-50"
+                  className="rounded-lg p-1.5 text-[var(--color-primary-fg)] disabled:opacity-50"
                   style={{ background: "var(--color-primary)" }}
                 >
                   <Plus size={12} />

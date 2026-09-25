@@ -1,3 +1,4 @@
+import { activityColor } from "./palette";
 /**
  * Human-readable labels for workspace activity actions.
  *
@@ -26,30 +27,17 @@ export const ACTION_LABELS: Record<string, string> = {
   member_removed: "removed a member",
 };
 
-export const ACTION_COLORS: Record<string, string> = {
-  file_uploaded: "#22c55e",
-  file_deleted: "#ef4444",
-  file_permanently_deleted: "#991b1b",
-  file_restored: "#2563EB",
-  file_shared: "#7C3AED",
-  file_shared_email: "#7C3AED",
-  file_request_created: "#D97706",
-  file_request_uploaded: "#16a34a",
-  folder_created: "#22c55e",
-  folder_renamed: "#706e69",
-  folder_moved: "#706e69",
-  file_renamed: "#706e69",
-  file_moved: "#706e69",
-  file_copied: "#3b82f6",
-  member_invited: "#D97706",
-  member_joined: "#16a34a",
-  member_removed: "#ef4444",
-};
 
 export function actionLabel(action: string): string {
   return ACTION_LABELS[action] ?? action.replace(/[._]/g, " ");
 }
 
-export function actionColor(action: string): string {
-  return ACTION_COLORS[action] ?? "#706e69";
+/**
+ * The activity dot. The action-to-tone map is shared with the web app now: the two
+ * render the same feed from the same API and used to disagree on several actions -
+ * a file request was blue in one and amber in the other, and a permanent delete was a
+ * darker red than an ordinary one.
+ */
+export function actionColor(action: string, scheme: "light" | "dark" = "light"): string {
+  return activityColor(action, scheme);
 }

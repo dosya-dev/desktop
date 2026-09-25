@@ -155,7 +155,7 @@ export function UpdatesSection() {
         {status.state === "ready" ? (
           <button
             onClick={() => window.electronAPI.installUpdate()}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-white"
+            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)]"
             style={{ background: "var(--color-primary)" }}
           >
             <RefreshCw size={14} /> Restart &amp; install

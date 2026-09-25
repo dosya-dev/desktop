@@ -1,3 +1,4 @@
+import { CHART, quotaState } from "./palette";
 // Types mirror GET /api/workspace-dashboard (apps/api/src/lib/workspace-dashboard.ts).
 export interface DashboardSource {
   kind: 'plan' | 'package' | 'custom' | 'license' | 'referral';
@@ -33,18 +34,33 @@ export interface WorkspaceDashboardData {
   shared: SharedWorkspace[];
 }
 
-// Per-workspace segment palette (matches the dashboard team-usage bar).
-export const WS_SEGMENT_COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6'];
+// The segment and threshold colours now come from the shared palette
+// (packages/brand). They used to be three hardcoded copies of an 8-hue array whose
+// worst pair was indistinguishable under red-green colour blindness; the shared set is
+// five hues verified against simulated deutan, protan and tritan vision.
+export const WS_SEGMENT_COLORS = CHART.light;
 
-// Source-dot palette for the "where your space comes from" list.
+/** Series colour for the nth workspace in the stacked bar. */
+export function segmentColor(index: number, scheme: Scheme = "light"): string {
+  const series = CHART[scheme];
+  return series[index % series.length];
+}
+
+/** Overall usage-bar colour. One rule, shared with the sidebar and billing. */
+export function storageColor(pct: number, scheme: Scheme = "light"): string {
+  const state = quotaState(pct);
+  return STORAGE_STATE_COLOR[scheme][state];
+}
+
+const STORAGE_STATE_COLOR = {
+  light: { ok: "#15803d", warn: "#b45309", critical: "#d42121" },
+  dark: { ok: "#4ade80", warn: "#fcd34d", critical: "#f87171" },
+} as const;
+
+type Scheme = "light" | "dark";
 export const SOURCE_DOT: Record<string, string> = {
   plan: '#3b82f6', package: '#8b5cf6', custom: '#f59e0b', license: '#ec4899', referral: '#22c55e',
 };
-
-/** Overall usage-bar color, matching the sidebar/billing thresholds. */
-export function storageColor(pct: number): string {
-  return pct > 90 ? '#ef4444' : pct > 70 ? '#D97706' : '#22c55e';
-}
 
 export interface StackSegment {
   id: string;

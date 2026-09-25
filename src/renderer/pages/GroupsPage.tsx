@@ -13,19 +13,15 @@ import {
   removeFileFromGroup, removeFolderFromGroup,
   DEFAULT_GROUP_COLOR, MAX_GROUP_NAME, type Group,
 } from "@/lib/groups-api";
+import { SWATCHES, resolveSwatch } from "@/lib/palette";
 
 /**
- * A fixed palette rather than a colour picker.
- *
- * The server takes any string, but the colour is decorative - it exists so two
- * groups are told apart at a glance. A swatch row does that without a picker
- * dependency, and without letting someone choose a colour invisible on their
- * own theme.
+ * A swatch row rather than a colour picker: the colour exists so two groups are told
+ * apart at a glance, and a free-form picker would let someone choose a colour invisible
+ * on their own theme. The swatches now come from the shared palette (packages/brand),
+ * which states a fill per ground, so that last hazard is handled by the token rather
+ * than by limiting the choice.
  */
-const SWATCHES = [
-  DEFAULT_GROUP_COLOR, "#C2410C", "#B45309", "#4D7C0F",
-  "#0F766E", "#1D4ED8", "#6D28D9", "#BE185D",
-];
 
 export function GroupsPage() {
   const { active } = useWorkspace();
@@ -107,7 +103,7 @@ export function GroupsPage() {
         <button
           data-testid="group-new"
           onClick={() => setCreating(true)}
-          className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+          className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
           <Plus size={14} /> New group
@@ -195,14 +191,14 @@ export function GroupsPage() {
                   no claim to permanent card space. */}
               {editingId === g.id && (
               <div className="mt-2 flex items-center gap-1.5">
-                {SWATCHES.map((c) => (
+                {SWATCHES.map((s) => (
                   <button
-                    key={c}
-                    data-testid={`group-${g.id}-color-${c.replace("#", "")}`}
-                    onClick={() => recolourMut.mutate({ id: g.id, color: c })}
-                    aria-label={`Set colour ${c}`}
-                    className={`h-4 w-4 rounded-full transition-transform hover:scale-110 ${g.color.toLowerCase() === c.toLowerCase() ? "ring-2 ring-offset-1" : ""}`}
-                    style={{ background: c }}
+                    key={s.name}
+                    data-testid={`group-${g.id}-color-${s.name}`}
+                    onClick={() => recolourMut.mutate({ id: g.id, color: s.light })}
+                    aria-label={`Set colour ${s.label}`}
+                    className={`h-4 w-4 rounded-full transition-transform hover:scale-110 ${resolveSwatch(g.color) === s.name ? "ring-2 ring-offset-1" : ""}`}
+                    style={{ background: s.light }}
                   />
                 ))}
               </div>
@@ -275,14 +271,14 @@ export function GroupsPage() {
               </p>
             )}
             <div className="mt-3 flex items-center gap-1.5">
-              {SWATCHES.map((c) => (
+              {SWATCHES.map((s) => (
                 <button
-                  key={c}
-                  data-testid={`group-create-color-${c.replace("#", "")}`}
-                  onClick={() => setNewColor(c)}
-                  aria-label={`Colour ${c}`}
-                  className={`h-5 w-5 rounded-full transition-transform hover:scale-110 ${newColor === c ? "ring-2 ring-offset-1" : ""}`}
-                  style={{ background: c }}
+                  key={s.name}
+                  data-testid={`group-create-color-${s.name}`}
+                  onClick={() => setNewColor(s.light)}
+                  aria-label={`Colour ${s.label}`}
+                  className={`h-5 w-5 rounded-full transition-transform hover:scale-110 ${resolveSwatch(newColor) === s.name ? "ring-2 ring-offset-1" : ""}`}
+                  style={{ background: s.light }}
                 />
               ))}
             </div>
@@ -294,7 +290,7 @@ export function GroupsPage() {
                 data-testid="group-create-submit"
                 onClick={() => createMut.mutate()}
                 disabled={!newName.trim() || nameTooLong || createMut.isPending}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 {createMut.isPending && <Loader2 size={12} className="animate-spin" />}

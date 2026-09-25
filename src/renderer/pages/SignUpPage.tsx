@@ -4,8 +4,9 @@ import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { isValidEmail, validatePassword } from "@dosya-dev/shared";
-import logoSvg from "@/assets/logo.svg";
+import { Logo } from "@/components/Logo";
 import { LegalLinks, LegalNotice } from "@/components/LegalNotice";
+import { useAuthDirection } from "@/lib/auth-direction";
 
 export function SignUpPage() {
   const { refreshUser } = useAuth();
@@ -122,13 +123,18 @@ export function SignUpPage() {
     }
   }
 
+  const authDir = useAuthDirection();
+
   return (
-    <div className="bg-grid flex h-screen flex-col items-center overflow-y-auto py-8 [justify-content:safe_center] bg-[var(--color-bg-secondary)]">
-      <div className="mb-6 flex items-center gap-2.5">
-        <img src={logoSvg} alt="dosya.dev" className="h-9 w-9" />
+    <div
+      data-auth-dir={authDir}
+      className="bg-grid flex h-screen flex-col items-center overflow-y-auto py-8 [justify-content:safe_center] bg-[var(--color-bg-secondary)]"
+    >
+      <div className="auth-step mb-6 flex items-center gap-2.5">
+        <Logo className="h-9 w-9" />
         <span className="text-xl font-semibold">dosya.dev</span>
       </div>
-      <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-8 shadow-sm border" style={{ borderColor: "var(--color-border)" }}>
+      <div className="auth-step w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-8 shadow-sm border" style={{ borderColor: "var(--color-border)" }}>
         <div className="mb-6 text-center">
           <h1 className="text-2xl font-semibold">Create an account</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
@@ -217,7 +223,7 @@ export function SignUpPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full rounded-lg px-4 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50"
+            className="w-full rounded-lg px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] transition-colors disabled:opacity-50"
             style={{
               background: loading
                 ? "var(--color-primary-hover)"

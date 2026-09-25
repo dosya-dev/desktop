@@ -112,7 +112,7 @@ export function LibraryGrid(props: LibraryGridProps) {
           {search ? `Try a different name, or clear the search to see every ${copy.noun}.` : copy.emptyDescription}
         </p>
         {!search && (
-          <button className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs text-white" onClick={onUploadClick}>
+          <button className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs text-[var(--color-primary-fg)]" onClick={onUploadClick}>
             <Upload size={12} /> Upload {copy.nounPlural}
           </button>
         )}

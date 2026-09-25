@@ -204,7 +204,7 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                   autoFocus
                 />
                 <button
-                  className="flex w-full items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                   style={{ background: "var(--color-primary)" }}
                   onClick={handleUnlock}
                   disabled={unlocking}
@@ -368,7 +368,7 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                   <div className="space-y-1.5 pt-1">
                     <ActionButton icon={<Eye size={14} className="text-[var(--color-text-muted)]" />} label="View file" onClick={() => onView(file)} />
                     <button
-                      className="flex h-10 w-full items-center justify-start gap-2 rounded-lg px-3 text-xs font-medium text-white"
+                      className="flex h-10 w-full items-center justify-start gap-2 rounded-lg px-3 text-xs font-medium text-[var(--color-primary-fg)]"
                       style={{ background: "var(--color-primary)" }}
                       onClick={() => downloadViaDialog(file)}
                     >
@@ -700,7 +700,7 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
             data-testid="comment-send"
             onClick={submit}
             disabled={!newComment.trim() || postMut.isPending}
-            className="rounded-lg p-2 text-white disabled:opacity-50"
+            className="rounded-lg p-2 text-[var(--color-primary-fg)] disabled:opacity-50"
             style={{ background: "var(--color-primary)" }}
           >
             <Send size={14} />
@@ -721,7 +721,7 @@ function CommentAvatar({ comment }: { comment: Comment }) {
   if (!comment.user_avatar || failedAt === version) {
     return (
       <div
-        className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-medium text-white"
+        className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-medium text-[var(--color-primary-fg)]"
         style={{ background: "var(--color-primary)" }}
       >
         {comment.user_name?.charAt(0).toUpperCase() || "?"}

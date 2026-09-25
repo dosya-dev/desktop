@@ -21,8 +21,12 @@ export interface TrayWindowHandles {
 let tray: Tray | null = null;
 
 export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle): void {
-  // Load tray icon from build resources
-  const trayIconPath = join(__dirname, "../../build/tray-icon.png");
+  // macOS gets the black template image (alpha only, the menu bar tints it);
+  // Windows and Linux draw the icon as-is, so they get the graphite plate.
+  const trayIconPath = join(
+    __dirname,
+    process.platform === "darwin" ? "../../build/tray-icon.png" : "../../build/tray-icon-color.png",
+  );
   let icon: Electron.NativeImage;
   try {
     icon = nativeImage.createFromPath(trayIconPath);

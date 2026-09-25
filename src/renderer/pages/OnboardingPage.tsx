@@ -11,7 +11,7 @@ import {
   ArrowRight,
   ChevronRight,
 } from "lucide-react";
-import logoSvg from "@/assets/logo.svg";
+import { Logo } from "@/components/Logo";
 
 const steps = [
   {
@@ -104,7 +104,7 @@ export function OnboardingPage() {
       <div className="flex w-[30%] flex-col justify-between bg-[var(--color-bg)] p-8">
         {/* Logo */}
         <div className="flex items-center gap-2.5">
-          <img src={logoSvg} alt="dosya.dev" className="h-7 w-7" />
+          <Logo className="h-7 w-7" />
           <span className="text-base font-semibold text-[var(--color-text)]">
             dosya.dev
           </span>
@@ -211,7 +211,7 @@ export function OnboardingPage() {
             {/* Next / Get Started button */}
             <button
               onClick={next}
-              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary-hover)]"
+              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] transition-colors hover:bg-[var(--color-primary-hover)]"
             >
               {isLast ? "Get Started" : "Next"}
               <ArrowRight size={16} />

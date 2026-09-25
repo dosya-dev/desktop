@@ -2,7 +2,7 @@
  * macOS Quick Action (Services menu) integration.
  *
  * Installs an Automator workflow to ~/Library/Services/ so that
- * "Sync with Dosya" appears when right-clicking files/folders in Finder
+ * "Sync with dosya" appears when right-clicking files/folders in Finder
  * (under Quick Actions or Services). The workflow opens a dosya:// URL
  * which the Electron app handles via the open-url event.
  */
@@ -12,11 +12,25 @@ import { execFile } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
 
-const WORKFLOW_NAME = "Sync with Dosya.workflow";
+const WORKFLOW_NAME = "Sync with dosya.workflow";
+
+/**
+ * Names earlier versions installed under. The product is written `dosya`, in
+ * lower case, everywhere else.
+ *
+ * On a default macOS volume this is the same path as the current name - the
+ * filesystem is case-insensitive - so removing it is a no-op. On a
+ * case-sensitive volume it is a second bundle, and leaving it behind would put
+ * two nearly identical Quick Actions in the Finder menu.
+ */
+const LEGACY_WORKFLOW_NAMES = ["Sync with Dosya.workflow"];
+
 // v2: added the required Contents/Info.plist (NSServices). v1 installs shipped
 // only document.wflow, so macOS never registered the Quick Action - bumping the
 // version forces those broken installs to be reinstalled with the plist.
-const WORKFLOW_VERSION = "2";
+// v3: the menu item is lower-case `dosya`, matching the wordmark everywhere
+// else. Existing installs must be rewritten or they keep the old label.
+const WORKFLOW_VERSION = "3";
 
 export function installQuickAction(): void {
   if (process.platform !== "darwin") return;
@@ -33,9 +47,9 @@ export function installQuickAction(): void {
     } catch {}
   }
 
-  // Remove old version if exists
-  if (existsSync(workflowDir)) {
-    rmSync(workflowDir, { recursive: true, force: true });
+  // Remove the old version, and any bundle installed under a previous name.
+  for (const dir of [workflowDir, ...LEGACY_WORKFLOW_NAMES.map((n) => join(servicesDir, n))]) {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   }
 
   try {
@@ -49,7 +63,7 @@ export function installQuickAction(): void {
     // Refresh the Services registry so the action appears without a re-login
     // (best-effort - pbs may not exist / may fail silently on some setups).
     execFile("/System/Library/CoreServices/pbs", ["-update"], () => {});
-    console.log("[services] Installed Quick Action: Sync with Dosya");
+    console.log("[services] Installed Quick Action: Sync with dosya");
   } catch (err) {
     console.error("[services] Failed to install Quick Action:", err);
   }
@@ -62,7 +76,7 @@ function buildInfoPlist(): string {
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Sync with Dosya</string>
+	<string>Sync with dosya</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.dosya.quickaction.syncwithdosya</string>
 	<key>NSServices</key>
@@ -71,7 +85,7 @@ function buildInfoPlist(): string {
 			<key>NSMenuItem</key>
 			<dict>
 				<key>default</key>
-				<string>Sync with Dosya</string>
+				<string>Sync with dosya</string>
 			</dict>
 			<key>NSMessage</key>
 			<string>runWorkflowAsService</string>
@@ -93,9 +107,11 @@ function buildInfoPlist(): string {
 export function uninstallQuickAction(): void {
   if (process.platform !== "darwin") return;
 
-  const workflowDir = join(homedir(), "Library", "Services", WORKFLOW_NAME);
-  if (existsSync(workflowDir)) {
-    rmSync(workflowDir, { recursive: true, force: true });
+  const servicesDir = join(homedir(), "Library", "Services");
+  // Legacy names too, or uninstalling leaves a dead Quick Action behind.
+  for (const name of [WORKFLOW_NAME, ...LEGACY_WORKFLOW_NAMES]) {
+    const dir = join(servicesDir, name);
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   }
 }
 

@@ -583,7 +583,7 @@ export function UploadPage() {
                   );
                   setShowFolderPicker(false);
                 }}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 Select folder
@@ -616,7 +616,7 @@ export function UploadPage() {
               <button
                 onClick={() => newFolderName.trim() && createFolderMut.mutate(newFolderName.trim())}
                 disabled={!newFolderName.trim() || createFolderMut.isPending}
-                className="rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 {createFolderMut.isPending ? "Creating..." : "Create"}

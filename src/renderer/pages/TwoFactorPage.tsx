@@ -3,7 +3,8 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { api, ApiError } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { Shield, ArrowLeft, KeyRound, Mail } from "lucide-react";
-import logoSvg from "@/assets/logo.svg";
+import { Logo } from "@/components/Logo";
+import { useAuthDirection } from "@/lib/auth-direction";
 
 export function TwoFactorPage() {
   const navigate = useNavigate();
@@ -50,15 +51,20 @@ export function TwoFactorPage() {
     }
   }
 
+  const authDir = useAuthDirection();
+
   return (
-    <div className="bg-grid flex h-screen flex-col items-center overflow-y-auto py-8 [justify-content:safe_center] bg-[var(--color-bg-secondary)]">
-      <div className="mb-6 flex items-center gap-2.5">
-        <img src={logoSvg} alt="dosya.dev" className="h-9 w-9" />
+    <div
+      data-auth-dir={authDir}
+      className="bg-grid flex h-screen flex-col items-center overflow-y-auto py-8 [justify-content:safe_center] bg-[var(--color-bg-secondary)]"
+    >
+      <div className="auth-step mb-6 flex items-center gap-2.5">
+        <Logo className="h-9 w-9" />
         <span className="text-xl font-semibold">dosya.dev</span>
       </div>
 
       <div
-        className="w-full max-w-sm rounded-xl border bg-[var(--color-bg)] p-8 shadow-sm"
+        className="auth-step w-full max-w-sm rounded-xl border bg-[var(--color-bg)] p-8 shadow-sm"
         style={{ borderColor: "var(--color-border)" }}
       >
         <div className="mb-6 text-center">
@@ -117,7 +123,7 @@ export function TwoFactorPage() {
           <button
             type="submit"
             disabled={loading || !code.trim()}
-            className="w-full rounded-lg px-4 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50"
+            className="w-full rounded-lg px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] transition-colors disabled:opacity-50"
             style={{
               background: loading ? "var(--color-primary-hover)" : "var(--color-primary)",
             }}

@@ -509,7 +509,7 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
       <p className="mb-5 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
       <button
         onClick={() => onDownload()}
-        className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
+        className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] hover:opacity-90"
         style={{ background: "var(--color-primary)" }}
       >
         <Download size={16} /> Download
@@ -598,7 +598,7 @@ function OversizeFallback({ file, onDownload, note }: { file: ViewerFile; onDown
       <p className="mb-5 text-xs text-[var(--color-text-muted)]">{note ?? `File too large to preview inline (${sizeStr}).`}</p>
       <button
         onClick={() => onDownload()}
-        className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
+        className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] hover:opacity-90"
         style={{ background: "var(--color-primary)" }}
       >
         <Download size={16} /> Download
@@ -630,7 +630,7 @@ function VideoPlayer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: s
         </p>
         <button
           onClick={() => onDownload()}
-          className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90"
+          className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] hover:opacity-90"
           style={{ background: "var(--color-primary)" }}
         >
           <Download size={16} /> Download

@@ -23,6 +23,7 @@ import { formatBytes } from "@/lib/format";
 import { UpdatesSection } from "@/components/UpdatesSection";
 import { toast } from "sonner";
 import { webAppUrl } from "../lib/web-app-url";
+import { SwatchPicker } from "../components/SwatchPicker";
 
 /** Shape of GET /api/workspaces/:id. */
 interface SettingsResponse {
@@ -60,10 +61,6 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "danger", label: "Danger zone", icon: <AlertTriangle size={16} /> },
 ];
 
-const ICON_COLORS = [
-  "#22c55e", "#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b",
-  "#ef4444", "#14b8a6", "#6366f1", "#f97316", "#06b6d4",
-];
 
 export function SettingsPage() {
   const { active } = useWorkspace();
@@ -217,23 +214,12 @@ export function SettingsPage() {
               <div>
                 <label className="mb-2 block text-sm font-medium">Icon color</label>
                 <p className="mb-2 text-xs text-[var(--color-text-muted)]">Used when no custom photo is set</p>
-                <div className="flex gap-2">
-                  {ICON_COLORS.map((color) => (
-                    <button
-                      key={color}
-                      onClick={() => setWsColor(color)}
-                      className={`h-8 w-8 rounded-full transition-all ${
-                        wsColor === color ? "ring-2 ring-offset-2" : ""
-                      }`}
-                      style={{ background: color, "--tw-ring-color": color } as React.CSSProperties}
-                    />
-                  ))}
-                </div>
+                <SwatchPicker value={wsColor} onChange={setWsColor} label="Workspace colour" />
               </div>
               <button
                 onClick={() => saveGeneralMut.mutate()}
                 disabled={saveGeneralMut.isPending}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
@@ -279,7 +265,7 @@ export function SettingsPage() {
               <button
                 onClick={() => saveLimitsMut.mutate()}
                 disabled={saveLimitsMut.isPending}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
@@ -313,7 +299,7 @@ export function SettingsPage() {
               <button
                 onClick={() => saveSecurityMut.mutate()}
                 disabled={saveSecurityMut.isPending}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
@@ -333,7 +319,7 @@ export function SettingsPage() {
               </p>
               <button
                 onClick={() => window.open(webAppUrl("/settings"), "_blank")}
-                className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white"
+                className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
                 Open on web
