@@ -150,6 +150,17 @@ function isLocallyChanged(base: SyncFileRecord, local: LocalFile): boolean {
   return local.mtimeMs !== base.localMtimeMs || local.sizeBytes !== base.localSizeBytes;
 }
 
+/**
+ * True for a base row that was adopted from a remote snapshot and has never
+ * been confirmed on disk. `localMtimeMs === 0` is the sentinel the adoption
+ * writes; every row that a real transfer produced carries a real mtime. Such
+ * a row records what the SERVER has, not something both sides ever agreed on,
+ * so a missing local file is "not downloaded yet", never "deleted".
+ */
+function isAdoptedNeverSeen(base: SyncFileRecord): boolean {
+  return base.localMtimeMs === 0;
+}
+
 function isRemotelyChanged(base: SyncFileRecord, remote: RemoteFile): boolean {
   return (
     remote.updatedAt !== base.remoteUpdatedAt ||
@@ -347,7 +358,18 @@ function planThreeWay(inputs: PlanInputs): PlanOp[] {
 
     // 3. Deleted locally, still on the server.
     if (remoteFile && stored && !localFile) {
-      if (isRemotelyChanged(stored, remoteFile)) {
+      if (isAdoptedNeverSeen(stored)) {
+        // Not a deletion: this row was adopted from a remote snapshot on a
+        // fresh pair (prePopulateStateFromRemote) and the file has never been
+        // on disk at all, so its absence is the download that has not happened
+        // yet. Reading it as a deletion planned delete-remote against every
+        // file the user had in the cloud - the deletion guard withheld those
+        // it could see (and the reconciler turned them into the conflicts that
+        // keep-both then "resolved" by renaming), but the guard only fires
+        // above half of a tracked set larger than ten, so any pair where the
+        // user already held most of the folder locally deleted the rest.
+        ops.push({ kind: "download-new", relPath: remoteFile.relPath, remoteId, sizeBytes: remoteFile.sizeBytes });
+      } else if (isRemotelyChanged(stored, remoteFile)) {
         // The server copy moved on since we last synced, so the local
         // deletion is not the whole story - take the newer bytes rather than
         // destroying them.

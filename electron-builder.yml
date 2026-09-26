@@ -140,13 +140,52 @@ linux:
     - target: deb
       arch:
         - x64
+    - target: snap
+      arch:
+        - x64
   icon: build/icon.png
   category: Utility
+  synopsis: Cloud storage and file sync for dosya.dev
   # electron-builder 26 derives the default from the scoped npm package name
   # ("@dosya-dev/desktop" -> "@dosya-devdesktop") and then rejects the "@".
   # Pin the name v25 used (productName), which is also the binary existing
-  # AppImage/deb installs already have on disk.
+  # AppImage/deb installs already have on disk. It is ALSO the snap's name
+  # (SnapCoreLegacy lowercases executableName), which must match the name
+  # registered on the Snap Store and SNAP_NAME in src/main/distribution.ts.
   executableName: dosya
+
+# ── Snap Store ─────────────────────────────────────────────────────
+# Built from electron-builder's prebuilt Electron snap template with
+# mksquashfs, so the Linux runner needs no snapcraft/LXD to BUILD it; the
+# release workflow installs snapcraft only to upload. Two things silently
+# switch the template off and make the build shell out to snapcraft instead:
+# a non-default `stagePackages` list or any `buildPackages`. Plugs do not (the
+# template check in coreLegacy.js only looks at those two), so the extras
+# below are safe to add.
+#
+# The template also drops chrome-sandbox and appends --no-sandbox to the app
+# command: in strict confinement Chromium's own sandbox cannot start (it
+# needs user namespaces snapd's AppArmor profile denies), and snapd's
+# confinement replaces it.
+snap:
+  # Ubuntu 22.04 runtime; Electron's Linux builds want glibc 2.35+.
+  base: core22
+  confinement: strict
+  grade: stable
+  title: dosya
+  summary: Cloud storage and file sync for dosya.dev
+  plugs:
+    - default
+    # Sync folders on other drives and USB media. Not auto-connected: users
+    # run `sudo snap connect dosya:removable-media` (documented on /desktop).
+    - removable-media
+    # Electron's safeStorage (the encrypted session cookie, see the
+    # enableCookieEncryption fuse above) talks to the keyring over D-Bus; the
+    # `default` set does not include the interface, so without it snapd blocks
+    # the call and safeStorage falls back to an unencrypted backend.
+    - password-manager-service
+    # LAN transfer listens for peers.
+    - network-bind
 
 # ── Installer options ──────────────────────────────────────────────
 nsis:

@@ -18,6 +18,7 @@ import { longPath } from "./sync/paths";
 import { clearSessionCookie } from "./session";
 import { isSessionCookieName, sessionCookieHeader } from "./session-cookie";
 import { buildDownloadUrl } from "./download-url";
+import { openSink, writeSink, closeSink, abortSink } from "./lan-receive";
 
 export function registerIpcHandlers(apiBase: string): void {
   // "Open in system app" writes here. A single fixed name (the old approach)
@@ -210,6 +211,20 @@ export function registerIpcHandlers(apiBase: string): void {
     }
     return dialog.showSaveDialog(safeOpts);
   });
+
+  // ── LAN Transfer: where an incoming file is written ────────────────
+  //
+  // The renderer owns the WebRTC channel but never the destination. It opens
+  // a sink by NAME, the user picks the path in a dialog here, and the handle
+  // never leaves this process - so a peer on the network cannot aim its bytes
+  // anywhere. See src/main/lan-receive.ts.
+
+  ipcMain.handle("lan:recv-open", (_event, { name, size }: { name: unknown; size: unknown }) =>
+    openSink(name, size));
+  ipcMain.handle("lan:recv-chunk", (_event, { id, bytes }: { id: unknown; bytes: unknown }) =>
+    writeSink(id, bytes));
+  ipcMain.handle("lan:recv-close", (_event, { id }: { id: unknown }) => closeSink(id));
+  ipcMain.handle("lan:recv-abort", (_event, { id }: { id: unknown }) => abortSink(id));
 
   // ── File Open ─────────────────────────────────────────────────────
 

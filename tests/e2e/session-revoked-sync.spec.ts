@@ -38,9 +38,19 @@ test("sync recovers promptly after a revoked session and re-login", async ({ app
     );
 
   const pairState = async () => {
-    const status = await page.evaluate(() =>
-      (window as any).electronAPI.getSyncStatus(),
-    );
+    // Reading engine state races the sign-out this test deliberately causes:
+    // losing the session makes the renderer reload onto onboarding, and an
+    // evaluate in flight when that lands dies with "Execution context was
+    // destroyed". The pair lives in the MAIN process and is unaffected, so
+    // the read is simply retried against the new context rather than failing
+    // a poll whose subject is the engine, not the page.
+    const status = await page
+      .evaluate(() => (window as any).electronAPI.getSyncStatus())
+      .catch(async (err: Error) => {
+        if (!/Execution context was destroyed|Target closed/.test(err.message)) throw err;
+        await page.waitForLoadState("domcontentloaded");
+        return page.evaluate(() => (window as any).electronAPI.getSyncStatus());
+      });
     const pair = status?.pairs?.find(
       (p: any) => p.remoteFolderName === "revoked-session",
     );
@@ -69,6 +79,7 @@ test("sync recovers promptly after a revoked session and re-login", async ({ app
     await expect
       .poll(async () => (await pairState())?.syncedAt ?? null, { timeout: 30_000 })
       .not.toBeNull();
+    const syncedBefore = (await pairState())!.syncedAt as number;
 
     // Revoke the session server-side (the cookie stays in the jar), then
     // force the engine to talk to the API: a dropped file for realism, a
@@ -76,19 +87,22 @@ test("sync recovers promptly after a revoked session and re-login", async ({ app
     expect(await setAuth(true)).toBe(true);
     writeFileSync(join(dir, "poke.txt"), "hello");
     await page.evaluate((id: string) => (window as any).electronAPI.syncNow(id), pairId);
-    await expect
-      .poll(async () => (await pairState())?.error ?? "", { timeout: 90_000 })
-      .toMatch(/Session expired/);
 
-    // The renderer's next boot check hits the 401 and lands on onboarding;
-    // the login form itself lives at /login.
-    await page.evaluate(() => {
-      window.location.hash = "#/onboarding";
-      window.location.reload();
-    });
+    // The app signs ITSELF out: a confirmed 401 tears the session down,
+    // clears the cookie (which stops the engine through the main process's
+    // cookie listener) and reloads onto onboarding. No manual reload here -
+    // driving it by hand would hide a regression in that teardown.
+    //
+    // This used to assert the pair parked in "Session expired" first. It
+    // cannot: the sign-out stops the engine, so the pair goes quiet at idle
+    // rather than erroring. That assertion only ever passed because the mock
+    // answered a cookie-less /api/me with 200 and a fresh Set-Cookie, so the
+    // reload silently signed back in and left the engine running to find its
+    // own 401 - an endless sign-out/re-auth loop no server can produce (see
+    // the deadSessions gate in tests/helpers/mock-api.ts).
     await page.waitForFunction(
       () => window.location.hash.includes("/onboarding"),
-      { timeout: 15_000 },
+      { timeout: 90_000 },
     );
     await navigateTo(page, "/login");
     await expect(page.getByPlaceholder("you@example.com")).toBeVisible({
@@ -105,13 +119,17 @@ test("sync recovers promptly after a revoked session and re-login", async ({ app
       { timeout: 15_000 },
     );
 
-    // The pair must leave its error state promptly. The 8s bound is the
-    // assertion: the old behavior only recovered on the next 30s timer tick
-    // (phase random relative to the login), the fixed path recovers on the
-    // cookie-set event itself.
+    // Sync must come back on its own, promptly, and actually RUN - a pair
+    // sitting at idle with no error would satisfy "no error" while syncing
+    // nothing, so the assertion is that it completes a fresh pass (a newer
+    // lastSyncedAt than the one before the revocation) without anyone
+    // touching it. The bound is the point: the old behaviour waited for the
+    // next 30s recovery tick, phase-random relative to the login; the fixed
+    // path refreshes on the cookie-set event itself.
     await expect
-      .poll(async () => (await pairState())?.error ?? null, { timeout: 8_000 })
-      .toBeNull();
+      .poll(async () => (await pairState())?.syncedAt ?? 0, { timeout: 20_000 })
+      .toBeGreaterThan(syncedBefore);
+    expect((await pairState())?.error ?? null).toBeNull();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

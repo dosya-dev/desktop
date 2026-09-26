@@ -61,6 +61,9 @@ export function UpdatesSection() {
   // false: a Store user must never see the installer download list, not even
   // for the frame before the IPC answers.
   const [storeBuild, setStoreBuild] = useState<boolean | null>(null);
+  // Which store, once storeBuild is true. Drives the copy and whether there
+  // is a store page to open: the Microsoft Store has one, snapd does not.
+  const [distribution, setDistribution] = useState<string>("direct");
 
   // Current version + OS (default the platform tab to the user's OS) + live status.
   useEffect(() => {
@@ -73,6 +76,9 @@ export function UpdatesSection() {
     (window.electronAPI.isStoreBuild?.() ?? Promise.resolve(false))
       .then((v) => { if (!cancelled) setStoreBuild(v); })
       .catch(() => { if (!cancelled) setStoreBuild(false); });
+    (window.electronAPI.getDistribution?.() ?? Promise.resolve("direct"))
+      .then((d) => { if (!cancelled) setDistribution(d); })
+      .catch(() => {});
     const off = window.electronAPI.onUpdateStatusChanged((s: Status) => setStatus(s));
     return () => { cancelled = true; off?.(); };
   }, []);
@@ -105,12 +111,16 @@ export function UpdatesSection() {
     );
   }
 
-  // Microsoft Store build. The Store owns updates here, so this section shows
-  // no self-update controls and, critically, no installer download list - an
-  // app distributed through the Store may not pull executable code from
-  // anywhere else, and a "Download" button doing exactly that is the kind of
-  // thing certification rejects.
+  // Store build (Microsoft Store or Snap Store). The store owns updates here,
+  // so this section shows no self-update controls and, critically, no
+  // installer download list - an app distributed through a store may not pull
+  // executable code from anywhere else, and a "Download" button doing exactly
+  // that is the kind of thing certification rejects.
   if (storeBuild) {
+    const store = distribution === "snap" ? "Snap Store" : distribution === "mas" ? "Mac App Store" : "Microsoft Store";
+    // snapd refreshes installed snaps in the background on its own schedule
+    // and has no page to send the user to, so the snap build gets no button.
+    const hasStorePage = distribution !== "snap";
     return (
       <div className="space-y-5">
         <div
@@ -120,20 +130,31 @@ export function UpdatesSection() {
           <div>
             <p className="text-sm font-medium">dosya Desktop</p>
             <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
-              {version ? `You're on v${version}` : "Version unknown"} &middot; Updates are managed by the Microsoft Store
+              {version ? `You're on v${version}` : "Version unknown"} &middot; Updates are managed by the {store}
             </p>
           </div>
-          <button
-            onClick={() => window.electronAPI.openStoreUpdates()}
-            className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium"
-            style={{ borderColor: "var(--color-border)" }}
-          >
-            <Store size={14} /> Open Microsoft Store
-          </button>
+          {hasStorePage && (
+            <button
+              onClick={() => window.electronAPI.openStoreUpdates()}
+              className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              <Store size={14} /> Open {store}
+            </button>
+          )}
         </div>
         <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
-          You installed dosya from the Microsoft Store, so it updates through the Store
-          alongside your other apps. Check for a new version under Library &rsaquo; Downloads and updates.
+          {distribution === "snap" ? (
+            <>
+              You installed dosya from the Snap Store, so it updates in the background through snapd
+              alongside your other snaps. To update right away, run <code className="font-mono">snap refresh dosya</code>.
+            </>
+          ) : (
+            <>
+              You installed dosya from the {store}, so it updates through the store
+              alongside your other apps. Check for a new version under Library &rsaquo; Downloads and updates.
+            </>
+          )}
         </p>
       </div>
     );

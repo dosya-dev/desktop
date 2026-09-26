@@ -1,6 +1,6 @@
 {
   "name": "@dosya-dev/desktop",
-  "version": "0.0.1",
+  "version": "3.0.10",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "description": "dosya.dev desktop client - sync, upload, and manage your files",
@@ -24,7 +24,7 @@
     "package:linux": "electron-vite build && electron-builder --linux --config electron-builder.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "electron-vite build && npx playwright test",
-    "test:unit": "node --disable-warning=ExperimentalWarning --test \"src/main/*.test.ts\" \"src/main/sync/!(remote-client.maintenance|sync-engine-maintenance|sync-engine-session-expired|filesystem-safety|remote-client.path-safety|sync-engine-path-safety).test.ts\" \"src/renderer/lib/**/*.test.ts\"",
+    "test:unit": "node --disable-warning=ExperimentalWarning --test \"src/main/*.test.ts\" \"src/main/sync/!(remote-client.maintenance|sync-engine-maintenance|sync-engine-session-expired|filesystem-safety|remote-client.path-safety|sync-engine-path-safety).test.ts\" \"src/renderer/lib/!(lan-peer).test.ts\"",
     "test:component": "vitest run",
     "test:only": "npx playwright test",
     "test:headed": "electron-vite build && npx playwright test --headed",

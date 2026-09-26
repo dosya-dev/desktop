@@ -134,7 +134,16 @@ export async function startMockServer(
       "Access-Control-Allow-Origin": req.headers.origin || "*",
       "Access-Control-Allow-Credentials": "true",
       "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Cookie, Range",
+      // Mirrors apps/api/src/lib/cors.ts. The renderer is a cross-origin
+      // caller (app://bundle -> the API host), so every request carrying a
+      // custom header is preflighted, and a header missing from this list
+      // fails the whole request in the browser before the server sees it.
+      // This list had drifted: X-Dosya-Source-Mtime, which the upload path
+      // sends on every PUT, was absent, so each upload died in preflight,
+      // the queue emptied instantly, and two upload specs failed for reasons
+      // that had nothing to do with what they test.
+      "Access-Control-Allow-Headers":
+        "Content-Type, Cookie, Range, Authorization, X-Dosya-Sync, X-Dosya-Client, X-Dosya-Device, X-Dosya-Source-Mtime, X-Dosya-Source-Ctime, X-Dosya-Sha256, If-None-Match, X-File-Name, X-File-Size, X-Uploader-Name, X-Recipient-Token, X-Turnstile-Token, X-D1-Bookmark",
       "Vary": "Origin",
     };
 
@@ -168,6 +177,17 @@ export async function startMockServer(
     if (path.startsWith("/api/") && !path.startsWith("/api/auth/")) {
       const presented = /(?:^|;\s*)dosya_session=([^;]+)/.exec(req.headers.cookie || "")?.[1];
       if (presented && deadSessions.has(presented)) {
+        return json({ ok: false, error: "Unauthorized" }, 401);
+      }
+      // No cookie at all, AFTER something was revoked, is a signed-out app:
+      // endSession() clears the jar and reloads. Production answers 401 and
+      // the renderer settles on the login screen. This mock used to answer
+      // /api/me with 200 AND a fresh Set-Cookie, so the reload silently
+      // re-authenticated, went to the dashboard, hit the engine's 401 and
+      // signed out again - an endless reload loop that no production server
+      // can produce. Only a real login mints a live session again, which is
+      // what the deadSessions check above already models per token.
+      if (!presented && deadSessions.size > 0) {
         return json({ ok: false, error: "Unauthorized" }, 401);
       }
     }
@@ -564,6 +584,26 @@ export async function startMockServer(
             .map((f) => ({ id: f.id, name: f.name, size_bytes: f.size_bytes, mime_type: f.mime_type, extension: f.extension, region: f.region, folder_id: f.folder_id, uploader_name: f.uploader_name, created_at: Date.parse(f.created_at) / 1000 }))
         : [];
       return json({ ok: true, query: q, files: matchingFiles, folders: [], shared: [], file_requests: [] });
+    }
+
+    // ── LAN Transfer signalling ───────────────────────────
+    // Field names mirror apps/api exactly (roomCode/hostSecret/guestSecret,
+    // not snake_case): reading the wrong one is what left the room card
+    // showing an empty 6-digit code.
+    if (path === "/api/lan-transfer/create" && method === "POST") {
+      return json({ ok: true, roomCode: "482917", hostSecret: "host-secret-mock" });
+    }
+    if (path === "/api/lan-transfer/join" && method === "POST") {
+      return json({ ok: true, guestSecret: "guest-secret-mock" });
+    }
+    if (path === "/api/lan-transfer/signal" && method === "POST") {
+      return json({ ok: true });
+    }
+    if (path === "/api/lan-transfer/signal" && method === "GET") {
+      return json({ iceCount: 0 });
+    }
+    if (path === "/api/lan-transfer/cleanup" && method === "POST") {
+      return json({ ok: true });
     }
 
     // ── Upload ────────────────────────────────────────────

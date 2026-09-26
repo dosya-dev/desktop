@@ -3,6 +3,7 @@ import { join } from "path";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { execFile } from "child_process";
 import { discardStaleShipItState } from "./shipit-cleanup";
+import { detectDistribution, isStoreManaged, storeUpdatesUrl, type Distribution } from "./distribution";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -16,20 +17,20 @@ export type UpdateStatus =
 
 let updateStatus: UpdateStatus = { state: "idle" };
 
-// ── Microsoft Store builds ──────────────────────────────────────────
-// A Store build must not update itself. Store policy forbids an app fetching
-// and installing executable code from outside the Store, and the Store's own
-// update channel would be racing electron-updater for the same install anyway.
-//
-// Electron sets process.windowsStore only when the app is running from an
-// appx/msix container, so it discriminates the Store build from the NSIS build
-// off the identical codebase - there is no separate build flag to keep in sync,
-// and it is false everywhere else at zero cost.
-const isStoreBuild = process.windowsStore === true;
-
-// Opens the Store's own "Downloads and updates" pane, which is where a Store
-// user actually triggers an update check.
-const STORE_UPDATES_URI = "ms-windows-store://downloadsandupdates";
+// ── Store builds ────────────────────────────────────────────────────
+// A store install must not update itself. Every store's policy forbids an app
+// fetching and installing executable code from outside the store, and the
+// store's own update channel would be racing electron-updater for the same
+// install anyway. Which store (if any) is read off platform signals at
+// runtime - see distribution.ts - so the identical build tree serves the
+// direct download, the Microsoft Store and the Snap Store with no build flag
+// to keep in sync.
+const distribution: Distribution = detectDistribution({
+  windowsStore: process.windowsStore,
+  mas: process.mas,
+  env: process.env,
+});
+const isStoreBuild = isStoreManaged(distribution);
 
 function broadcastStatus(status: UpdateStatus): void {
   updateStatus = status;
@@ -117,8 +118,10 @@ export async function initAutoUpdater(): Promise<void> {
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("updater:get-status", () => updateStatus);
   ipcMain.handle("app:is-store-build", () => isStoreBuild);
+  ipcMain.handle("app:get-distribution", () => distribution);
   ipcMain.handle("updater:open-store", async () => {
-    if (isStoreBuild) await shell.openExternal(STORE_UPDATES_URI);
+    const url = storeUpdatesUrl(distribution);
+    if (url) await shell.openExternal(url);
   });
 
   // Store build: register the updater channels as no-ops and return before

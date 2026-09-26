@@ -46,6 +46,18 @@ const electronAPI = {
   ): Promise<Electron.SaveDialogReturnValue> =>
     ipcRenderer.invoke("fs:save-file-dialog", options),
 
+  // LAN Transfer: an incoming file is written by the main process, which
+  // also owns the save dialog. The renderer passes a NAME and bytes, never
+  // a path - see src/main/lan-receive.ts for why.
+  lanRecvOpen: (name: string, size: number): Promise<{ ok: boolean; id?: string }> =>
+    ipcRenderer.invoke("lan:recv-open", { name, size }),
+  lanRecvChunk: (id: string, bytes: Uint8Array): Promise<void> =>
+    ipcRenderer.invoke("lan:recv-chunk", { id, bytes }),
+  lanRecvClose: (id: string): Promise<{ path: string }> =>
+    ipcRenderer.invoke("lan:recv-close", { id }),
+  lanRecvAbort: (id: string): Promise<void> =>
+    ipcRenderer.invoke("lan:recv-abort", { id }),
+
   openFile: (fileId: string, fileName: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke("file:open", { fileId, fileName }),
 
@@ -83,9 +95,12 @@ const electronAPI = {
   checkForUpdates: (): Promise<void> => ipcRenderer.invoke("updater:check"),
   installUpdate: (): Promise<void> => ipcRenderer.invoke("updater:install"),
   showUpdateFile: (): Promise<void> => ipcRenderer.invoke("updater:show-file"),
-  // True only in the Microsoft Store (appx) build, where the app must not
-  // update itself and the update UI is replaced by a pointer to the Store.
+  // True in any store build (Microsoft Store appx, Snap Store, Mac App
+  // Store), where the app must not update itself and the update UI is
+  // replaced by a pointer to the store.
   isStoreBuild: (): Promise<boolean> => ipcRenderer.invoke("app:is-store-build"),
+  // Which channel this install came from: "direct" | "ms-store" | "snap" | "mas".
+  getDistribution: (): Promise<string> => ipcRenderer.invoke("app:get-distribution"),
   openStoreUpdates: (): Promise<void> => ipcRenderer.invoke("updater:open-store"),
   onUpdateStatusChanged: (cb: (status: any) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, status: any) => cb(status);

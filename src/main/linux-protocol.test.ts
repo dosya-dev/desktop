@@ -29,6 +29,14 @@ function plan(overrides: Partial<Parameters<typeof linuxProtocolInstallPlan>[0]>
 
 // ── when the plan applies ──────────────────────────────────────────
 
+test("a Snap Store install gets no user-level entry - snapd installs the snap's own", () => {
+  // snapd exports SNAP and never APPIMAGE; the desktop entry with the scheme
+  // MimeType is installed system-wide from the snap itself, and a user-local
+  // one pointing at $SNAP would break on the next refresh.
+  assert.equal(plan({ env: { SNAP: "/snap/dosya/12", SNAP_NAME: "dosya" } }), null);
+});
+
+
 test("no plan outside packaged Linux AppImage runs", () => {
   assert.equal(plan({ platform: "darwin" }), null);
   assert.equal(plan({ platform: "win32" }), null);

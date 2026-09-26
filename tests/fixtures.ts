@@ -202,9 +202,19 @@ export async function cdpFor(page: Page) {
 
 /** Navigate within the hash router and wait for React to render */
 export async function navigateTo(page: Page, route: string): Promise<void> {
-  await page.evaluate((r) => {
-    window.location.hash = "#" + r;
-  }, route);
+  const setHash = () =>
+    page.evaluate((r) => {
+      window.location.hash = "#" + r;
+    }, route);
+  // The app reloads itself on some paths (signing out after a lost session,
+  // for one), and an evaluate that is in flight when that lands dies with
+  // "Execution context was destroyed". The navigation is still wanted, just
+  // against the page that replaced this one - so settle and ask again.
+  await setHash().catch(async (err: Error) => {
+    if (!/Execution context was destroyed|Target closed/.test(err.message)) throw err;
+    await page.waitForLoadState("domcontentloaded");
+    await setHash();
+  });
   // Wait for React to render the new route
   await page.waitForTimeout(500);
 }

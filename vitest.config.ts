@@ -25,6 +25,10 @@ export default defineConfig({
     globals: false,
     include: [
       "src/renderer/**/*.test.tsx",
+      // lan-peer.ts imports lan-protocol.ts with a bundler-style specifier,
+      // which node:test cannot resolve, so its suite runs here instead (the
+      // same reason as the sync files below).
+      "src/renderer/lib/lan-peer.test.ts",
       // remote-client.ts and index.ts (SyncEngine) both use TS parameter
       // properties and extensionless relative imports (bundler-style
       // resolution) - Node's own test runner cannot load either (see the

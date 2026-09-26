@@ -1,6 +1,7 @@
 import * as Sentry from "@sentry/electron/main";
 import { app } from "electron";
 import { TRACES_SAMPLE_RATE, isSentryEnabled, releaseName, resolveDsn, scrubEvent } from "./telemetry-config";
+import { detectDistribution } from "./distribution";
 
 /**
  * Main-process crash reporting (Sentry, org dosya-pty-ltd, project
@@ -29,6 +30,13 @@ export function initSentryMain(): void {
     tracesSampleRate: TRACES_SAMPLE_RATE,
     beforeSend: scrubEvent,
   });
+  // The same version ships as a direct download, a Microsoft Store package and
+  // a snap. A crash that only reproduces inside one of those sandboxes is
+  // invisible without knowing which install it came from.
+  Sentry.setTag(
+    "distribution",
+    detectDistribution({ windowsStore: process.windowsStore, mas: process.mas, env: process.env }),
+  );
 }
 
 /** Bounded flush for the crash-exit path; never throws. */
