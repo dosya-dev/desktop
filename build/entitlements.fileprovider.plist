@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- TEMPLATE. __TEAM_ID__ is substituted by scripts/build-file-provider.mjs
+         at signing time. It is not $(AppIdentifierPrefix): that is an Xcode
+         build variable, and `codesign --entitlements` performs no substitution
+         at all, so the literal string would end up in the signature.
+
+         The value must match Session.swift's accessGroupSuffix with the team
+         prefix, or resolvedAccessGroup() finds nothing and the extension reads
+         a different keychain item than the app writes. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>__TEAM_ID__.group.dev.dosya.desktop</string>
+    </array>
+    <!-- The extension talks to the dosya.dev API itself. It is not a client of
+         the app, which may not be running when Finder wakes it. -->
+    <!-- The App Group the Info.plist's NSExtensionFileProviderDocumentGroup
+         names. macOS will not register a File Provider extension without that
+         key, and the key is only honoured for a group the extension is entitled
+         to. The profile grants both "group.dev.dosya.desktop" and the
+         team-wildcard form. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.dev.dosya.desktop</string>
+    </array>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

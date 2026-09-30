@@ -7,6 +7,16 @@ import { SyncIndex, indexPathKey } from "./index-db.ts";
 import { pathKey } from "./paths.ts";
 import type { SyncFileRecord } from "./types.ts";
 
+/**
+ * Whether this platform's filesystem folds case, which is what pathKey() keys
+ * off (paths.ts). macOS and Windows do; Linux does not, and CI runs on Linux.
+ * These two tests used to assert the folding behaviour unconditionally, so they
+ * passed on every developer's Mac and failed the moment the suite first ran on a
+ * Linux runner. Both platforms' behaviour is pinned below rather than skipped:
+ * on a case-sensitive filesystem the two spellings are genuinely different files.
+ */
+const FOLDS_CASE = process.platform === "darwin" || process.platform === "win32";
+
 // The base tree - "what both sides looked like after the last successful
 // sync" - used to be one JSON blob per pair, rewritten in full every 500 file
 // operations. That design is what made a 500K-file sync fatal (2026-08-20
@@ -77,9 +87,20 @@ test("path lookup is pathKey-normalized (NFC + case-fold), round-trips the prese
   try {
     const db = SyncIndex.open(join(dir, "index.db"));
     db.upsertFile("p1", rec({ localPath: "Döcs/Ü.txt" }));
-    const hit = db.getFileByPath("p1", "döcs/ü.txt".normalize("NFD")); // different case AND normalization
-    assert.equal(hit?.remoteId, "f_1");
-    assert.equal(hit?.localPath, "Döcs/Ü.txt"); // preserved form comes back
+    // Different case AND normalization. Normalization is folded everywhere; case
+    // only where the filesystem folds it.
+    const hit = db.getFileByPath("p1", "döcs/ü.txt".normalize("NFD"));
+    if (FOLDS_CASE) {
+      assert.equal(hit?.remoteId, "f_1");
+      assert.equal(hit?.localPath, "Döcs/Ü.txt"); // preserved form comes back
+    } else {
+      assert.equal(hit, undefined, "a case-sensitive filesystem has two different files here");
+    }
+    // NFD vs NFC of the SAME spelling must match on every platform: that is the
+    // half of the normalization this test is really about.
+    const sameCase = db.getFileByPath("p1", "Döcs/Ü.txt".normalize("NFD"));
+    assert.equal(sameCase?.remoteId, "f_1");
+    assert.equal(sameCase?.localPath, "Döcs/Ü.txt");
     db.close();
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -111,7 +132,14 @@ test("two remote files colliding on one path key both survive; newest wins the l
     db.upsertFile("p1", rec({ remoteId: "f_2", localPath: "dir/A.txt", syncedAt: 200 }));
     assert.equal(db.countFiles("p1"), 2);
     assert.equal(db.getFileById("p1", "f_1")?.localPath, "Dir/a.txt"); // loser's base row intact
-    assert.equal(db.getFileByPath("p1", "Dir/a.txt")?.remoteId, "f_2"); // newest answers
+    if (FOLDS_CASE) {
+      assert.equal(db.getFileByPath("p1", "Dir/a.txt")?.remoteId, "f_2"); // newest answers
+    } else {
+      // No collision on a case-sensitive filesystem: each spelling is its own
+      // file and each lookup answers with its own row.
+      assert.equal(db.getFileByPath("p1", "Dir/a.txt")?.remoteId, "f_1");
+      assert.equal(db.getFileByPath("p1", "dir/A.txt")?.remoteId, "f_2");
+    }
     db.close();
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

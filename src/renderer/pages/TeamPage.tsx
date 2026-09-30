@@ -16,6 +16,7 @@ import {
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
+import { canGrantRole } from "@/lib/role-grant";
 import { formatDate, formatRelative } from "@/lib/format";
 import { toast } from "sonner";
 import { isValidEmail } from "@dosya-dev/shared";
@@ -50,6 +51,17 @@ interface TeamResponse {
   stats: { members: number; pending: number; shares_this_week: number };
 }
 
+/** One entry of GET /api/roles. */
+interface WorkspaceRole {
+  id: string;
+  name: string;
+  is_builtin: boolean;
+  is_custom: boolean;
+  permissions: Record<string, boolean>;
+}
+
+const CUSTOM_ROLE_COLOR = "#8b5cf6";
+
 const ROLE_LABELS: Record<string, { label: string; color: string; icon: React.ReactNode }> = {
   role_owner: { label: "Owner", color: "#22c55e", icon: <Crown size={12} /> },
   role_admin: { label: "Admin", color: "#3b82f6", icon: <Shield size={12} /> },
@@ -65,10 +77,11 @@ export function TeamPage() {
   const [inviteRole, setInviteRole] = useState("role_member");
   const [removeTarget, setRemoveTarget] = useState<{ id: string; name: string } | null>(null);
 
-  const { can } = usePermissions();
+  const { can, permissions: myPerms } = usePermissions();
   const canManageRoles = can("manage_roles");
+  const canInvite = can("invite_members");
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["team", active?.id],
     queryFn: () =>
       api.get<TeamResponse>(`/api/team?workspace_id=${active?.id}`),
@@ -81,12 +94,26 @@ export function TeamPage() {
   // it from here.
   const { data: rolesData } = useQuery({
     queryKey: ["roles", active?.id],
-    queryFn: () => api.get<{ ok: boolean; roles: { id: string; name: string }[] }>(`/api/roles?workspace_id=${active!.id}`),
+    queryFn: () => api.get<{ ok: boolean; roles: WorkspaceRole[] }>(`/api/roles?workspace_id=${active!.id}`),
     enabled: !!active?.id,
     staleTime: 60_000,
   });
+  const allRoles = rolesData?.roles ?? [];
   // role_owner is excluded: ownership is transferred, never assigned.
-  const assignableRoles = (rolesData?.roles ?? []).filter((r) => r.id !== "role_owner");
+  const assignableRoles = allRoles.filter((r) => r.id !== "role_owner");
+  // Only what the server would accept from THIS caller (role-grant.ts mirrors
+  // its rule, which reads only our permissions, never our role id): the
+  // pickers used to offer every role and the first feedback was the 403.
+  // While our own permissions are still loading nothing is hidden, the same
+  // fail-open stance as can().
+  const grantableRoles = myPerms
+    ? assignableRoles.filter((r) => canGrantRole(myPerms, r))
+    : assignableRoles;
+  const roleNameOf = (id: string): string => allRoles.find((r) => r.id === id)?.name ?? ROLE_LABELS[id]?.label ?? id;
+  // The default of role_member may itself be out of reach (a custom-role
+  // inviter who cannot upload may not hand out Member), so the value the
+  // dropdown shows is also the one that is sent.
+  const inviteRoleId = grantableRoles.some((r) => r.id === inviteRole) ? inviteRole : (grantableRoles[0]?.id ?? inviteRole);
 
   const inviteMut = useMutation({
     mutationFn: () =>
@@ -99,7 +126,7 @@ export function TeamPage() {
         // dropdown below changed nothing, and the request still returned 200
         // so there was no error to notice. The server now also accepts
         // `role_id` for copies of this app that predate this fix.
-        role: inviteRole,
+        role: inviteRoleId,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
@@ -119,6 +146,9 @@ export function TeamPage() {
       queryClient.invalidateQueries({ queryKey: ["team"] });
       setRemoveTarget(null);
       toast.success("Member removed");
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to remove member");
     },
   });
 
@@ -144,11 +174,17 @@ export function TeamPage() {
   });
 
   const revokeInviteMut = useMutation({
+    // POST: the route only defines POST, so the DELETE this used to send got
+    // a 405 that nothing surfaced - the invite stayed pending and the button
+    // looked like it had done nothing.
     mutationFn: (id: string) =>
-      api.delete(`/api/team/invites/${id}/revoke`, { workspace_id: active!.id }),
+      api.post(`/api/team/invites/${id}/revoke`, { workspace_id: active!.id }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
       toast.success("Invite revoked");
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to revoke invite");
     },
   });
 
@@ -163,14 +199,17 @@ export function TeamPage() {
       <div className="flex-1 space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Team</h1>
-          <button
-            onClick={() => setShowInvite(true)}
-            className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
-            style={{ background: "var(--color-primary)" }}
-          >
-            <UserPlus size={16} />
-            Invite
-          </button>
+          {/* The endpoints behind this need invite_members. */}
+          {canInvite && (
+            <button
+              onClick={() => setShowInvite(true)}
+              className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
+              style={{ background: "var(--color-primary)" }}
+            >
+              <UserPlus size={16} />
+              Invite
+            </button>
+          )}
         </div>
 
         {/* Stats */}
@@ -201,7 +240,20 @@ export function TeamPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {members.length === 0 && (
+                  {/* GET /api/team answers 403 to a role that may not see the
+                      roster (a folder-confined member, for one). That used to
+                      render as "No members yet", which is false. */}
+                  {isError && (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-10 text-center text-sm text-[var(--color-danger)]">
+                        Team members could not be loaded. Your role may not allow viewing them.
+                        {error instanceof ApiError && (
+                          <span className="mt-1 block text-xs text-[var(--color-text-muted)]">{error.message}</span>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  {!isError && members.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-4 py-10 text-center text-sm text-[var(--color-text-muted)]">
                         No members yet. Invite teammates by email to give them access.
@@ -245,7 +297,12 @@ export function TeamPage() {
                               className="rounded-md border px-2 py-1 text-xs"
                               style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
                             >
-                              {assignableRoles.map((r) => (
+                              {/* A role we could not grant stays visible as
+                                  the current value, but cannot be chosen. */}
+                              {!grantableRoles.some((r) => r.id === m.role_id) && (
+                                <option value={m.role_id} disabled>{roleNameOf(m.role_id)}</option>
+                              )}
+                              {grantableRoles.map((r) => (
                                 <option key={r.id} value={r.id}>{r.name}</option>
                               ))}
                             </select>
@@ -313,12 +370,16 @@ export function TeamPage() {
                       </p>
                     </div>
                   </div>
-                  <button
-                    onClick={() => revokeInviteMut.mutate(inv.id)}
-                    className="rounded px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-red-50"
-                  >
-                    Revoke
-                  </button>
+                  {/* Revoking needs the same invite_members that sending did. */}
+                  {canInvite && (
+                    <button
+                      onClick={() => revokeInviteMut.mutate(inv.id)}
+                      disabled={revokeInviteMut.isPending}
+                      className="rounded px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-red-50 disabled:opacity-50"
+                    >
+                      Revoke
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -365,6 +426,22 @@ export function TeamPage() {
                 </span>
               </div>
             ))}
+            {/* The workspace's own roles, which the four built-ins above never
+                covered, with how much each one grants. */}
+            {allRoles.filter((r) => !r.is_builtin).map((r) => {
+              const granted = Object.values(r.permissions ?? {}).filter(Boolean).length;
+              return (
+                <div key={r.id} className="flex items-center gap-2">
+                  <div className="h-2.5 w-2.5 rounded-full" style={{ background: CUSTOM_ROLE_COLOR }} />
+                  <span className="text-xs font-medium" style={{ color: CUSTOM_ROLE_COLOR }}>
+                    {r.name}
+                  </span>
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    {granted} permission{granted === 1 ? "" : "s"}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -390,7 +467,7 @@ export function TeamPage() {
               <div>
                 <label className="mb-1 block text-sm font-medium">Role</label>
                 <select
-                  value={inviteRole}
+                  value={inviteRoleId}
                   onChange={(e) => setInviteRole(e.target.value)}
                   className="w-full rounded-lg border px-3 py-2 text-sm outline-none"
                   style={{ borderColor: "var(--color-border)" }}
@@ -399,7 +476,7 @@ export function TeamPage() {
                       offered too. The three hardcoded options that used to be
                       here could never invite anyone into a role the workspace
                       had defined for itself. */}
-                  {assignableRoles.map((r) => (
+                  {grantableRoles.map((r) => (
                     <option key={r.id} value={r.id}>{r.name}</option>
                   ))}
                 </select>

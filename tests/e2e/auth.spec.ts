@@ -126,9 +126,8 @@ test.describe("Sign Up Page", () => {
 
   test("shows password requirements", async ({ appPage }) => {
     await navigateTo(appPage, "/signup");
-    await expect(
-      appPage.getByText(/uppercase.*lowercase.*number.*special/i),
-    ).toBeVisible();
+    // Length-only policy since 2026-09-02 (validation-policy: no composition rules).
+    await expect(appPage.getByText(/at least 8 characters/i)).toBeVisible();
   });
 });
 

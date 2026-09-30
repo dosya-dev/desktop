@@ -5,6 +5,7 @@ import { CopyX, Folder, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
+import { usePermissions } from "@/lib/use-permissions";
 import { humanSize, timeAgo } from "@/lib/file-type";
 import {
   allButNewest, chunk, duplicatesQueryKey, fetchDuplicates,
@@ -19,6 +20,11 @@ export function DuplicatesPage() {
   const wsId = active?.id ?? "";
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // batch-delete accepts either permission (delete_own_files is then scoped
+  // to the caller's own uploads server-side). Without both, the button only
+  // ever produced the 403 toast below.
+  const { can } = usePermissions();
+  const canDelete = can("delete_any_file") || can("delete_own_files");
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
@@ -102,16 +108,18 @@ export function DuplicatesPage() {
             >
               Clear
             </button>
-            <button
-              data-testid="dup-delete"
-              onClick={() => setConfirming(true)}
-              disabled={selected.size === 0 || deleting}
-              className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-              style={{ background: "var(--color-danger)" }}
-            >
-              {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-              Delete {selected.size > 0 ? selected.size : ""}
-            </button>
+            {canDelete && (
+              <button
+                data-testid="dup-delete"
+                onClick={() => setConfirming(true)}
+                disabled={selected.size === 0 || deleting}
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                style={{ background: "var(--color-danger)" }}
+              >
+                {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                Delete {selected.size > 0 ? selected.size : ""}
+              </button>
+            )}
           </div>
         )}
       </div>

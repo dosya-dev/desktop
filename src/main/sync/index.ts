@@ -13,7 +13,7 @@ import { Backpressure } from "./async-queue";
 import type { QueuedOp } from "./index-db";
 import { forbiddenSyncRootReason } from "./system-paths";
 import { homedir, tmpdir, hostname } from "os";
-import { RemoteClient, RateLimitError, MaintenanceError } from "./remote-client";
+import { RemoteClient, RateLimitError, MaintenanceError, RemoteRefusedError } from "./remote-client";
 import { directConcurrencyFor } from "./transfer-concurrency";
 import { LocalWatcher, type WatchEvent, shouldIgnoreEntry, ignoreReason } from "./local-watcher";
 import { RemotePoller, type RemoteSnapshot } from "./remote-poller";
@@ -122,6 +122,17 @@ function isPermanentUploadError(message: string): boolean {
   if (message.includes("quota")) return true;
   if (message.toLowerCase().includes("permission")) return true;
   return false;
+}
+
+/**
+ * The server said no on purpose: a 403 to a delete, move or rename. Read from
+ * the status rather than the text because not every refusal says
+ * "permission" ("This file is locked and cannot be deleted" is one), and
+ * because a permission the caller does not hold is not going to appear by
+ * retrying next cycle.
+ */
+function isPermissionRefusal(err: unknown): boolean {
+  return err instanceof RemoteRefusedError && err.status === 403;
 }
 
 // ── Runtime types ───���───────────────────────────────────────────────
@@ -340,6 +351,51 @@ export class SyncEngine extends EventEmitter {
 
   private dropError(rt: PairRuntime, relPath: string): void {
     this.index.clearError(rt.pair.id, relPath);
+  }
+
+  /**
+   * A remote delete/move/rename the server refused, recorded where the Sync
+   * page shows it. A 403 is permanent, the same classification uploads give
+   * a "permission" message, so the executors skip the file until the user
+   * retries instead of asking the server the same question every cycle.
+   */
+  private recordRemoteRefusal(rt: PairRuntime, relPath: string, what: string, err: any): void {
+    const message: string = err?.message ?? String(err);
+    const existing = this.index.getError(rt.pair.id, relPath);
+    this.putError(rt, {
+      filePath: relPath,
+      error: `${what} refused by the server: ${message}`,
+      retryCount: (existing?.retryCount ?? 0) + 1,
+      lastAttemptAt: Date.now(),
+      permanent: isPermissionRefusal(err) || isPermanentUploadError(message),
+    });
+    console.error(`[sync] ${what} refused for ${relPath}: ${message}`);
+    this.log(rt.pair.id, `Could not ${what.toLowerCase()} "${relPath}" on the server: ${message}`);
+  }
+
+  /**
+   * After a batch delete the server accepted: drop exactly the rows it says
+   * it trashed, keep the rest. A kept row is one the server skipped without
+   * refusing the batch - another member's file under delete_own_files, or one
+   * already gone - and dropping it would make the cloud copy read as new on
+   * the next cycle and be re-uploaded, the same un-delete a swallowed 403
+   * produced. Each kept file is ledgered as permanent so the Sync page shows
+   * it and the executors stop asking; the user's Retry clears it.
+   */
+  private reconcileBatchDelete(
+    rt: PairRuntime,
+    requested: { remoteId: string; localPath: string }[],
+    result: { deleted: number; deletedIds: string[] },
+  ): void {
+    const gone = new Set(result.deletedIds);
+    for (const { remoteId, localPath } of requested) {
+      if (gone.has(remoteId)) {
+        this.dropFile(rt, remoteId);
+        this.dropError(rt, localPath);
+      } else {
+        this.recordRemoteRefusal(rt, localPath, "Delete", new RemoteRefusedError("The server did not delete this file; it may belong to someone else or already be in the trash", 403));
+      }
+    }
   }
 
   /**
@@ -1654,8 +1710,21 @@ export class SyncEngine extends EventEmitter {
             break;
           }
           case "delete-remote": {
-            await this.client.deleteFile(action.remoteId).catch(() => {});
+            // A refusal used to be swallowed here and the row dropped anyway,
+            // so the cloud file (still there) read as new on the next cycle
+            // and was re-uploaded: a delete that quietly undid itself. The
+            // row is kept until the server actually deletes, and a refusal
+            // already on the ledger is not asked again.
+            if (this.index.getError(rt.pair.id, action.record.localPath)?.permanent) break;
+            try {
+              await this.client.deleteFile(action.remoteId);
+            } catch (delErr: any) {
+              if (delErr.message === "SESSION_EXPIRED" || isRateLimitError(delErr)) throw delErr;
+              this.recordRemoteRefusal(rt, action.record.localPath, "Delete", delErr);
+              break;
+            }
             this.dropFile(rt, action.remoteId);
+            this.dropError(rt, action.record.localPath);
             console.log(`[sync] Deleted remote: ${action.record.localPath}`);
             break;
           }
@@ -2198,6 +2267,9 @@ export class SyncEngine extends EventEmitter {
       const op = e.op as Extract<PlanOp, { kind: "move-remote" }>;
       const record = this.index.getFileById(pair.id, op.remoteId);
       if (!record) { this.index.completeOp(e.queued.id, now()); continue; }
+      // The planner re-derives this move from the same rename evidence every
+      // scan; once the server has refused it, asking again is pointless.
+      if (this.index.getError(pair.id, op.toRelPath)?.permanent) { this.index.failOp(e.queued.id, now(), true); continue; }
       try {
         const newName = op.toRelPath.split("/").pop()!;
         // Same rule as the upload path: a move whose destination folder is
@@ -2233,6 +2305,18 @@ export class SyncEngine extends EventEmitter {
         this.log(pair.id, `Moved "${op.fromRelPath}" to "${op.toRelPath}" on the server - no re-upload`);
       } catch (err: any) {
         if (err?.message === "SESSION_EXPIRED") throw err;
+        if (isPermissionRefusal(err)) {
+          // Refused, not failed. The fallback below (the file reads as new and
+          // is re-uploaded) would put a second copy on the server, one the
+          // caller may not be allowed to delete either. Ledger both paths: the
+          // new one so the uploaders skip it, the old one so delete-remote
+          // leaves the server copy where it is. The op is kept as failed,
+          // visible, and not requeued.
+          this.recordRemoteRefusal(rt, op.toRelPath, "Move", err);
+          this.recordRemoteRefusal(rt, op.fromRelPath, "Move", err);
+          this.index.failOp(e.queued.id, now(), true);
+          continue;
+        }
         // Fall back to a plain upload on the next scan: the base row still
         // points at the old path, so the file reads as new and is sent.
         console.error(`[sync] Server-side move failed for ${op.toRelPath}:`, err?.message ?? err);
@@ -3083,6 +3167,15 @@ export class SyncEngine extends EventEmitter {
         } catch (e: any) {
           if (e.message === "SESSION_EXPIRED") throw e;
           if (isRateLimitError(e)) throw e;
+          if (isPermissionRefusal(e)) {
+            // Same as the queued path: a refused move must not become a
+            // delete + re-upload duplicate. Both paths stay in handledPaths so
+            // the event loop below leaves them alone, and both are ledgered so
+            // the next scan's uploaders and delete-remote skip them.
+            this.recordRemoteRefusal(rt, newRel, "Move", e);
+            this.recordRemoteRefusal(rt, oldRel, "Move", e);
+            continue;
+          }
           // Move failed - fall through to delete+re-upload in the normal event loop
           handledPaths.delete(oldRel);
           handledPaths.delete(newRel);
@@ -3199,10 +3292,14 @@ export class SyncEngine extends EventEmitter {
             try {
               await this.client.deleteFile(found.remoteId);
               this.dropFile(rt, found.remoteId);
+              this.dropError(rt, relPath);
               console.log(`[sync] Deleted remote: ${relPath}`);
             } catch (e: any) {
               if (isRateLimitError(e)) throw e;
-              console.error(`[sync] Delete remote failed: ${e.message}`);
+              if (e.message === "SESSION_EXPIRED") throw e;
+              // The row stays: dropping it would make the cloud copy read as
+              // new next cycle. Ledgered so the Sync page shows the refusal.
+              this.recordRemoteRefusal(rt, relPath, "Delete", e);
             }
           }
         } else if (event.type === "unlinkDir" && (mode === "two-way" || mode === "push")) {
@@ -3218,15 +3315,19 @@ export class SyncEngine extends EventEmitter {
           // Batch delete - 500 files per request instead of 1 per file
           if (toDelete.length > 0) {
             try {
-              await this.client.deleteFilesBatch(rt.pair.workspaceId, toDelete.map(d => d.remoteId));
-              for (const { remoteId, localPath } of toDelete) {
-                this.dropFile(rt, remoteId);
-              }
-              this.log(rt.pair.id, `Deleted ${toDelete.length} files remotely (folder removed)`);
+              const result = await this.client.deleteFilesBatch(rt.pair.workspaceId, toDelete.map(d => d.remoteId));
+              this.reconcileBatchDelete(rt, toDelete, result);
+              this.log(rt.pair.id, result.deleted === toDelete.length
+                ? `Deleted ${toDelete.length} files remotely (folder removed)`
+                : `Deleted ${result.deleted} of ${toDelete.length} files remotely (folder removed); the rest were already gone or not yours to delete`);
             } catch (e: any) {
               if (isRateLimitError(e)) throw e;
               if (e.message === "SESSION_EXPIRED") throw e;
+              // Refused as a whole (a 403 covers every id in the batch). No
+              // row is dropped, so nothing reads as new next cycle; each file
+              // carries the refusal instead, and delete-remote skips them.
               console.error(`[sync] Batch delete failed: ${e.message}`);
+              for (const { localPath } of toDelete) this.recordRemoteRefusal(rt, localPath, "Delete", e);
             }
           }
           // Clean up folder state
@@ -3896,10 +3997,16 @@ export class SyncEngine extends EventEmitter {
     rt.statusText = `Deleting ${held.files.length.toLocaleString()} files from the cloud...`;
     this.emitStatus();
     try {
-      await this.client.deleteFilesBatch(rt.pair.workspaceId, held.files.map((f) => f.remoteId));
-      for (const f of held.files) this.dropFile(rt, f.remoteId);
+      const result = await this.client.deleteFilesBatch(rt.pair.workspaceId, held.files.map((f) => f.remoteId));
+      this.reconcileBatchDelete(rt, held.files, result);
       for (const rel of held.folders) this.dropFolder(rt, rel);
-      this.log(pairId, `Deleted ${held.files.length.toLocaleString()} file${held.files.length === 1 ? "" : "s"} from the cloud (removed locally)`);
+      // The server's count, not the number asked for: ids it skipped (already
+      // trashed, or not this member's to delete) are still in the cloud, and
+      // their rows stay so the rescan that follows sees them as tracked.
+      const asked = held.files.length;
+      this.log(pairId, result.deleted === asked
+        ? `Deleted ${asked.toLocaleString()} file${asked === 1 ? "" : "s"} from the cloud (removed locally)`
+        : `Deleted ${result.deleted.toLocaleString()} of ${asked.toLocaleString()} files from the cloud (removed locally); the rest were already gone or not yours to delete`);
     } catch (err: any) {
       // Nothing was dropped from the index, so the question can be asked
       // again as-is once the cause (session, rate limit, network) clears.

@@ -6,6 +6,7 @@ import {
   HOST_SESSION_COOKIE,
   LEGACY_SESSION_COOKIE,
 } from "./session-cookie";
+import { chunkOrigins, packagedCsp, devCsp } from "./csp";
 
 /**
  * Configure Electron's session for the desktop app:
@@ -49,6 +50,12 @@ export function setupSession(apiBase: string): void {
   // becomes an editor. Overridable for a self-hosted document server.
   const docsBase = process.env.ONLYOFFICE_SERVER_URL || "https://docs.dosya.dev";
 
+  const cspInputs = {
+    apiBase,
+    docsBase,
+    chunkOrigins: chunkOrigins(process.env.E2EE_CHUNK_ORIGINS),
+  };
+
   ses.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
 
@@ -60,54 +67,9 @@ export function setupSession(apiBase: string): void {
       details.resourceType === "mainFrame" || details.resourceType === "subFrame";
     if (isRendererDoc) {
       if (app.isPackaged && details.url.startsWith("app://")) {
-        responseHeaders["Content-Security-Policy"] = [
-          [
-            "default-src 'self'",
-            `script-src 'self' ${docsBase}`,
-            // MapLibre builds its render worker from a blob: URL. worker-src
-            // has no policy of its own here, so it falls back to script-src,
-            // which does not allow blob: - the worker was refused, MapLibre
-            // threw inside a React effect, and the whole renderer unmounted to
-            // a white window. Kept separate from script-src on purpose: this
-            // permits a worker built from a blob, not inline script anywhere.
-            "worker-src 'self' blob:",
-            // blob: throughout for the ebook reader: foliate-js renders the
-            // book inside a blob iframe and hands it the book's OWN stylesheets,
-            // fonts and media as blob/data URLs. Without these the reader loads
-            // and then quietly drops the book's typography and images.
-            "style-src 'self' 'unsafe-inline' blob:",
-            `img-src 'self' data: blob: ${apiBase} ${docsBase}`,
-            // sentry-ipc: is the crash reporter's renderer-to-main fallback
-            // (a fetch to a privileged in-process scheme, never the network)
-            // used only if the preload's IPC bridge is unavailable.
-            `connect-src 'self' sentry-ipc: ${apiBase} ${docsBase}`,
-            // In-app file viewer: <video>/<audio> stream from the API, and the
-            // PDF preview loads /raw in an <iframe>. Without these, media falls
-            // back to default-src 'self' and gets blocked.
-            `media-src 'self' blob: data: ${apiBase}`,
-            `frame-src 'self' blob: ${apiBase} ${docsBase}`,
-            "font-src 'self' data: blob:",
-            "object-src 'none'",
-            "base-uri 'self'",
-          ].join("; "),
-        ];
+        responseHeaders["Content-Security-Policy"] = [packagedCsp(cspInputs)];
       } else if (!app.isPackaged && details.url.startsWith("http://localhost")) {
-        responseHeaders["Content-Security-Policy"] = [
-          [
-            "default-src 'self' http://localhost:* ws://localhost:*",
-            `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${docsBase}`,
-            // Same as the packaged policy: the map's worker comes from a blob.
-            "worker-src 'self' blob: http://localhost:*",
-            "style-src 'self' 'unsafe-inline' blob:",
-            `img-src 'self' data: blob: http://localhost:* ${apiBase} ${docsBase}`,
-            `connect-src 'self' sentry-ipc: http://localhost:* ws://localhost:* ${apiBase} ${docsBase}`,
-            `media-src 'self' blob: data: http://localhost:* ${apiBase}`,
-            `frame-src 'self' blob: http://localhost:* ${apiBase} ${docsBase}`,
-            "font-src 'self' data: blob:",
-            "object-src 'none'",
-            "base-uri 'self'",
-          ].join("; "),
-        ];
+        responseHeaders["Content-Security-Policy"] = [devCsp(cspInputs)];
       }
     }
 

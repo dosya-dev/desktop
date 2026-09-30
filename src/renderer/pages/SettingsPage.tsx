@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
+import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes } from "@/lib/format";
 import { UpdatesSection } from "@/components/UpdatesSection";
 import { toast } from "sonner";
@@ -52,6 +53,18 @@ interface SettingsResponse {
 
 type Tab = "general" | "limits" | "security" | "roles" | "updates" | "danger";
 
+/**
+ * What PUT /api/workspaces/:id/settings demands for the Hard limits form, per
+ * field (its fieldPermMap). The form sends all four, so the server wants all
+ * four; a caller holding none of them is told so here instead of by the 403.
+ */
+const LIMIT_PERMISSIONS = [
+  "change_max_file_size",
+  "change_total_storage_cap",
+  "change_storage_per_member",
+  "change_max_concurrent_uploads",
+] as const;
+
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "general", label: "General", icon: <Settings size={16} /> },
   { id: "limits", label: "Hard limits", icon: <HardDrive size={16} /> },
@@ -66,6 +79,10 @@ export function SettingsPage() {
   const { active } = useWorkspace();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("general");
+  const { can } = usePermissions();
+  const canSaveLimits = LIMIT_PERMISSIONS.some((p) => can(p));
+  // The security toggles are all manage_settings fields on the server.
+  const canSaveSecurity = can("manage_settings");
 
   // GET /api/workspaces/:id - NOT /:id/settings, which is PUT-only on the API.
   // The old URL 404'd on every load, so `data` was always undefined: the whole
@@ -135,6 +152,9 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       toast.success("Limits updated");
     },
+    onError: (err) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to save limits");
+    },
   });
 
   const saveSecurityMut = useMutation({
@@ -148,6 +168,9 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       toast.success("Security settings updated");
     },
+    onError: (err) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to save security settings");
+    },
   });
 
   if (isLoading) {
@@ -160,11 +183,11 @@ export function SettingsPage() {
   }
 
   // A dead `PERMISSIONS` array lived here: seven hand-picked keys out of the
-  // registry's thirty-four, declared inside the render body and referenced by
+  // registry's thirty-five, declared inside the render body and referenced by
   // nothing. This page does not draw a role matrix at all - the Roles section
   // below links out to the web app - so the list was only ever a trap waiting
   // for someone to wire it up and ship a permission table that silently
-  // omitted twenty-seven keys, which is precisely the defect the web page's
+  // omitted twenty-eight keys, which is precisely the defect the web page's
   // own matrix had (it listed two permissions that do not exist and missed
   // twenty-three that do).
 
@@ -264,13 +287,18 @@ export function SettingsPage() {
               />
               <button
                 onClick={() => saveLimitsMut.mutate()}
-                disabled={saveLimitsMut.isPending}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
+                disabled={saveLimitsMut.isPending || !canSaveLimits}
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
                 Save limits
               </button>
+              {!canSaveLimits && (
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Your role does not allow changing these limits.
+                </p>
+              )}
             </div>
           </Section>
         )}
@@ -298,13 +326,18 @@ export function SettingsPage() {
               />
               <button
                 onClick={() => saveSecurityMut.mutate()}
-                disabled={saveSecurityMut.isPending}
-                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
+                disabled={saveSecurityMut.isPending || !canSaveSecurity}
+                className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
                 Save security
               </button>
+              {!canSaveSecurity && (
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Your role does not allow changing security settings.
+                </p>
+              )}
             </div>
           </Section>
         )}

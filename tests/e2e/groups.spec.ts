@@ -50,7 +50,8 @@ test.describe("groups", () => {
       const groups = await readGroups(page);
       const made = groups.find((g) => g.name === "Invoices");
       expect(made).toBeTruthy();
-      expect(made?.color).toBe("#1D4ED8");
+      // palette.ts hex is lowercase since the 2026-09-25 design-system pass
+      expect(made?.color).toBe("#1d4ed8");
     }).toPass({ timeout: 5000 });
   });
 

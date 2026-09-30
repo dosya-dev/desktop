@@ -116,6 +116,12 @@ export default defineConfig({
         // than aliased at ../../packages: CI syncs only apps/desktop/ to the
         // public repo, where that sibling does not exist.
         "@dosya-dev/audio-player": resolve(__dirname, "vendor/audio-player/index.ts"),
+        // Vendored e2ee crypto bundles (scripts/vendor-e2ee.mjs). Same
+        // public-repo reason as above, and both lines are load-bearing:
+        // e2ee-client imports e2ee-core rather than inlining it, so a missing
+        // core alias yields a second registry whose backend was never set.
+        "@dosya-dev/e2ee-core": resolve(__dirname, "vendor/e2ee-core/index.js"),
+        "@dosya-dev/e2ee-client": resolve(__dirname, "vendor/e2ee-client/index.js"),
       },
     },
   },

@@ -8,5 +8,9 @@
     <true/>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>53HFF44WQ8.group.dev.dosya.desktop</string>
+    </array>
 </dict>
 </plist>

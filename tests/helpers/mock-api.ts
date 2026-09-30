@@ -24,6 +24,11 @@ export interface MockApiOptions {
   workspaces?: unknown[];
   /** Delay (ms) before the upload PUT responds - lets tests catch mid-flight state. */
   uploadDelayMs?: number;
+  /**
+   * What GET /api/e2ee/user-keys answers: no identity (404, the gate shows
+   * Setup), an identity (200, Unlock), or a server error (500, Retry).
+   */
+  e2eeIdentity?: "none" | "present" | "error";
 }
 
 export interface MockServer {
@@ -35,7 +40,7 @@ export interface MockServer {
 export async function startMockServer(
   options: MockApiOptions = {},
 ): Promise<MockServer> {
-  const { authenticated = true, workspaces = [data.mockWorkspace], uploadDelayMs = 0 } = options;
+  const { authenticated = true, workspaces = [data.mockWorkspace], uploadDelayMs = 0, e2eeIdentity = "none" } = options;
 
   // Test-only instrumentation: counts POST /api/upload/init calls so specs
   // can assert no *new* upload activity happens after a given point (e.g.
@@ -190,6 +195,21 @@ export async function startMockServer(
       if (!presented && deadSessions.size > 0) {
         return json({ ok: false, error: "Unauthorized" }, 401);
       }
+    }
+
+    // ── Vault (E2EE) - only what the locked gate touches. The crypto path
+    // needs a real VOPRF server and is covered by the packages' own harness.
+    if (path === "/api/e2ee/user-keys" && method === "GET") {
+      if (e2eeIdentity === "error") return json({ error: "Internal error" }, 500);
+      if (e2eeIdentity === "none") return json({ error: "No key bundle found" }, 404);
+      return json({
+        x25519Pub: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ed25519Pub: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        wrappedPriv: "AA==", recoveryWrapped: null, argonSalt: "AA==", argonParams: "{}",
+      });
+    }
+    if (path === "/api/e2ee/oprf-public-key" && method === "GET") {
+      return json({ publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" });
     }
 
     // ── Auth ──────────────────────────────────────────────
@@ -365,7 +385,8 @@ export async function startMockServer(
     }
     if ((path === "/api/files/folder" || path === "/api/folders") && method === "POST") {
       readBody(req).then((body) => {
-        const { folder } = createFolderRecord(body.name || "New Folder", body.parent_id ?? null);
+        // Mirrors the API: an empty string means the root, stored as null.
+        const { folder } = createFolderRecord(body.name || "New Folder", body.parent_id?.trim() || null);
         json({ ok: true, folder: { ...folder, kind: "folder" } });
       });
       return;
@@ -387,7 +408,7 @@ export async function startMockServer(
       readBody(req).then((body) => {
         const results: { name: string; parent_id: string | null; id: string; created: boolean }[] = [];
         for (const entry of body.folders ?? []) {
-          const parentId = entry.parent_id ?? null;
+          const parentId = entry.parent_id?.trim() || null;
           // Prod drops entries whose parent_id doesn't resolve to an existing folder
           if (parentId && !folderStore.has(parentId)) continue;
           const { folder, created } = createFolderRecord(entry.name, parentId);
@@ -512,7 +533,7 @@ export async function startMockServer(
           allowed_extensions: body.allowed_extensions ?? null,
           max_file_size_bytes: body.max_file_size_mb ? body.max_file_size_mb * 1024 * 1024 : null,
           max_files: body.max_files ?? null, upload_count: 0, is_revoked: 0,
-          created_at: 1_741_000_000, folder_id: body.folder_id ?? null,
+          created_at: 1_741_000_000, folder_id: body.folder_id?.trim() || null,
           created_by_name: "Test User", folder_name: null,
           url: `https://dosya.dev/upload-request/tok_${id}`,
         };
@@ -612,7 +633,7 @@ export async function startMockServer(
       readBody(req).then((body) => {
         // Destination matters, not just the count: a folder drop has to prove
         // each file was initialised against ITS folder, not the page's.
-        uploadInits.push({ file_name: body.file_name, folder_id: body.folder_id ?? null });
+        uploadInits.push({ file_name: body.file_name, folder_id: body.folder_id?.trim() || null });
         json({ ok: true, session_id: "sess_1" });
       });
       return;
@@ -633,10 +654,10 @@ export async function startMockServer(
         const comment = {
           id: `cmt_new_${commentSeq}`,
           file_id: body.file_id ?? null,
-          folder_id: body.folder_id ?? null,
+          folder_id: body.folder_id?.trim() || null,
           workspace_id: body.workspace_id ?? "ws_test_1",
           user_id: "user_test_1",
-          parent_id: body.parent_id ?? null,
+          parent_id: body.parent_id?.trim() || null,
           body: body.body ?? "",
           is_edited: 0,
           created_at: now,

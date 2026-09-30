@@ -213,6 +213,24 @@ export class MaintenanceError extends Error {
   }
 }
 
+/**
+ * A 4xx the server answered ON PURPOSE to a delete, move or rename. It carries
+ * the status because the engine has to tell a 403 apart from everything else:
+ * a refused permission is permanent (retrying it every cycle would just be
+ * refused again), whereas the same `Error("Delete failed")` text used to be
+ * indistinguishable from a transient failure. Every call that raised a plain
+ * Error before raises this instead, so `err.message` readers are unaffected.
+ */
+export class RemoteRefusedError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "RemoteRefusedError";
+    this.status = status;
+  }
+}
+
 /** Rate limit budget tracked from server response headers. */
 export interface RateBudget {
   remaining: number;
@@ -1838,8 +1856,8 @@ export class RemoteClient {
     });
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
     if (res.status >= 400) {
-      const data = await res.json();
-      throw new Error(data.error || "Move failed");
+      const data = await res.json().catch(() => ({}));
+      throw new RemoteRefusedError(data.error || "Move failed", res.status);
     }
   }
 
@@ -1851,8 +1869,8 @@ export class RemoteClient {
     });
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
     if (res.status >= 400) {
-      const data = await res.json();
-      throw new Error(data.error || "Rename failed");
+      const data = await res.json().catch(() => ({}));
+      throw new RemoteRefusedError(data.error || "Rename failed", res.status);
     }
   }
 
@@ -1860,17 +1878,30 @@ export class RemoteClient {
     const res = await this.fetch(`/api/files/${fileId}`, { method: "DELETE" });
     if (res.status === 401) throw new Error("SESSION_EXPIRED");
     if (res.status !== 200 && res.status !== 404) {
-      const data = await res.json();
-      throw new Error(data.error || "Delete failed");
+      const data = await res.json().catch(() => ({}));
+      throw new RemoteRefusedError(data.error || "Delete failed", res.status);
     }
   }
 
   /**
    * Batch delete multiple files in a single request.
    * Used when a user deletes a folder locally - 10K files in 20 requests instead of 10K.
+   *
+   * Returns what the server reports it moved to the trash, accumulated over
+   * the chunks: the count and the ids. Only 401 used to be checked here, so a
+   * 403 ("No delete permission") read as success to both callers and they
+   * dropped every index row - the files then looked new on the next cycle and
+   * were re-uploaded. Any non-2xx now throws with the server's message. A 2xx
+   * can still be a shortfall: files already trashed, owned by someone else
+   * under delete_own_files, or in another workspace are skipped, not refused,
+   * and the route names the ids it did trash (`deleted_ids`) so callers drop
+   * exactly those rows and keep the rest. A server predating `deleted_ids`
+   * gets the whole chunk credited, which is what the callers assumed before.
    */
-  async deleteFilesBatch(workspaceId: string, fileIds: string[]): Promise<void> {
+  async deleteFilesBatch(workspaceId: string, fileIds: string[]): Promise<{ deleted: number; deletedIds: string[] }> {
     const CHUNK = 500;
+    let deleted = 0;
+    const deletedIds: string[] = [];
     for (let i = 0; i < fileIds.length; i += CHUNK) {
       const chunk = fileIds.slice(i, i + CHUNK);
       const res = await this.fetch("/api/files/batch-delete", {
@@ -1879,7 +1910,17 @@ export class RemoteClient {
         body: JSON.stringify({ workspace_id: workspaceId, file_ids: chunk }),
       });
       if (res.status === 401) throw new Error("SESSION_EXPIRED");
+      const data = await res.json().catch(() => ({}));
+      if (res.status < 200 || res.status >= 300 || data.ok === false) {
+        throw new RemoteRefusedError(data.error || `Batch delete failed (${res.status})`, res.status);
+      }
+      const ids: string[] = Array.isArray(data.deleted_ids)
+        ? data.deleted_ids.filter((id: unknown): id is string => typeof id === "string")
+        : chunk;
+      deletedIds.push(...ids);
+      deleted += typeof data.deleted === "number" ? data.deleted : ids.length;
     }
+    return { deleted, deletedIds };
   }
 
   async getFolderSyncFlag(folderId: string): Promise<boolean> {

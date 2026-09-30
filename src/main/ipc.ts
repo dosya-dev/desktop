@@ -10,7 +10,7 @@ import { app } from "electron";
 import { HIDDEN_LAUNCH_ARG } from "./window-show";
 import { join, resolve, sep, basename } from "path";
 import { createWriteStream } from "fs";
-import { mkdtemp, readdir, rm } from "fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "fs/promises";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import QRCode from "qrcode";
@@ -19,6 +19,21 @@ import { clearSessionCookie } from "./session";
 import { isSessionCookieName, sessionCookieHeader } from "./session-cookie";
 import { buildDownloadUrl } from "./download-url";
 import { openSink, writeSink, closeSink, abortSink } from "./lan-receive";
+import { saveVaultBytes } from "./vault-save";
+import {
+  linkFileProvider,
+  relinkFileProvider,
+  unlinkFileProvider,
+  type FileProviderDeps,
+  type FileProviderNative,
+} from "./file-provider";
+import {
+  addonPath,
+  loadAddon,
+  mintLinkedSession,
+  readPreference,
+  writePreference,
+} from "./file-provider-host";
 
 export function registerIpcHandlers(apiBase: string): void {
   // "Open in system app" writes here. A single fixed name (the old approach)
@@ -118,6 +133,12 @@ export function registerIpcHandlers(apiBase: string): void {
 
   ipcMain.handle("auth:clear-session", async () => {
     await clearSessionCookie(apiBase);
+    // The extension holds a session of its own, and the files macOS downloaded
+    // for it sit on disk. The server revokes the session with its parent, but
+    // only removing the domain takes the location and those files away. Signing
+    // out must never fail on this, so it is awaited and swallowed rather than
+    // left to reject the handler.
+    await unlinkFileProvider(null, fileProviderDeps()).catch(() => {});
   });
 
   ipcMain.handle("auth:get-api-base", () => apiBase);
@@ -388,6 +409,18 @@ export function registerIpcHandlers(apiBase: string): void {
     shell.showItemInFolder(path);
   });
 
+  // ── Vault: where a decrypted file is written ──────────────────────
+  // The renderer decrypted the bytes and asks by NAME; the dialog and the
+  // path stay here. See src/main/vault-save.ts.
+  ipcMain.handle("vault:save-bytes", (_event, { name, bytes }: { name: unknown; bytes: unknown }) =>
+    saveVaultBytes(name, bytes, {
+      showSaveDialog: (opts) => dialog.showSaveDialog(opts),
+      downloadsDir: () => app.getPath("downloads"),
+      // Owner-only like file:open's temp copy: this is plaintext the user
+      // chose to keep encrypted everywhere else.
+      write: (path, buf) => writeFile(longPath(path), buf, { mode: 0o600 }),
+    }));
+
   // ── 2FA QR generation ────────────────────────────────────────────
   // Render the authenticator QR entirely on-device. The otpauth:// URI embeds
   // the raw TOTP shared secret, so it must NEVER be sent to a third-party image
@@ -408,6 +441,101 @@ export function registerIpcHandlers(apiBase: string): void {
       const title = typeof opts?.title === "string" ? opts.title.slice(0, 200) : "dosya";
       const body = typeof opts?.body === "string" ? opts.body.slice(0, 500) : "";
       new Notification({ title, body }).show();
+    },
+  );
+
+  // ── Finder location (macOS) ──────────────────────────────────────
+  // The addon is loaded once, lazily: on any other platform, and on a dev build
+  // that has never run scripts/build-file-provider-addon.mjs, there is nothing
+  // to load and the app simply offers no Finder location.
+  let addon: FileProviderNative | null | undefined;
+  const nativeAddon = (): FileProviderNative | null => {
+    if (addon === undefined) {
+      addon =
+        process.platform === "darwin"
+          ? loadAddon(
+              addonPath({
+                packaged: app.isPackaged,
+                resourcesPath: process.resourcesPath,
+                appRoot: app.getAppPath(),
+              }),
+            )
+          : null;
+    }
+    return addon;
+  };
+
+  const fileProviderDeps = (): FileProviderDeps => ({
+    native: nativeAddon(),
+    mint: () =>
+      mintLinkedSession(apiBase, {
+        cookieHeader: async () =>
+          sessionCookieHeader(await session.defaultSession.cookies.get({ url: apiBase })),
+        fetch: globalThis.fetch,
+      }),
+  });
+
+  const preferenceDir = (): string => app.getPath("userData");
+
+  /**
+   * True when a domain is registered but macOS has not been told it may run it.
+   * A newly added domain starts disabled and stays that way until the user
+   * approves the extension in System Settings; until then the location appears
+   * in Finder and every request against it fails with "Sync is not enabled".
+   */
+  const needsApproval = async (native: FileProviderNative | null): Promise<boolean> => {
+    if (!native) return false;
+    try {
+      return (await native.domainEnabled()) === false;
+    } catch {
+      return false;
+    }
+  };
+
+  ipcMain.handle("fileProvider:status", async () => {
+    const native = nativeAddon();
+    return {
+      available: Boolean(native?.isSupported()),
+      enabled: await readPreference(preferenceDir()),
+      needsApproval: await needsApproval(nativeAddon()),
+    };
+  });
+
+  ipcMain.handle("fileProvider:open-settings", async () => {
+    // The Extensions pane. macOS has no deep link to the File Providers section
+    // itself, so the user lands one click away from it.
+    await shell.openExternal("x-apple.systempreferences:com.apple.ExtensionsPreferences");
+  });
+
+  ipcMain.handle("fileProvider:link", async (_event, opts: { userId: unknown; fresh?: unknown }) => {
+    const userId = opts?.userId;
+    if (typeof userId !== "string" || userId.length === 0 || userId.length > 200) {
+      throw new Error("Invalid userId");
+    }
+    if (!(await readPreference(preferenceDir()))) return { ok: false };
+    const link = opts?.fresh === true ? relinkFileProvider : linkFileProvider;
+    return { ok: await link(userId, fileProviderDeps()) };
+  });
+
+  ipcMain.handle(
+    "fileProvider:set-enabled",
+    async (_event, opts: { enabled: unknown; userId?: unknown }) => {
+      const enabled = opts?.enabled;
+      if (typeof enabled !== "boolean") throw new Error("Invalid enabled");
+      const userId = typeof opts?.userId === "string" && opts.userId.length <= 200 ? opts.userId : null;
+      await writePreference(preferenceDir(), enabled);
+      // Take effect now rather than on the next sign-in: a switch that does
+      // nothing until you restart reads as a switch that does not work.
+      // `linked` is null when there is nobody to link: the preference is stored
+      // and the next sign-in acts on it. False means it was tried and did not
+      // work, which the switch has to show rather than report a bare success.
+      let linked: boolean | null = null;
+      if (enabled) {
+        if (userId) linked = await linkFileProvider(userId, fileProviderDeps());
+      } else {
+        await unlinkFileProvider(null, fileProviderDeps());
+      }
+      return { enabled, linked, needsApproval: await needsApproval(nativeAddon()) };
     },
   );
 }

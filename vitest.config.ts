@@ -18,6 +18,8 @@ export default defineConfig({
     // test file itself only uses relative imports.
     alias: {
       "@": path.resolve(__dirname, "./src/renderer"),
+      "@dosya-dev/e2ee-core": path.resolve(__dirname, "./vendor/e2ee-core/index.js"),
+      "@dosya-dev/e2ee-client": path.resolve(__dirname, "./vendor/e2ee-client/index.js"),
     },
   },
   test: {
@@ -29,6 +31,17 @@ export default defineConfig({
       // which node:test cannot resolve, so its suite runs here instead (the
       // same reason as the sync files below).
       "src/renderer/lib/lan-peer.test.ts",
+      // Pure-function tests ported straight from the web copy (see the file's
+      // own header) - vitest's own `describe`/`it` don't run under node:test,
+      // so this needs the same explicit carve-out as lan-peer.test.ts above.
+      "src/renderer/lib/live-photos.test.ts",
+      // Same story as live-photos: vitest's describe/it, which node:test cannot
+      // run. It was swept into the node:test glob and had been red there since
+      // it was added.
+      "src/renderer/lib/auth-direction.test.ts",
+      // The Vault store and its seams use "@/..." and the vendored e2ee alias,
+      // which node:test cannot resolve - same reason as lan-peer above.
+      "src/renderer/lib/vault/*.test.ts",
       // remote-client.ts and index.ts (SyncEngine) both use TS parameter
       // properties and extensionless relative imports (bundler-style
       // resolution) - Node's own test runner cannot load either (see the
@@ -41,6 +54,8 @@ export default defineConfig({
       "src/main/sync/filesystem-safety.test.ts",
       "src/main/sync/sync-engine-path-safety.test.ts",
       "src/main/sync/remote-client.path-safety.test.ts",
+      "src/main/sync/remote-client.refusals.test.ts",
+      "src/main/sync/sync-engine-refusals.test.ts",
     ],
   },
 });

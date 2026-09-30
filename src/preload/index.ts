@@ -35,6 +35,23 @@ const electronAPI = {
   beginOAuth: (provider: string): Promise<string> =>
     ipcRenderer.invoke("auth:begin-oauth", provider),
 
+  // Finder location (macOS). `available` is false everywhere else, and the
+  // renderer renders nothing rather than a switch that cannot do anything.
+  fileProvider: {
+    status: (): Promise<{ available: boolean; enabled: boolean; needsApproval: boolean }> =>
+      ipcRenderer.invoke("fileProvider:status"),
+    link: (userId: string, fresh = false): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("fileProvider:link", { userId, fresh }),
+    setEnabled: (
+      enabled: boolean,
+      userId?: string,
+    ): Promise<{ enabled: boolean; linked: boolean | null; needsApproval: boolean }> =>
+      ipcRenderer.invoke("fileProvider:set-enabled", { enabled, userId }),
+    // Opens General > Login Items & Extensions, where macOS holds the approval
+    // a newly registered File Provider waits on.
+    openSettings: (): Promise<void> => ipcRenderer.invoke("fileProvider:open-settings"),
+  },
+
   // File system
   openFileDialog: (
     options?: Electron.OpenDialogOptions,
@@ -80,6 +97,14 @@ const electronAPI = {
 
   showInFolder: (path: string): Promise<void> =>
     ipcRenderer.invoke("file:show-in-folder", path),
+
+  // Vault: hand decrypted bytes to main, which owns the save dialog and the
+  // path. The renderer passes a NAME, never a path - see src/main/vault-save.ts.
+  vaultSaveBytes: (
+    name: string,
+    bytes: Uint8Array,
+  ): Promise<{ ok: boolean; canceled?: boolean; path?: string }> =>
+    ipcRenderer.invoke("vault:save-bytes", { name, bytes }),
 
   // 2FA - generate the authenticator QR locally so the secret never leaves the device
   generateTotpQr: (uri: string): Promise<string> =>

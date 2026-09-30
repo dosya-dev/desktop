@@ -49,6 +49,7 @@ const TwoFactorPage = lazyPage(() => import("./pages/TwoFactorPage"), "TwoFactor
 const CreateWorkspacePage = lazyPage(() => import("./pages/CreateWorkspacePage"), "CreateWorkspacePage");
 const WorkspaceDashboardPage = lazyPage(() => import("./pages/WorkspaceDashboardPage"), "WorkspaceDashboardPage");
 const NotificationsPage = lazyPage(() => import("./pages/NotificationsPage"), "NotificationsPage");
+const VaultPage = lazyPage(() => import("./pages/VaultPage"), "VaultPage");
 
 /**
  * Records the current page so a reclaimed window can boot straight back into
@@ -192,6 +193,7 @@ function AppRoutes() {
       <Route path="/map" element={<ProtectedPage><MapPage /></ProtectedPage>} />
       <Route path="/editor/:fileId" element={<ProtectedBarePage><EditorPage /></ProtectedBarePage>} />
       <Route path="/lan-transfer" element={<ProtectedPage><LanTransferPage /></ProtectedPage>} />
+      <Route path="/vault" element={<ProtectedPage><VaultPage /></ProtectedPage>} />
       <Route path="/workspaces" element={<ProtectedPage><WorkspaceDashboardPage /></ProtectedPage>} />
       <Route path="/notifications" element={<ProtectedPage><NotificationsPage /></ProtectedPage>} />
       <Route path="/verify" element={<VerifyPage />} />

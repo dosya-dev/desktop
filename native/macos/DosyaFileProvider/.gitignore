@@ -1,0 +1,4 @@
+# SwiftPM build output. Never commit it: a single `swift build` writes ~300 MB
+# across a couple of thousand files.
+.build/
+.swiftpm/

@@ -67,12 +67,21 @@ test.describe("notification inbox", () => {
     await expect.poll(() => page.url()).toContain("view=file_1");
   });
 
+  test("a Vault link_path navigates to the desktop Vault", async ({ appPage: page }) => {
+    await page.getByTestId("open-notifications").click();
+    await page.getByTestId("view-all-notifications").click();
+    await page.getByTestId("notification-ntf_read").getByText("A share link expires tomorrow").click();
+    // link_path is the WEB route /vault; desktop has the same route now.
+    await expect.poll(() => page.url()).toContain("/vault");
+    await expect(page.getByTestId("vault-page")).toBeVisible();
+  });
+
   test("a web-only link_path does not navigate", async ({ appPage: page }) => {
     await page.getByTestId("open-notifications").click();
     await page.getByTestId("view-all-notifications").click();
     const before = page.url();
-    await page.getByTestId("notification-ntf_read").getByText("A share link expires tomorrow").click();
-    // /vault has no desktop equivalent, so the row is readable but goes nowhere.
+    await page.getByTestId("notification-ntf_billing").getByText("Your invoice is ready").click();
+    // /billing has no desktop equivalent, so the row is readable but goes nowhere.
     await expect.poll(() => page.url()).toBe(before);
   });
 });

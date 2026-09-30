@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>dosya.dev</string>
+    <key>CFBundleExecutable</key>
+    <string>DosyaFileProvider</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.dosya.desktop.fileprovider</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>DosyaFileProvider</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <!-- Every macOS app extension Xcode builds declares this, and so does every
+         File Provider extension macOS itself ships. This bundle is assembled by
+         a script instead of Xcode, so nothing added it for us. -->
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
+    <!-- Stamped from the app's version at build time; a nested bundle whose
+         version never moves is confusing in diagnostics and in pluginkit. -->
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionFileProviderDocumentGroup</key>
+        <string>group.dev.dosya.desktop</string>
+        <key>NSExtensionFileProviderSupportsEnumeration</key>
+        <true/>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.fileprovider-nonui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>DosyaFileProviderExtension</string>
+    </dict>
+</dict>
+</plist>

@@ -46,6 +46,11 @@ publish: []
 # .dmg). Both are built from the same signed .app in one pass, so notarizing
 # the .dmg registers the identical .app the .zip carries. See the update feed
 # wiring in apps/api (renderLatestYaml points mac at the .zip).
+# Builds the macOS File Provider extension (native/macos/DosyaFileProvider) and
+# puts it in Contents/PlugIns, signed, BEFORE electron-builder signs the app
+# around it: the app's signature seals whatever is nested inside it.
+afterPack: scripts/afterPack.mjs
+
 mac:
   target:
     - target: dmg
@@ -59,7 +64,34 @@ mac:
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
+  # A SEPARATE file for the helper processes, and the difference is load-bearing:
+  # it has no keychain-access-groups. The helpers (GPU, Renderer, Utility,
+  # Network) are their own bundles with their own identifiers, and the app's
+  # embedded provisioning profile does not cover them, so a restricted
+  # entitlement there is unauthorized and every child is killed at launch
+  # (exit code 9) while the main process survives. The app itself keeps the
+  # entitlement, authorized by its own profile.
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  # Pinned, not auto-discovered. This Mac holds three Developer ID certificates
+  # and two of them are the personal team; auto-discovery would pick whichever
+  # came first and sign a release under the wrong identity without saying so.
+  # Without the "Developer ID Application:" prefix, which electron-builder
+  # adds itself. scripts/afterPack.mjs expands it back to the full unique
+  # name before calling codesign, because this team also owns Apple
+  # Distribution and 3rd Party Mac Developer certificates with the same
+  # common name, and a partial match would be ambiguous.
+  identity: "DOSYA PTY LTD (53HFF44WQ8)"
+  # entitlements.mac.plist deliberately carries NO XML comments: codesign hands
+  # entitlements to AMFI, whose parser rejects them with "syntax error near
+  # line N" and fails the whole signing step. Explanations belong here instead.
+  # The app claims keychain-access-groups 53HFF44WQ8.group.dev.dosya.desktop,
+  # shared with the Finder extension in Contents/PlugIns, which reads the
+  # session the app mints for it.
+  #
+  # Authorizes keychain-access-groups. Without it the app is killed at launch.
+  # Supplied per machine and by CI from a secret; never committed, because this
+  # app is published to a public mirror.
+  provisioningProfile: build/embedded.provisionprofile
 
 # dmg-background.tiff carries both @1x (540x380) and @2x (1080x760) reps,
 # combined with `tiffutil -cathidpicheck`. dmg-builder sizes the Finder

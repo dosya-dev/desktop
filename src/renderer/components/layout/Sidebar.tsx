@@ -30,6 +30,7 @@ import {
   Trash2,
   EyeOff,
   Plug,
+  Lock,
   type LucideIcon,
 } from "lucide-react";
 import type { Workspace } from "@dosya-dev/shared";
@@ -38,6 +39,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { useSyncPaused, useSyncPairs } from "@/lib/sync-store";
 import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { api, ApiError } from "@/lib/api-client";
+import { useNarrowWindow } from "@/lib/use-narrow-window";
 import { usePermissions } from "@/lib/use-permissions";
 import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
@@ -101,6 +103,10 @@ const NAV_MAIN: NavEntry[] = [
   { kind: "files" },
   { kind: "link", to: "/upload", icon: Upload, label: "Upload", perm: "access_upload" },
   { kind: "link", to: "/shared", icon: Share2, label: "Shared", perm: "access_shared" },
+  // Ungated like Groups: the Vault is a per-user surface (its own passphrase
+  // and identity), not a workspace resource, so no access_* permission
+  // governs it. Same reasoning as apps/web's sidebar.
+  { kind: "link", to: "/vault", icon: Lock, label: "Vault" },
   { kind: "link", to: "/sync", icon: RefreshCw, label: "Sync" },
 ];
 
@@ -111,28 +117,6 @@ const NAV_WORKSPACE: NavEntry[] = [
 ];
 
 const FILES_OPEN_KEY = "dosya_sidebar_files_open";
-
-/**
- * Width below which the sidebar drops to icons on its own.
- *
- * The window can now be dragged to 700px. At 260px the expanded sidebar would
- * take more than a third of that, so it collapses before the content has to.
- */
-const NARROW_WINDOW = "(max-width: 1000px)";
-
-function useNarrowWindow(): boolean {
-  const [narrow, setNarrow] = useState(
-    () => typeof window !== "undefined" && window.matchMedia(NARROW_WINDOW).matches,
-  );
-  useEffect(() => {
-    const mq = window.matchMedia(NARROW_WINDOW);
-    const onChange = (e: MediaQueryListEvent) => setNarrow(e.matches);
-    mq.addEventListener("change", onChange);
-    setNarrow(mq.matches);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-  return narrow;
-}
 
 /** Tallest the collapsed-mode Files flyout is allowed to get, in px. */
 const FLYOUT_MAX_H = 380;

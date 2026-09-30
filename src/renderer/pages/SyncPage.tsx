@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useAuth } from "../lib/auth-context";
+import { FinderLocationToggle } from "../components/FinderLocationToggle";
 import { useQuery } from "@tanstack/react-query";
 import {
   RefreshCw,
@@ -1203,6 +1205,7 @@ function PrefToggle({ label, description, checked, onChange }: { label: string; 
 }
 
 function SyncSettings() {
+  const { user } = useAuth();
   const [pollInterval, setPollInterval] = useState(30);
   const [maxTransfers, setMaxTransfers] = useState(3);
   const [uploadKbps, setUploadKbps] = useState(0);   // KB/s, 0 = unlimited
@@ -1283,6 +1286,7 @@ function SyncSettings() {
       <div className="space-y-3 border-t pt-5" style={border}>
         <h3 className="text-sm font-semibold">Desktop app</h3>
         <PrefToggle label="Launch at login" description="Start dosya automatically when you sign in" checked={launchAtLogin} onChange={toggleLaunch} />
+        <FinderLocationToggle userId={user?.id ?? null} />
       </div>
 
       {/* Snooze */}

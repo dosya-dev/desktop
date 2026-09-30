@@ -1,0 +1,4 @@
+# Provisioning profiles are supplied per machine and by CI from a secret, never
+# committed: apps/desktop is published to a PUBLIC mirror, and a profile names
+# the team, its certificate and its entitlements.
+*.provisionprofile

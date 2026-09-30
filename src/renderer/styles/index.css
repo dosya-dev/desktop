@@ -149,6 +149,8 @@
   --tone-warn-ink: oklch(47.3% 0.137 46.201);
   --tone-note-bg: oklch(93.2% 0.032 255.585);
   --tone-note-ink: oklch(42.4% 0.199 265.638);
+  --warning: #c2410c;
+  --warning-foreground: #ffffff;
 
 }
 
@@ -212,6 +214,8 @@
   --tone-warn-ink: oklch(82.8% 0.189 84.429);
   --tone-note-bg: oklch(28.2% 0.091 267.935);
   --tone-note-ink: oklch(70.7% 0.165 254.624);
+  --warning: #fb923c;
+  --warning-foreground: #181818;
 
 }
 

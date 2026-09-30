@@ -38,7 +38,7 @@ export function TwoFactorPage() {
 
       // Wait for cookie SameSite fix, then refresh user context
       await window.electronAPI.waitForSession();
-      await refreshUser();
+      await refreshUser(true);
       navigate("/dashboard");
     } catch (err) {
       if (err instanceof ApiError) {

@@ -15,7 +15,9 @@
     "paths": {
       "@/*": ["./src/renderer/*"],
       "@dosya-dev/shared": ["../../packages/shared/src"],
-      "@dosya-dev/audio-player": ["./vendor/audio-player/index.ts"]
+      "@dosya-dev/audio-player": ["./vendor/audio-player/index.ts"],
+      "@dosya-dev/e2ee-core": ["./vendor/e2ee-core/index.d.ts"],
+      "@dosya-dev/e2ee-client": ["./vendor/e2ee-client/index.d.ts"]
     }
   },
   "include": [
@@ -23,7 +25,9 @@
     "src/renderer/**/*.tsx",
     "src/main/telemetry-config.ts",
     "../../packages/shared/src/**/*.ts",
-    "vendor/audio-player/**/*.ts"
+    "vendor/audio-player/**/*.ts",
+    "vendor/e2ee-core/**/*.d.ts",
+    "vendor/e2ee-client/**/*.d.ts"
   ],
   // Same reason as tsconfig.node.json's exclude, now that renderer logic has
   // unit tests too: Node's test runner needs the .ts extension in an import

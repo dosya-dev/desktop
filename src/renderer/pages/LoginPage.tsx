@@ -20,6 +20,10 @@ export function LoginPage() {
   // otherwise the timer would fire on an unmounted component.
   const oauthCleanup = useRef<(() => void) | null>(null);
   useEffect(() => () => oauthCleanup.current?.(), []);
+  // Every hook must run before the redirect below: an early return above a
+  // hook makes the authenticated re-render call fewer hooks than the first
+  // one did, and React throws #300 (Sentry dosya-desktop 149708526).
+  const authDir = useAuthDirection();
 
   // Already logged in - skip login page and go straight to dashboard
   if (!authLoading && isAuthenticated) {
@@ -75,7 +79,7 @@ export function LoginPage() {
       oauthCleanup.current = null;
       try {
         await window.electronAPI.waitForSession();
-        await refreshUser();
+        await refreshUser(true);
         navigate("/dashboard");
       } catch (err: any) {
         setError(err.message || "Login failed");
@@ -98,8 +102,6 @@ export function LoginPage() {
       clearTimeout(timer);
     };
   }
-
-  const authDir = useAuthDirection();
 
   return (
     <div

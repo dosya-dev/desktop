@@ -56,6 +56,12 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
   const [error, setError] = useState("");
   const [resultUrl, setResultUrl] = useState("");
   const [restrictToRecipients, setRestrictToRecipients] = useState(false);
+  /**
+   * "Remove photo metadata" (API migration 0183): photos served through the
+   * link lose their location, camera and capture-time details. Off by
+   * default and absent from the request when off.
+   */
+  const [stripMetadata, setStripMetadata] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
 
   // What a link for this folder will NOT include, shown before the sharer
@@ -76,6 +82,7 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
     setEmailInput("");
     setExpiry("7");
     setPassword("");
+    setStripMetadata(false);
     setTitle("");
     setMessage("");
     setShowAdvanced(false);
@@ -192,6 +199,7 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
           restrictToRecipients,
           password: pw || null,
           expiresAt: expiresAt(),
+          stripMetadata,
         });
 
         const res = await api.post<{ ok: boolean; error?: string; failed?: string[] }>(endpoint, body);
@@ -218,6 +226,7 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
           target,
           password: pw || null,
           expiresAt: expiresAt(),
+          stripMetadata,
         });
 
         const data = await api.post<{ ok: boolean; link?: { url: string }; error?: string }>(endpoint, linkBody);
@@ -396,6 +405,21 @@ export function ShareModal({ open, target, name, onClose }: ShareModalProps) {
                     autoComplete="off"
                   />
                 </div>
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={stripMetadata}
+                    onChange={(e) => setStripMetadata(e.target.checked)}
+                    className="mt-0.5 size-3.5 accent-[var(--color-primary)]"
+                    data-testid="strip-metadata"
+                  />
+                  <span className="text-xs leading-snug">
+                    Remove photo metadata
+                    <span className="block text-[11px] text-[var(--color-text-muted)]">
+                      Photos are handed over without location, camera and capture-time details. Your originals stay as they are.
+                    </span>
+                  </span>
+                </label>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">
                     Title <span className="font-normal">(optional)</span>

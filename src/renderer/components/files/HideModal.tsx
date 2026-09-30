@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react";
 import { Eye, EyeOff, UserMinus, Shield, Loader2, Check } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import { Modal } from "@/components/files/Modal";
 
 interface HideModalProps {
@@ -26,10 +26,15 @@ export function HideModal({ open, target, workspaceId, onClose, onDone }: HideMo
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState("");
+  // Why the pickers are empty, when they are. /api/team and /api/roles answer
+  // 403 to a role that may not see the roster; swallowing that showed "No
+  // members found" as if the workspace were empty.
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     if (!open || !target) return;
     setError("");
+    setLoadError("");
     setFetching(true);
 
     const ep = target.type === "file" ? `/api/files/${target.id}/hide` : `/api/folders/${target.id}/hide`;
@@ -45,7 +50,9 @@ export function HideModal({ open, target, workspaceId, onClose, onDone }: HideMo
       }
       if (teamData.ok && teamData.members) setMembers(teamData.members);
       if (rolesData.ok && rolesData.roles) setRoles(rolesData.roles);
-    }).catch(() => {}).finally(() => setFetching(false));
+    }).catch((err: unknown) => {
+      setLoadError(err instanceof ApiError ? err.message : "Members and roles could not be loaded.");
+    }).finally(() => setFetching(false));
   }, [open, target, workspaceId]);
 
   const toggleTarget = (id: string) => {
@@ -169,6 +176,12 @@ export function HideModal({ open, target, workspaceId, onClose, onDone }: HideMo
                 );
               })}
             </div>
+          )}
+
+          {loadError && (
+            <p className="text-xs text-[var(--color-danger)]">
+              Members and roles could not be loaded: {loadError}
+            </p>
           )}
 
           {(mode === "users" || mode === "roles") && selectedTargets.size > 0 && (

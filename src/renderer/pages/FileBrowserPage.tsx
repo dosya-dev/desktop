@@ -76,6 +76,10 @@ import {
   readDroppedEntries, orderedDirs, createFolderTree, resolveTargets,
   MAX_DROPPED_FILES, type FolderPlan,
 } from "@/lib/dropped-entries";
+import {
+  collapseLiveTwins, twinsUnderStills, isLiveStill, isLiveTwin, liveTwinIds, twinDeleteEndpoint,
+} from "@/lib/live-photos";
+import { LiveBadge } from "@/components/files/LiveBadge";
 
 interface FilesResponse {
   ok: boolean;
@@ -234,7 +238,10 @@ export function FileBrowserPage() {
   // `permanent`/`fileCount` are only set by the trash view's row-level
   // "Delete permanently" (context menu), which reuses this same dialog with
   // different, unmistakably-irreversible copy instead of a second dialog.
-  const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; names: string[]; kinds: ("file" | "folder")[]; bulk?: boolean; folderIds?: string[]; permanent?: boolean; fileCount?: number } | null>(null);
+  // `twin`/`withTwin` are only set by `fileDeleteConfirm` below, for the three
+  // single-file soft-delete sites (keyboard shortcut, context menu, detail
+  // panel) - a Live Photo still offers to take its twin video along.
+  const [deleteConfirm, setDeleteConfirm] = useState<{ ids: string[]; names: string[]; kinds: ("file" | "folder")[]; bulk?: boolean; folderIds?: string[]; permanent?: boolean; fileCount?: number; twin?: { id: string; name: string } | null; withTwin?: boolean } | null>(null);
 
   // Viewer + detail panel + modals (web parity)
   const [viewerFile, setViewerFile] = useState<FileRow | null>(null);
@@ -573,6 +580,20 @@ export function FileBrowserPage() {
     return can("delete_own_files") && !!f && f.uploaded_by === currentUserId;
   };
 
+  /**
+   * The single-file soft-delete confirm state, offering to take a Live Photo
+   * still's twin video along. The twin may already be out of view (paged,
+   * filtered, collapsed under the still in the grid), so this always names it
+   * by id from `allFiles`, not from whatever happens to be on screen.
+   */
+  const fileDeleteConfirm = (f: FileRow) => ({
+    ids: [f.id],
+    names: [f.name],
+    kinds: ["file" as const],
+    twin: isLiveStill(f) ? { id: f.live_video_id!, name: allFiles.find((x) => x.id === f.live_video_id)?.name ?? "its Live Photo video" } : null,
+    withTwin: true,
+  });
+
   // Client-side chips - "shared" shows only files with share links, "favourites"
   // only starred files (both hide folders, like the web sidebar's views).
   const folders = activeFilter === "shared" || activeFilter === "favourites" ? [] : allFolders;
@@ -580,6 +601,10 @@ export function FileBrowserPage() {
     activeFilter === "shared" ? allFiles.filter((f) => f.share_count > 0)
     : activeFilter === "favourites" ? allFiles.filter((f) => favourites.has(f.id))
     : allFiles;
+  // Grids collapse a Live Photo's twin video under its still; the table keeps
+  // the twin as a row right under the still. Counts and selection use `files`.
+  const gridFiles = useMemo(() => collapseLiveTwins(files), [files]);
+  const listFiles = useMemo(() => twinsUnderStills(files), [files]);
 
   const selectableFiles = useMemo(
     () => files.filter((f) => f.lock_mode !== "full_lock" || unlockedFiles.has(f.id)),
@@ -595,6 +620,14 @@ export function FileBrowserPage() {
     setSelectedFolders(new Set());
   }, []);
   const totalSelected = selected.size + selectedFolders.size;
+  // The Live Photo videos a bulk delete would carry along. Derived once from
+  // the ids the dialog was opened with: the copy line named it three times in
+  // a single line, walking every row on the page per render of an open dialog
+  // to answer the same question.
+  const confirmTwinIds = useMemo(
+    () => (deleteConfirm?.bulk ? liveTwinIds(files, new Set(deleteConfirm.ids)) : []),
+    [files, deleteConfirm],
+  );
 
   // Selection is per-view. The folder listing clears it on navigation
   // (navigateToFolder), but the library has no folder to navigate into: it
@@ -698,7 +731,8 @@ export function FileBrowserPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault(); e.stopPropagation(); setDragging(false);
     if (showDeleted || !active?.id) return;
-    const root = uploadFolderId;
+    // "" is the URL's spelling of the workspace root; the API and the folder plan speak null.
+    const root = uploadFolderId || null;
 
     void readDroppedEntries(e.dataTransfer).then(async (tree) => {
       if (tree.entries.length === 0 && tree.dirs.length === 0) return;
@@ -833,7 +867,7 @@ export function FileBrowserPage() {
       // in the trash view - the explicit check just makes that guarantee
       // visible here too, rather than relying on tracing every setPanel call.
       if ((e.key === "Delete" || e.key === "Backspace") && panel && !showDeleted) {
-        setDeleteConfirm({ ids: [panel.file.id], names: [panel.file.name], kinds: ["file"] });
+        setDeleteConfirm(fileDeleteConfirm(panel.file));
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "a") {
         e.preventDefault();
@@ -1506,7 +1540,7 @@ export function FileBrowserPage() {
                   </td>
                 </tr>
               ))}
-              {files.map((file) => {
+              {listFiles.map((file) => {
                 const isSel = selected.has(file.id);
                 const isActive = panel?.file.id === file.id;
                 return (
@@ -1536,7 +1570,7 @@ export function FileBrowserPage() {
                       if (col.key === "name") {
                         return (
                           <td key="name" className="py-2 pr-3">
-                            <div className="flex min-w-0 items-center gap-2.5">
+                            <div className={`flex min-w-0 items-center gap-2.5 ${isLiveTwin(file) ? "pl-9" : ""}`}>
                               <RowThumbnail fileId={file.id} fileName={file.name} />
                               <span
                                 title={file.name}
@@ -1545,6 +1579,8 @@ export function FileBrowserPage() {
                               >
                                 {file.name}
                               </span>
+                              {isLiveStill(file) && <LiveBadge size="pill" />}
+                              {isLiveTwin(file) && <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">Live Photo video</span>}
                               {favourites.has(file.id) && <Star size={12} className="shrink-0 fill-orange-400 text-orange-400" />}
                               {(file.current_version ?? 1) > 1 && (
                                 <span className="shrink-0 rounded bg-[var(--color-bg-tertiary)] px-1 text-[9px] font-medium">v{file.current_version}</span>
@@ -1645,7 +1681,7 @@ export function FileBrowserPage() {
             <div>
               <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Files</p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5">
-                {files.map((file) => (
+                {gridFiles.map((file) => (
                   <FileCard
                     key={file.id}
                     file={file}
@@ -1867,7 +1903,7 @@ export function FileBrowserPage() {
                 }} />}
                 <Divider />
                 {canDeleteFile(ctxFile) && <CtxItem icon={<Trash2 size={14} />} label="Delete" danger onClick={() => {
-                  setDeleteConfirm({ ids: [contextMenu.item.id], names: [contextMenu.item.name], kinds: ["file"] });
+                  setDeleteConfirm(ctxFile ? fileDeleteConfirm(ctxFile) : { ids: [contextMenu.item.id], names: [contextMenu.item.name], kinds: ["file"] });
                   setContextMenu(null);
                 }} />}
               </>
@@ -1998,7 +2034,7 @@ export function FileBrowserPage() {
           initialTab={panel.tab}
           onClose={() => setPanel(null)}
           onCopy={(id) => { setCopyTarget({ id, name: panel.file.name }); setPickerFolder(null); }}
-          onDelete={(id, name) => setDeleteConfirm({ ids: [id], names: [name], kinds: ["file"] })}
+          onDelete={() => setDeleteConfirm(fileDeleteConfirm(panel.file))}
           onShare={(id, name) => setShareTarget({ target: { kind: "file", fileIds: [id] }, name })}
           onView={(f) => { setPanel(null); setViewerFile(f as FileRow); }}
           onRefresh={refresh}
@@ -2053,6 +2089,21 @@ export function FileBrowserPage() {
                   This action can be undone from the Deleted filter. It keeps using storage until permanently deleted.
                 </p>
               )}
+              {deleteConfirm.twin && (
+                <label className="mt-2 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={deleteConfirm.withTwin !== false}
+                    onChange={(e) => setDeleteConfirm({ ...deleteConfirm, withTwin: e.target.checked })}
+                  />
+                  Also delete {deleteConfirm.twin.name}
+                </label>
+              )}
+              {deleteConfirm.bulk && !deleteConfirm.permanent && confirmTwinIds.length > 0 && (
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  Includes {confirmTwinIds.length} Live Photo video{confirmTwinIds.length === 1 ? "" : "s"}.
+                </p>
+              )}
             </div>
           </div>
           <div className="mt-5 flex justify-end gap-2">
@@ -2072,9 +2123,12 @@ export function FileBrowserPage() {
                   await bulkPermanentDelete();
                 } else if (deleteConfirm.bulk) {
                   try {
+                    // Selected Live Photo stills take their twin video along -
+                    // the count shown above stays the original selection, but
+                    // the request also clears the twins from storage.
                     await api.post("/api/files/batch-delete", {
                       workspace_id: active!.id,
-                      file_ids: deleteConfirm.ids,
+                      file_ids: [...deleteConfirm.ids, ...confirmTwinIds],
                       folder_ids: deleteConfirm.folderIds ?? [],
                     });
                     const count = deleteConfirm.ids.length + (deleteConfirm.folderIds?.length ?? 0);
@@ -2111,6 +2165,20 @@ export function FileBrowserPage() {
                   clearSelection();
                 } else {
                   deleteConfirm.ids.forEach((id, i) => deleteMut.mutate({ id, kind: deleteConfirm.kinds[i] }));
+                  // Deleting a still is always two requests (the still, then
+                  // the twin) - twinDeleteEndpoint pins when the checkbox
+                  // means the twin should go too.
+                  const twinEp = twinDeleteEndpoint({ type: "file", twin: deleteConfirm.twin ?? null, withTwin: deleteConfirm.withTwin, permanent: deleteConfirm.permanent });
+                  // A twin that refuses to follow is a leftover video, not a
+                  // failed delete - the still is already gone. Say so in its own
+                  // words instead of the mutation's bare failure, and refresh
+                  // either way so the list stops showing the deleted still.
+                  if (twinEp) deleteMut.mutate({ id: deleteConfirm.twin!.id, kind: "file" }, {
+                    onError: () => {
+                      toast.warning("Photo deleted, but its video could not be deleted");
+                      refresh();
+                    },
+                  });
                   toast.success("Deleted");
                   clearSelection();
                 }
@@ -2142,12 +2210,39 @@ export function FileBrowserPage() {
           onConfirm={async () => {
             if (moveTarget) {
               await moveMut.mutateAsync({ id: moveTarget.id, kind: moveTarget.kind, targetId: pickerFolder });
+              // A Live Photo still takes its twin video along - the twin's
+              // own row may not be on screen (paged, filtered, collapsed
+              // under the still), so this looks it up from `allFiles`.
+              if (moveTarget.kind === "file") {
+                const still = allFiles.find((f) => f.id === moveTarget.id);
+                if (still && isLiveStill(still)) {
+                  await moveMut.mutateAsync({ id: still.live_video_id!, kind: "file", targetId: pickerFolder });
+                }
+              }
               toast.success("Moved successfully");
             } else if (copyTarget) {
-              copyMut.mutate({ id: copyTarget.id, targetId: pickerFolder });
+              // A Live Photo copies as a pair, the same rule move follows: the
+              // copy of the still would otherwise land beside a video it no
+              // longer claims. The copies keep a shared stem ("Copy of IMG_1"),
+              // so they re-pair in the destination. Sent directly rather than
+              // through copyMut, which would fire a second "Copied successfully".
+              const still = allFiles.find((f) => f.id === copyTarget.id);
+              const twinId = still && isLiveStill(still) ? still.live_video_id! : null;
+              copyMut.mutate({ id: copyTarget.id, targetId: pickerFolder }, twinId ? {
+                onSuccess: () => {
+                  void api.post(`/api/files/${twinId}/copy`, { folder_id: pickerFolder })
+                    .catch(() => toast.warning("The photo was copied, but its video could not be"))
+                    .finally(() => refresh());
+                },
+              } : undefined);
               return;
             } else if (bulkMoveIds) {
-              for (const id of bulkMoveIds) {
+              // The twins of the selected stills go with them, by the same rule
+              // the single move and the bulk delete follow. They are appended
+              // rather than counted: the toast reports the selection the user
+              // made, not the rows the request touched.
+              const twinIds = liveTwinIds(files, new Set(bulkMoveIds));
+              for (const id of [...bulkMoveIds, ...twinIds]) {
                 try { await moveMut.mutateAsync({ id, kind: "file", targetId: pickerFolder }); } catch {}
               }
               for (const id of bulkMoveFolderIds ?? []) {
@@ -2322,6 +2417,7 @@ function FileCard({
       {/* Legibility scrims */}
       <div className="pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-black/55 to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-3/5 bg-gradient-to-t from-black/85 via-black/40 to-transparent" />
+      {isLiveStill(file) && <LiveBadge size="tile" className="absolute left-9 top-2 z-10" />}
 
       {/* Top-left: multi-select checkbox (hidden for fully-locked files) */}
       {file.lock_mode !== "full_lock" && (

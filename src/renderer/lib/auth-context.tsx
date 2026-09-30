@@ -47,7 +47,7 @@ interface AuthState {
    *  that need to know whether the surface is back (MaintenanceGate's
    *  onRetry) MUST branch on this instead of assuming success from the
    *  absence of a throw: this never throws, it swallows every error case. */
-  refreshUser: () => Promise<boolean>;
+  refreshUser: (fresh?: boolean) => Promise<boolean>;
   maintenance: MaintenanceInfo | null;
   clearMaintenance: () => void;
 }
@@ -67,9 +67,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [maintenance, setMaintenance] = useState<MaintenanceInfo | null>(null);
   const clearMaintenance = useCallback(() => setMaintenance(null), []);
 
-  const refreshUser = useCallback(async (): Promise<boolean> => {
+  /**
+   * `fresh` marks a call that completes an actual sign-in rather than a boot or
+   * a periodic check. Google and 2FA finish by calling this instead of login(),
+   * and the Finder extension has to re-mint on those: its session is a child of
+   * this one and the server killed it with the previous parent, so keeping what
+   * is stored would leave Finder asking to sign in until the next app launch.
+   */
+  /** Set by an actual sign-in, so the effect below can tell one from a boot that
+   *  simply found an existing session. */
+  const freshSignInRef = useRef(false);
+
+  const refreshUser = useCallback(async (fresh = false): Promise<boolean> => {
     try {
       const data = await api.get<{ user: User }>("/api/me");
+      if (fresh) freshSignInRef.current = true;
       setUser(data.user);
       // A successful round trip proves the surface is back - the same signal
       // the sync engine's clearOffline uses to clear its own maintenance flag.
@@ -164,6 +176,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // via `enabled: isAuthenticated`, and those need the fixed cookie.
         await window.electronAPI.waitForSession();
 
+        freshSignInRef.current = true;
         if (data.user) {
           setUser(data.user);
         } else {
@@ -192,6 +205,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (prevUserRef.current && !user) {
       resetSessionState();
+    }
+    // The Finder location follows whoever is signed in. A fresh sign-in re-mints
+    // the extension's session, because anything stored across a sign-out is
+    // already dead server-side; a boot or a profile refresh keeps what is
+    // stored, so relaunching the app does not spend the mint rate limit. Sign-out
+    // teardown is the main process's job, in auth:clear-session.
+    if (user) {
+      const fresh = freshSignInRef.current;
+      freshSignInRef.current = false;
+      // Promise.resolve, because a preload older than this API returns undefined
+      // and an effect that throws takes the whole tree down.
+      void Promise.resolve(window.electronAPI?.fileProvider?.link(user.id, fresh)).catch(() => {});
     }
     prevUserRef.current = user;
   }, [user]);

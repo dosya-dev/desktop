@@ -23,7 +23,7 @@ test.describe("sidebar", () => {
     await navigateTo(page, "/dashboard");
 
     // The whole point of the section: nothing below the fold on first run.
-    for (const id of ["dashboard", "upload", "shared", "sync", "integrations", "team", "settings"]) {
+    for (const id of ["dashboard", "upload", "shared", "vault", "sync", "integrations", "team", "settings"]) {
       await expect(page.getByTestId(`nav-${id}`)).toBeVisible();
     }
     await expect(page.getByTestId("nav-files")).toBeVisible();

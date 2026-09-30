@@ -12,6 +12,7 @@ import type { Workspace } from "@dosya-dev/shared";
 import { api } from "./api-client";
 import { useAuth } from "./auth-context";
 import { SESSION_RESET_EVENT } from "./session-reset";
+import { setActiveGlobalWorkspaceId } from "./vault/active-workspace";
 
 interface WorkspaceState {
   workspaces: Workspace[];
@@ -61,6 +62,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     if (active) {
       localStorage.setItem(STORAGE_KEY, active.id);
     }
+  }, [active]);
+
+  // Publish for the Vault store, which cannot read React context. Cleared on
+  // the same path as `active` itself (null once workspaces are gone).
+  useEffect(() => {
+    setActiveGlobalWorkspaceId(active?.id ?? null);
   }, [active]);
 
   const setActive = useCallback((ws: Workspace) => {

@@ -367,6 +367,13 @@ export const mockNotifications = [
     created_at: Math.floor(Date.now() / 1000) - 7200, read_at: Math.floor(Date.now() / 1000) - 60,
     dismissed_at: null,
   },
+  {
+    id: "ntf_billing", kind: "personal", type: "billing_invoice", category: "account",
+    priority: "normal", title: "Your invoice is ready", body: null,
+    icon: null, link_path: "/billing", actions: null, actor_name: null,
+    created_at: Math.floor(Date.now() / 1000) - 9000, read_at: Math.floor(Date.now() / 1000) - 100,
+    dismissed_at: null,
+  },
 ];
 
 /**
@@ -441,7 +448,7 @@ export const mockGroups = [
     files: [{ item_id: "gf_1", file_id: "file_1", file_name: "Project Report.pdf", size_bytes: 1_048_576, extension: ".pdf", folder_id: null }],
   },
   {
-    id: "grp_2", name: "Reading list", color: "#1D4ED8", sort_order: 1, created_at: 1_739_000_000,
+    id: "grp_2", name: "Reading list", color: "#1d4ed8", sort_order: 1, created_at: 1_739_000_000,
     folders: [], files: [],
   },
 ];

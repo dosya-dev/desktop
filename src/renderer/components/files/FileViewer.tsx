@@ -23,6 +23,9 @@ import { BookViewer } from "@/components/files/BookViewer";
 import { ArchiveViewer } from "@/components/files/ArchiveViewer";
 import { AudioPlayer } from "@/components/files/audio/AudioPlayer";
 import { fileIconSrc } from "@/components/files/FileIcon";
+import { collapseLiveTwins, isLiveStill, isLiveTwin } from "@/lib/live-photos";
+import { LivePhotoStage } from "@/components/files/LivePhotoStage";
+import { LiveBadge } from "@/components/files/LiveBadge";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -49,6 +52,10 @@ export interface ViewerFile {
   share_count: number;
   comment_count: number;
   origin?: string | null;
+  /** Live Photo pairing - see @/lib/live-photos. Set only on the still/twin
+   * that carries it; either can be absent on a row that isn't part of a pair. */
+  live_video_id?: string | null;
+  live_photo_id?: string | null;
 }
 
 interface Version {
@@ -136,10 +143,22 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
   }, []);
   const [closing, setClosing] = useState(false);
 
-  const idx = files.findIndex((f) => f.id === file.id);
+  // A Live Photo is one stop: its twin leaves the prev/next order and the
+  // filmstrip. Opened directly (from list view or search) the twin is still an
+  // ordinary video slide, so the list is collapsed only around stills.
+  const navFiles = useMemo(() => {
+    const collapsed = collapseLiveTwins(files);
+    return collapsed.some((f) => f.id === file.id) ? collapsed : files;
+  }, [files, file.id]);
+  // The twin's ROW is only present in folder listings; its ID is on the still
+  // everywhere the API computes pairs, so playback keys off the id rather
+  // than the row.
+  const twinId = isLiveStill(file) ? file.live_video_id! : null;
+
+  const idx = navFiles.findIndex((f) => f.id === file.id);
   const hasPrev = idx > 0;
-  const hasNext = idx >= 0 && idx < files.length - 1;
-  const counter = idx >= 0 ? `${idx + 1} / ${files.length}` : "";
+  const hasNext = idx >= 0 && idx < navFiles.length - 1;
+  const counter = idx >= 0 ? `${idx + 1} / ${navFiles.length}` : "";
 
   // Reset version state synchronously when the viewer is pointed at a different
   // file (this component isn't remounted on navigation), so the new file never
@@ -218,14 +237,14 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.key === "Escape") { handleClose(); return; }
-      if (e.key === "ArrowLeft" && hasPrev) onNavigate(files[idx - 1]);
-      if (e.key === "ArrowRight" && hasNext) onNavigate(files[idx + 1]);
+      if (e.key === "ArrowLeft" && hasPrev) onNavigate(navFiles[idx - 1]);
+      if (e.key === "ArrowRight" && hasNext) onNavigate(navFiles[idx + 1]);
       if (e.key === "ArrowUp") { e.preventDefault(); navigateVersion(-1); }
       if (e.key === "ArrowDown") { e.preventDefault(); navigateVersion(1); }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [hasPrev, hasNext, idx, files, onNavigate, navigateVersion, handleClose]);
+  }, [hasPrev, hasNext, idx, navFiles, onNavigate, navigateVersion, handleClose]);
 
   // Lock body scroll
   useEffect(() => {
@@ -251,8 +270,8 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
 
   // ── Thumb strip ─────────────────────────────────────────
 
-  const { start: thumbStart, end: thumbEnd } = getThumbWindow(idx, files.length);
-  const thumbFiles = files.slice(thumbStart, thumbEnd);
+  const { start: thumbStart, end: thumbEnd } = getThumbWindow(idx, navFiles.length);
+  const thumbFiles = navFiles.slice(thumbStart, thumbEnd);
 
   return (
     <div
@@ -272,12 +291,12 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {hasPrev && (
-            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(files[idx - 1])} title="Previous (←)">
+            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(navFiles[idx - 1])} title="Previous (←)">
               <ChevronLeft size={16} className="text-[var(--color-text-muted)]" />
             </button>
           )}
           {hasNext && (
-            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(files[idx + 1])} title="Next (→)">
+            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(navFiles[idx + 1])} title="Next (→)">
               <ChevronRight size={16} className="text-[var(--color-text-muted)]" />
             </button>
           )}
@@ -395,7 +414,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
               <button
                 key={f.id}
                 className={`relative flex h-13 w-13 shrink-0 items-center justify-center overflow-hidden rounded-md border-2 bg-[var(--color-bg-tertiary)] transition-colors ${isActive ? "border-[var(--color-primary)]" : "border-transparent hover:border-[var(--color-text-muted)]/40"}`}
-                onClick={() => onNavigate(files[realIdx])}
+                onClick={() => onNavigate(navFiles[realIdx])}
                 title={f.name}
               >
                 <FilePreviewImage
@@ -405,6 +424,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
                   className="h-full w-full object-cover"
                   fallback={<img src={fileIconSrc(f.name)} alt="" className="h-6 w-6" />}
                 />
+                {isLiveStill(f) && <LiveBadge size="glyph" className="absolute top-0.5 left-0.5" />}
                 {isVideo(f.name) && (
                   <div className="absolute bottom-0.5 right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded bg-black/50">
                     <svg viewBox="0 0 8 8" fill="none" width="8" height="8"><path d="M2 1.5l4.5 2.5L2 6.5z" fill="#fff" /></svg>
@@ -430,6 +450,9 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
   }
 
   if (isImage(file.name)) {
+    if (isLiveStill(file)) {
+      return <LivePhotoStage key={file.live_video_id!} file={file} twinId={file.live_video_id!} version={version} />;
+    }
     return (
       <FilePreviewImage
         fileId={file.id}
@@ -444,9 +467,25 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
   }
 
   if (isVideo(file.name)) {
+    // A Live Photo's twin opened directly (list view, search) is an ordinary
+    // video slide with one addition: a way back to the still it belongs to.
+    const still = isLiveTwin(file) ? files.find((f) => f.id === file.live_photo_id) : null;
     // Keyed on the url so a decode failure on one file does not follow the
     // user to the next one in the strip.
-    return <VideoPlayer key={rawUrl} file={file} rawUrl={rawUrl} onDownload={onDownload} />;
+    return (
+      <div className="relative max-w-full max-h-full flex items-center justify-center">
+        <VideoPlayer key={rawUrl} file={file} rawUrl={rawUrl} onDownload={onDownload} />
+        {still && (
+          <button
+            type="button"
+            className="absolute top-3 left-3 z-10 rounded-full bg-black/45 px-2 py-0.5 font-mono text-[10px] text-white hover:bg-black/60"
+            onClick={() => onNavigate(still)}
+          >
+            Live Photo video of {still.name}
+          </button>
+        )}
+      </div>
+    );
   }
 
   if (isAudio(file.name)) {

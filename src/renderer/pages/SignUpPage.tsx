@@ -62,7 +62,7 @@ export function SignUpPage() {
       oauthCleanup.current = null;
       try {
         await window.electronAPI.waitForSession();
-        await refreshUser();
+        await refreshUser(true);
         navigate("/dashboard");
       } catch (err: any) {
         setError(err.message || "Sign up failed");

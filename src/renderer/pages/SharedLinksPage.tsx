@@ -11,7 +11,7 @@ import {
   ExternalLink,
   Search,
 } from "lucide-react";
-import { api } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatDate, formatRelative } from "@/lib/format";
 import { toast } from "sonner";
@@ -79,6 +79,9 @@ export function SharedLinksPage() {
       queryClient.invalidateQueries({ queryKey: ["shares"] });
       setRevokeTarget(null);
       toast.success("Share link revoked");
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to revoke share link");
     },
   });
 
