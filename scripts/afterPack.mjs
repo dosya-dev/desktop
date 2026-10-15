@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, cpSync, rmSync, existsSync, copyFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildFileProvider, materializeEntitlements, resolveTeamId } from "./build-file-provider.mjs";
+import { buildFileProvider, materializeEntitlements, resolveTeamId, DEFAULT_EXTENSION_BUNDLE_ID } from "./build-file-provider.mjs";
 import { buildFileProviderAddon, ADDON_FILE_NAME } from "./build-file-provider-addon.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,36 +33,116 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const EXTENSION_PROFILE = join(here, "..", "build", "fileprovider.provisionprofile");
 
 /**
+ * The Mac App Store variant of the extension's profile ("Mac App Store Connect"
+ * type, App ID dev.dosya.mac.fileprovider). Same rules as EXTENSION_PROFILE:
+ * written by CI from a secret, never committed.
+ */
+export const EXTENSION_PROFILE_STORE = join(here, "..", "build", "fileprovider.mas.provisionprofile");
+
+/**
+ * The mas-dev variant ("Mac App Development" type, App ID
+ * dev.dosya.mac.fileprovider). A store-signed .pkg cannot be launched outside
+ * the store, so `--mac mas-dev` is how the sandboxed build is run on a real
+ * Mac - and a development build signed with the store's profile is refused at
+ * launch. Same rules again: never committed.
+ */
+export const EXTENSION_PROFILE_DEV = join(here, "..", "build", "fileprovider.mas-dev.provisionprofile");
+
+/**
+ * The store build's identifiers. dev.dosya.desktop was uploaded to App Store
+ * Connect once in July 2026 and that record was deleted, which spends the
+ * identifier for the store forever; the Developer ID build keeps it.
+ */
+export const STORE_APP_BUNDLE_ID = "dev.dosya.mac";
+export const STORE_EXTENSION_BUNDLE_ID = "dev.dosya.mac.fileprovider";
+
+/**
+ * Which store target is being packed, or null for anything else.
+ *
+ * electron-builder reports electronPlatformName "mas" for BOTH `mas` and
+ * `mas-dev`, and the two are not interchangeable: mas-dev needs the Mac App
+ * Development profile and an "Apple Development"/"Mac Developer" certificate
+ * (which is what electron-builder itself looks for there), while mas needs the
+ * distribution profile and an Apple Distribution certificate. The Target
+ * objects in `context.targets` carry the name that tells them apart
+ * (app-builder-lib core.js `Target.name`, "mas-dev" for the dev target).
+ *
+ * No targets listed at all reads as `mas`: that is the shape a hook sees for
+ * the real store build, and defaulting to the stricter of the two means a
+ * missing signal cannot quietly produce a development-signed submission.
+ */
+export function storeTarget(context) {
+  if (context?.electronPlatformName !== "mas") return null;
+  return context.targets?.some((t) => t?.name === "mas-dev") ? "mas-dev" : "mas";
+}
+
+/** True for both store targets. */
+export function isStoreTarget(context) {
+  return storeTarget(context) !== null;
+}
+
+/**
+ * The certificate type prefixes to look for, most preferred first. codesign
+ * needs a name that matches exactly one certificate, and this team owns
+ * Developer ID, Apple Distribution, Apple Development and 3rd Party Mac
+ * Developer certificates with the same common name, so the short form on its
+ * own is ambiguous. The order mirrors electron-builder's own preference per
+ * target (macCodeSign.ts).
+ */
+export function identityPrefixes(target) {
+  switch (target) {
+    case "mas":
+      return ["Apple Distribution:", "3rd Party Mac Developer Application:"];
+    case "mas-dev":
+      return ["Apple Development:", "Mac Developer:"];
+    default:
+      return ["Developer ID Application:"];
+  }
+}
+
+/** `security find-identity -v -p codesigning`, as text. Injected by tests. */
+function defaultFindIdentities() {
+  return execFileSync("security", ["find-identity", "-v", "-p", "codesigning"], { encoding: "utf8" });
+}
+
+/**
  * The identity electron-builder will use. It reads CSC_NAME, then mac.identity,
  * then auto-discovers from the keychain; this repo's release workflow relies on
  * the last of those, so looking only at CSC_NAME would silently never sign.
  */
-export function resolveIdentity({ env = process.env, configured = null } = {}) {
+export function resolveIdentity({ env = process.env, configured = null, target = null, findIdentities = defaultFindIdentities } = {}) {
   if (env.CSC_IDENTITY_AUTO_DISCOVERY === "false") return null;
   const hint = env.CSC_NAME ?? configured ?? null;
 
-  // codesign needs a name that matches exactly one certificate. electron-builder
-  // takes the identity WITHOUT the "Developer ID Application:" prefix, and this
-  // team also owns Apple Distribution and 3rd Party Mac Developer certificates
-  // with the same common name, so the short form on its own is ambiguous.
-  let candidates = [];
+  let names = [];
   try {
-    const found = execFileSync("security", ["find-identity", "-v", "-p", "codesigning"], { encoding: "utf8" });
-    candidates = [...found.matchAll(/"(Developer ID Application:[^"]+)"/g)].map((m) => m[1]);
+    names = [...findIdentities().matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   } catch {
-    candidates = [];
+    names = [];
   }
 
+  // Grouped by prefix rather than flattened, so a keychain holding two
+  // acceptable types still resolves to the preferred one instead of reading as
+  // ambiguous.
+  const groups = identityPrefixes(target).map((prefix) => [...new Set(names.filter((n) => n.startsWith(prefix)))]);
+
   if (hint) {
-    const full = candidates.find((c) => c === hint || c.includes(hint));
-    if (full) return full;
-    // A hint that matches no Developer ID certificate is still honoured: it may
-    // name something this lookup cannot see, and codesign will say so plainly.
+    for (const group of groups) {
+      const full = group.find((c) => c === hint || c.includes(hint));
+      if (full) return full;
+    }
+    // A hint that matches no certificate of the right type is still honoured:
+    // it may name something this lookup cannot see, and codesign will say so.
     return hint;
   }
 
-  const unique = [...new Set(candidates)];
-  return unique.length === 1 ? unique[0] : null;
+  for (const group of groups) {
+    // More than one certificate of the preferred type and no hint is genuinely
+    // ambiguous: picking one would sign a release under whichever came first.
+    if (group.length > 1) return null;
+    if (group.length === 1) return group[0];
+  }
+  return null;
 }
 
 
@@ -131,14 +211,27 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-export function embedFileProvider({ appPath, identity, version = "0.0.0", mustSign = false }) {
+export function embedFileProvider({ appPath, identity, version = "0.0.0", buildVersion = version, mustSign = false, target = null }) {
+  const store = target !== null;
   const staging = join(dirname(appPath), ".file-provider-staging");
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
 
+  // The same identifier is stamped into Info.plist and signed into the
+  // entitlements (com.apple.application-identifier); TestFlight refuses the
+  // build when the two disagree or the entitlement is missing (ITMS-90886).
+  const bundleId = store ? STORE_EXTENSION_BUNDLE_ID : DEFAULT_EXTENSION_BUNDLE_ID;
   let built = null;
   try {
-    built = buildFileProvider({ outDir: staging, version });
+    built = buildFileProvider({
+      outDir: staging,
+      version,
+      // App Store Connect rejects an app extension whose CFBundleVersion
+      // differs from its containing app's, so the extension is stamped with the
+      // app's build version, not with the marketing version.
+      buildVersion,
+      bundleId,
+    });
   } finally {
     if (!built) rmSync(staging, { recursive: true, force: true });
   }
@@ -156,20 +249,24 @@ export function embedFileProvider({ appPath, identity, version = "0.0.0", mustSi
   cpSync(built, destination, { recursive: true });
 
   const teamId = resolveTeamId({ identity });
-  const entitlements = materializeEntitlements({ outDir: staging, teamId });
+  const entitlements = materializeEntitlements({ outDir: staging, teamId, bundleId });
+
+  // mas-dev is signed with a Mac App Development profile: the store's
+  // distribution profile would be refused at launch on a developer's own Mac.
+  const profile = target === "mas" ? EXTENSION_PROFILE_STORE : target === "mas-dev" ? EXTENSION_PROFILE_DEV : EXTENSION_PROFILE;
 
   // The profile goes INSIDE the bundle, and it has to be there before the
   // signature is made: codesign seals the bundle's contents, so a profile added
   // afterwards would break the seal rather than authorize anything.
-  const hasProfile = existsSync(EXTENSION_PROFILE);
+  const hasProfile = existsSync(profile);
   if (hasProfile) {
-    copyFileSync(EXTENSION_PROFILE, join(destination, "Contents", "embedded.provisionprofile"));
+    copyFileSync(profile, join(destination, "Contents", "embedded.provisionprofile"));
   }
 
   if (identity && !hasProfile) {
     rmSync(staging, { recursive: true, force: true });
     throw new Error(
-      `[file-provider] no provisioning profile at ${EXTENSION_PROFILE}. Signed without one, ` +
+      `[file-provider] no provisioning profile at ${profile}. Signed without one, ` +
         "macOS kills the extension at launch, so this is fatal rather than a warning.",
     );
   }
@@ -191,8 +288,9 @@ export function embedFileProvider({ appPath, identity, version = "0.0.0", mustSi
     "--force",
     "--sign", identity,
     "--timestamp",
-    // The hardened runtime the app uses, applied to the nested code too.
-    "--options", "runtime",
+    // The hardened runtime is a Developer ID concept. The store build is sandboxed
+    // instead, and electron-builder signs the app without it, so the nested code matches.
+    ...(store ? [] : ["--options", "runtime"]),
     "--entitlements", entitlements,
     destination,
   ]);
@@ -216,7 +314,8 @@ export function embedFileProvider({ appPath, identity, version = "0.0.0", mustSi
  * It still needs a signature by the same team, or library validation refuses to
  * load it into a hardened-runtime process.
  */
-export function embedFileProviderAddon({ appPath, identity, mustSign = false }) {
+export function embedFileProviderAddon({ appPath, identity, mustSign = false, target = null }) {
+  const store = target !== null;
   const staging = join(dirname(appPath), ".file-provider-addon-staging");
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
@@ -256,7 +355,9 @@ export function embedFileProviderAddon({ appPath, identity, mustSign = false }) 
     "--force",
     "--sign", identity,
     "--timestamp",
-    "--options", "runtime",
+    // The hardened runtime is a Developer ID concept. The store build is sandboxed
+    // instead, and electron-builder signs the app without it, so the nested code matches.
+    ...(store ? [] : ["--options", "runtime"]),
     destination,
   ]);
   console.log(`[file-provider-addon] signed ${ADDON_FILE_NAME}`);
@@ -264,16 +365,22 @@ export function embedFileProviderAddon({ appPath, identity, mustSign = false }) 
 }
 
 export default async function afterPack(context) {
-  if (context.electronPlatformName !== "darwin") return;
+  const target = storeTarget(context);
+  if (context.electronPlatformName !== "darwin" && target === null) return;
   const appPath = join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
-  const identity = resolveIdentity({ configured: context.packager.platformSpecificBuildOptions?.identity ?? null });
+  const identity = resolveIdentity({ configured: context.packager.platformSpecificBuildOptions?.identity ?? null, target });
   // If the app itself is going to be signed, everything nested inside it must be.
   const mustSign = Boolean(identity);
   embedFileProvider({
     appPath,
     identity,
     version: context.packager.appInfo.version,
+    // CFBundleVersion as electron-builder computed it for the app (buildVersion
+    // config, BUILD_NUMBER, or the version itself) - the extension must carry
+    // the identical value.
+    buildVersion: context.packager.appInfo.buildVersion,
     mustSign,
+    target,
   });
-  embedFileProviderAddon({ appPath, identity, mustSign });
+  embedFileProviderAddon({ appPath, identity, mustSign, target });
 }

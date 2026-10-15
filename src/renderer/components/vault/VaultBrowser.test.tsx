@@ -34,7 +34,7 @@ const engine = (o: Partial<E2eeEngine> = {}): E2eeEngine => ({
   unlockWithRecoveryKey: async () => {}, destroyIdentity: async () => {}, lock: () => {},
   createWorkspace: async () => {}, readWorkspaceName: async () => null, readWorkspaceNameById: async () => null, renameWorkspace: async () => {},
   setWorkspaceScope: async () => {}, openWorkspace: async () => {},
-  listFolder: async () => [], uploadFile: async () => {}, downloadFile: async () => new Uint8Array(),
+  listFolder: async () => [], uploadFile: async () => {}, downloadFileToSink: async () => {},
   listMembers: async () => [], inviteMember: async () => {}, revokeMember: async () => {}, listMyWorkspaces: async () => [],
   ...o,
 });
@@ -91,17 +91,25 @@ describe("VaultBrowser", () => {
 
   it("downloads a file through the store", async () => {
     const downloaded: string[] = [];
+    const written: number[] = [];
     useVault.getState().__setEngine(engine({
       listFolder: async () => [{ id: "e1", name: "w2.pdf", kind: "file" }],
-      downloadFile: async (_f, id) => { downloaded.push(id); return new Uint8Array([1]); },
+      downloadFileToSink: async (_f, id, sink) => { downloaded.push(id); await sink(new Uint8Array([1]), 0); },
     }));
-    useVault.getState().__setSaver(async () => ({ ok: true, path: "/x" }));
+    useVault.getState().__setSink({
+      open: async () => ({ ok: true, id: "s1" }),
+      write: async (_id, _bytes, index) => { written.push(index); },
+      close: async () => ({ path: "/x" }),
+      abort: async () => {},
+    });
     await render();
     await act(async () => { (q("vault-space-s1") as HTMLButtonElement).click(); });
     await flush();
     await act(async () => { (q("vault-download-e1") as HTMLButtonElement).click(); });
     await flush();
     expect(downloaded).toEqual(["e1"]);
+    // The decrypted bytes reach the main process one chunk at a time now.
+    expect(written).toEqual([0]);
   });
 
   it("lock returns to the gate", async () => {

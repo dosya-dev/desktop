@@ -37,6 +37,47 @@ const INLINE = [
   { kind: "link" as const, re: /\[([^\]\n]+)\]\(([^)\s]+)\)/ },
 ];
 
+/**
+ * Schemes the in-app viewer is willing to render as a clickable `<a href>`.
+ * A markdown link's URL comes straight from an untrusted file's bytes, so a
+ * `javascript:`/`vbscript:` payload or a script-bearing `data:` URL must
+ * never reach the DOM unmodified - this is the sink's own defense-in-depth,
+ * independent of whatever the main process's navigation/CSP policy allows.
+ *
+ * A relative link (`foo/bar`, `#anchor`, `?q=1`) has no scheme or authority
+ * of its own and must stay renderable (it never leaves the app, there is
+ * nothing to resolve it against). Anything that carries a scheme or an
+ * authority - including a protocol-relative `//evil.example/x`, which
+ * inherits whatever scheme the embedding page happens to use - is resolved
+ * with `URL` against a throwaway base so it keeps its own scheme either
+ * way; `URL` lowercases the protocol for us, which is what rejects a
+ * mixed-case `JavaScript:`.
+ *
+ * The gate runs on the raw input, not the resolved result: once resolved,
+ * every one of these (a true relative path, an empty string, a bare `:`,
+ * a protocol-relative `//host/...`) carries the same base-inherited `app:`
+ * protocol, so protocol alone cannot tell them apart - only the shape of
+ * the original string can. Per RFC 3986 a relative-ref's first path
+ * segment may not contain a colon, so "a colon before the first slash" is
+ * a scheme, not a path (`foo/bar:baz` is a legal relative path and must
+ * stay linkable; `javascript:alert(1)` is a scheme and must not).
+ */
+const LINKABLE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
+export function isLinkableUrl(url: string): boolean {
+  if (url.length === 0) return false;
+  const firstSlash = url.indexOf("/");
+  const firstColon = url.indexOf(":");
+  const carriesSchemeOrAuthority =
+    url.startsWith("//") || (firstColon !== -1 && (firstSlash === -1 || firstColon < firstSlash));
+  if (!carriesSchemeOrAuthority) return true;
+  try {
+    return LINKABLE_PROTOCOLS.has(new URL(url, "app://bundle/").protocol);
+  } catch {
+    return false;
+  }
+}
+
 export function parseInline(text: string): InlineToken[] {
   const tokens: InlineToken[] = [];
   let rest = text;

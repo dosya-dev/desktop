@@ -14,7 +14,9 @@
   "include": [
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
-    "electron.vite.config.ts"
+    "electron.vite.config.ts",
+    "scripts/acknowledgements-plugin.ts",
+    "scripts/acknowledgements.d.mts"
   ],
   // Unit tests run on Node's own test runner (`npm run test:unit`), which
   // needs the .ts extension in an import specifier - a spelling this

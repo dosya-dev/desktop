@@ -16,7 +16,7 @@ export const LAST_ROUTE_KEY = "dosya_last_route";
  * /login or /2fa fights the auth redirect, and /editor holds a live remote
  * editing session that should be re-entered deliberately, not by default.
  */
-const NON_RESTORABLE = ["/onboarding", "/login", "/signup", "/forgot-password", "/2fa", "/verify", "/editor"];
+const NON_RESTORABLE = ["/onboarding", "/login", "/signup", "/forgot-password", "/2fa", "/verify", "/editor", "/about"];
 
 export function isRestorableRoute(path: string): boolean {
   if (typeof path !== "string" || !path.startsWith("/") || path.length > 500) return false;

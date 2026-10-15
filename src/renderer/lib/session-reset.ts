@@ -22,6 +22,6 @@ export function resetSessionState(): void {
   // show on the login screen or to the next account.
   toast.dismiss();
   // Drop the last sync snapshot (pair names, file names, logs are per-account).
-  useSyncStore.setState({ status: null, conflicts: [], isLoading: true });
+  useSyncStore.setState({ status: null, isLoading: true });
   window.dispatchEvent(new Event(SESSION_RESET_EVENT));
 }

@@ -14,6 +14,12 @@ export interface SyncPair {
   remoteFolderId: string | null;
   remoteFolderName: string;
   localPath: string;
+  /**
+   * Security-scoped bookmark for `localPath`, Mac App Store builds only.
+   * Absent on every pair created by a Developer ID build and on pairs saved
+   * before this field existed; both read as "no-bookmark" in the sandbox.
+   */
+  bookmark?: string;
   selectiveFolders: SelectiveFolder[];
   /** User-configured patterns to exclude from sync (e.g. "node_modules", ".env", "*.log"). */
   excludedPatterns: string[];
@@ -123,7 +129,10 @@ export type SyncPairStatus =
   /** Held: a large local deletion is waiting for the user to confirm or
    *  keep the cloud copies (see PendingDeletionStatus). Nothing syncs until
    *  they decide. */
-  | "needs-confirmation";
+  | "needs-confirmation"
+  /** Sandboxed (Mac App Store) builds only: macOS no longer grants access to
+   *  the folder. The fix is a reselect, never a retry. */
+  | "needs-permission";
 
 export type TransferDirection = "upload" | "download";
 
@@ -160,7 +169,12 @@ export interface SyncStatus {
   pairs: SyncPairRuntimeStatus[];
   globalPaused: boolean;
   activeTransfers: ActiveTransfer[];
-  unresolvedConflicts: SyncConflict[];
+  /** Counts only. The list itself is fetched a page at a time with
+   *  listConflicts: a runaway folder once held 7,000+ conflicts, and shipping
+   *  all of them on every status tick (engine -> main -> renderer) cost
+   *  megabytes per tick. */
+  unresolvedConflictCount: number;
+  conflictCountByPair: Record<string, number>;
   recentLogs: SyncLogEntry[];
   /** Files that failed to sync across every pair (Contract 9). The tray's
    *  "All synced" is a lie whenever this is non-zero. */
@@ -171,6 +185,22 @@ export interface SyncStatus {
    *  is back on. */
   maintenance?: boolean;
 }
+
+/** One page of unresolved conflicts, oldest first. */
+export interface ConflictPageQuery {
+  /** Only these pairs; omitted = every pair. */
+  pairIds?: string[];
+  offset: number;
+  limit: number;
+}
+
+export interface ConflictPage {
+  conflicts: SyncConflict[];
+  /** Matching conflicts across every page. */
+  total: number;
+}
+
+export type ConflictResolution = "keep-local" | "keep-remote" | "keep-both";
 
 /** One failed file as the UI sees it (Contract 9). */
 export interface SyncFileErrorStatus {

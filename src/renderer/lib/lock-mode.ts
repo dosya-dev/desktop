@@ -8,7 +8,7 @@ export type LockMode = "none" | "view_only" | "full_lock";
 export type LockKind = "file" | "folder";
 
 /** The server rejects anything shorter (POST /api/files/:id/lock). */
-export const MIN_LOCK_PASSWORD_LENGTH = 4;
+export const MIN_LOCK_PASSWORD_LENGTH = 8;
 
 export const LOCK_MODE_OPTIONS: readonly { value: LockMode; label: string }[] = [
   { value: "none", label: "Unlocked" },

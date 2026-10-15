@@ -12,9 +12,10 @@ import { fileRawUrl } from "@/lib/file-url";
 import { humanSize, extOf, isImage, isVideo, isAudio, isPdf, isVcard, isOfficeFile, isBook, isArchive } from "@/lib/file-type";
 import { isTextReadable, langFromExtension, looksBinary } from "@/lib/text-detect";
 import { parseCsvTable } from "@/lib/csv-table";
-import { parseMarkdown, type InlineToken, type MdBlock } from "@/lib/markdown";
+import { parseMarkdown, isLinkableUrl, type InlineToken, type MdBlock } from "@/lib/markdown";
 import { highlightToHtml } from "@/lib/text-highlight";
 import { useInFileFind } from "@/lib/use-in-file-find";
+import { isSimple, useMenuActions } from "@/lib/menu-bus";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { TextFindBar } from "@/components/files/TextFindBar";
 import { VCardView } from "@/components/files/VCardView";
@@ -70,6 +71,10 @@ interface FileViewerProps {
   files: ViewerFile[];
   onClose: () => void;
   onNavigate: (file: ViewerFile) => void;
+  /** The active workspace: the archive pane's Save actions need a destination
+   *  scope. Optional so every other caller is unchanged; without it the pane
+   *  offers no Save. */
+  workspaceId?: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -124,7 +129,7 @@ async function downloadViaDialog(
 
 // ── Component ─────────────────────────────────────────────
 
-export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps) {
+export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: FileViewerProps) {
   const [versions, setVersions] = useState<Version[]>([]);
   const [activeVersion, setActiveVersion] = useState(-1);
 
@@ -333,7 +338,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
             Archive joins it for the same reason: its own two-column layout
             (tree + preview) is a surface, not an object sitting on one. */}
         <div className={`flex min-h-0 min-w-0 flex-1 bg-[var(--color-bg-secondary)] ${isAudio(file.name) || isArchive(file.name) ? "overflow-hidden" : "items-center justify-center overflow-auto p-6"}`}>
-          <FileContent file={file} files={files} rawUrl={rawUrl} version={previewVersion} onDownload={onDownload} onNavigate={onNavigate} />
+          <FileContent file={file} files={files} rawUrl={rawUrl} version={previewVersion} onDownload={onDownload} onNavigate={onNavigate} workspaceId={workspaceId} />
         </div>
 
         {/* Version sidebar. Mounted whenever the file has history - a file
@@ -442,7 +447,7 @@ export function FileViewer({ file, files, onClose, onNavigate }: FileViewerProps
 
 // ── File content renderer ─────────────────────────────────
 
-function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: { file: ViewerFile; files: ViewerFile[]; rawUrl: string; version?: number; onDownload: () => void; onNavigate: (f: ViewerFile) => void }) {
+function FileContent({ file, files, rawUrl, version, onDownload, onNavigate, workspaceId }: { file: ViewerFile; files: ViewerFile[]; rawUrl: string; version?: number; onDownload: () => void; onNavigate: (f: ViewerFile) => void; workspaceId?: string }) {
   const ext = extOf(file.name);
 
   if (isVcard(file.name)) {
@@ -524,7 +529,7 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate }: {
   // the existing viewers at one entry at a time. After isBook on purpose -
   // .cbz and .epub are zips too, and they already have a better home.
   if (isArchive(file.name)) {
-    return <ArchiveViewer key={file.id} file={file} version={version} onDownload={onDownload} />;
+    return <ArchiveViewer key={file.id} file={file} version={version} onDownload={onDownload} workspaceId={workspaceId} />;
   }
 
   // Ahead of the text check: these are text with a better shape available
@@ -591,6 +596,15 @@ function TextViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: st
       .catch(() => { if (!cancelled) setState("error"); });
     return () => { cancelled = true; };
   }, [rawUrl, file.name, file.size_bytes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Edit › Find… (⌘F on macOS arrives this way: the menu owns the accelerator
+  // there, so the keydown below never fires). Claimed only while there is
+  // text to search, otherwise the app-wide search takes it.
+  useMenuActions((action) => {
+    if (state !== "ok" || !isSimple(action, "find")) return false;
+    setFindOpen(true);
+    return true;
+  });
 
   // Ctrl/Cmd+F opens our find bar (intercept native find while a text file is shown)
   useEffect(() => {
@@ -856,6 +870,11 @@ function MdInline({ tokens }: { tokens: InlineToken[] }) {
         if (t.kind === "link") {
           // Renderer windows must not navigate: the main process opens
           // external links in the system browser via window.open handling.
+          // That is a second line of defense, not the first: the URL comes
+          // straight from an untrusted file's bytes, so the sink itself
+          // refuses anything but http/https/mailto before it ever reaches
+          // the DOM as an href.
+          if (!isLinkableUrl(t.url)) return <span key={i}>{t.text}</span>;
           return <a key={i} href={t.url} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--color-primary)" }}>{t.text}</a>;
         }
         return <span key={i}>{t.text}</span>;

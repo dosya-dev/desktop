@@ -19,7 +19,7 @@ const engine = (o: Partial<E2eeEngine> = {}): E2eeEngine => ({
   unlockWithRecoveryKey: async () => {}, destroyIdentity: async () => {}, lock: () => {},
   createWorkspace: async () => {}, readWorkspaceName: async () => null, readWorkspaceNameById: async () => null, renameWorkspace: async () => {},
   setWorkspaceScope: async () => {}, openWorkspace: async () => {},
-  listFolder: async () => [], uploadFile: async () => {}, downloadFile: async () => new Uint8Array(),
+  listFolder: async () => [], uploadFile: async () => {}, downloadFileToSink: async () => {},
   listMembers: async () => [], inviteMember: async () => {}, revokeMember: async () => {}, listMyWorkspaces: async () => [],
   ...o,
 });

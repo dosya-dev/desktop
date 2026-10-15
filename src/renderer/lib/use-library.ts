@@ -25,6 +25,13 @@ async function fetchLibraryPage(path: string): Promise<LibraryPage> {
 export function useLibrary(view: LibraryView | null): LibraryResult {
   const queryClient = useQueryClient();
 
+  // No `maxPages` here on purpose. Capping the cache would evict the OLDEST
+  // page on each "Load more", and `GET /api/library` pages forward only (its
+  // cursor is the keyset of a page's last row), so the evicted head could not
+  // be fetched back - the top of the feed would simply start 60 photos in.
+  // The DSK-004 append cost was React committing ~15,000 tile elements, which
+  // LibraryGrid's virtualization removes; the merge below is a few hundred
+  // array pushes over small objects and was never the expense.
   const query = useInfiniteQuery({
     queryKey: view ? libraryQueryKey(view) : [LIBRARY_QUERY_ROOT, "none"],
     queryFn: ({ pageParam }) => fetchLibraryPage(libraryRequestPath(view!, pageParam)),
@@ -44,7 +51,11 @@ export function useLibrary(view: LibraryView | null): LibraryResult {
     staleTime: 60_000,
   });
 
-  const library = useMemo(() => mergeLibraryPages(query.data?.pages ?? []), [query.data]);
+  // Keyed on the pages themselves, not on `query.data`: the wrapper object is
+  // replaced on changes that leave the pages alone (a `pageParams` update, a
+  // placeholder swap), and each of those used to redo the whole merge.
+  const pages = query.data?.pages;
+  const library = useMemo(() => mergeLibraryPages(pages ?? []), [pages]);
 
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
   const loadMore = useCallback(() => {

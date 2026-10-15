@@ -15,6 +15,8 @@
  * Deliberately tiny: every method added here is another thing a future host
  * has to be able to provide.
  */
+import type { AccessHandle } from "./bookmarks";
+
 /** A session cookie as the host sees it, before any domain matching. */
 export interface HostCookie {
   /** `__Host-dosya_session` (prod) or `dosya_session` (dev / legacy). */
@@ -51,6 +53,14 @@ export interface EnvProvider {
 
   /** True in a development build - enables verbose transport logging. */
   readonly isDev: boolean;
+
+  /**
+   * Reopen the sandbox grant for a sync folder (Mac App Store builds). The path
+   * comes along because a resolved bookmark does not prove the folder is
+   * reachable - see src/main/sync/bookmarks.ts. Optional: a host without a
+   * sandbox leaves it out and every folder is accessible.
+   */
+  folderAccess?: (bookmark: string | undefined, path: string) => AccessHandle;
 
   /**
    * Where this installation keeps its data (Electron's `userData`). The engine

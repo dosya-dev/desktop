@@ -1,9 +1,12 @@
-import { ipcMain, dialog, shell, BrowserWindow } from "electron";
+import { app, ipcMain, dialog, shell, BrowserWindow } from "electron";
 import { isAbsolute } from "path";
 import type { SyncEngineHandle } from "./engine-host";
-import type { SyncPair, SyncMode } from "./types";
+import type { SyncPair, SyncMode, ConflictResolution } from "./types";
 import { estimateFolder } from "./folder-estimate";
 import { hasPair } from "./status-assembly";
+import { currentDistribution } from "../distribution";
+import { shouldReceiveStatus } from "./broadcast-targets";
+import { makeIpcGate, rendererOrigin } from "../ipc-sender";
 
 const VALID_SYNC_MODES: SyncMode[] = ["two-way", "push", "push-safe", "pull", "pull-safe"];
 const VALID_CONFLICT_STRATEGIES = ["last-write-wins", "keep-both"];
@@ -15,19 +18,36 @@ function assertString(val: unknown, name: string): asserts val is string {
   }
 }
 
-export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
-  ipcMain.handle("sync:get-config", () => engine.getConfig());
+function assertStringArray(val: unknown, name: string): asserts val is string[] {
+  if (!Array.isArray(val) || !val.every((v) => typeof v === "string")) {
+    throw new Error(`${name} must be an array of strings`);
+  }
+}
 
-  ipcMain.handle("sync:save-config", (_e, updates) => {
+export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
+  // ── Sender validation (S-1) ──────────────────────────────────────
+  // Same gate as src/main/ipc.ts: every channel here refuses a message that
+  // did not come from the app's own top-level renderer. `on` is not
+  // destructured because nothing in this file registers one - add it (and the
+  // gate, never bare ipcMain) if that changes; ipc-gate-coverage.test.ts fails
+  // loudly if a bare registration ever appears.
+  const { handle } = makeIpcGate(
+    ipcMain,
+    rendererOrigin({ isPackaged: app.isPackaged, devServerUrl: process.env.ELECTRON_RENDERER_URL }),
+  );
+
+  handle("sync:get-config", () => engine.getConfig());
+
+  handle("sync:save-config", (_e, updates) => {
     if (typeof updates !== "object" || updates === null) {
       throw new Error("Invalid config updates");
     }
     return engine.saveGlobalConfig(updates);
   });
 
-  ipcMain.handle("sync:get-status", () => engine.getStatus());
+  handle("sync:get-status", () => engine.getStatus());
 
-  ipcMain.handle("sync:add-pair", async (_e, opts: Omit<SyncPair, "id" | "createdAt">) => {
+  handle("sync:add-pair", async (_e, opts: Omit<SyncPair, "id" | "createdAt">) => {
     // Validate required fields
     assertString(opts.workspaceId, "workspaceId");
     assertString(opts.workspaceName, "workspaceName");
@@ -44,6 +64,12 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     }
     if (opts.conflictStrategy && !VALID_CONFLICT_STRATEGIES.includes(opts.conflictStrategy)) {
       throw new Error(`Invalid conflictStrategy: ${opts.conflictStrategy}`);
+    }
+    // The sandbox grant travels with the path; only a string or "clear it" is
+    // valid. Checked here as well as in sync:update-pair - a pair is created
+    // with its bookmark, so this is the door it comes through first.
+    if (opts.bookmark !== undefined && opts.bookmark !== null && typeof opts.bookmark !== "string") {
+      throw new Error("bookmark must be a string");
     }
 
     // Validate excludedPatterns
@@ -80,12 +106,12 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     return pair;
   });
 
-  ipcMain.handle("sync:remove-pair", (_e, { pairId }) => {
+  handle("sync:remove-pair", (_e, { pairId }) => {
     assertString(pairId, "pairId");
     return engine.removePair(pairId);
   });
 
-  ipcMain.handle("sync:update-pair", (_e, { pairId, updates }) => {
+  handle("sync:update-pair", (_e, { pairId, updates }) => {
     assertString(pairId, "pairId");
     if (typeof updates !== "object" || updates === null) {
       throw new Error("Invalid updates");
@@ -100,52 +126,68 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     if (updates.syncMode && !VALID_SYNC_MODES.includes(updates.syncMode)) {
       throw new Error(`Invalid syncMode: ${updates.syncMode}`);
     }
+    // The sandbox grant travels with the path; only a string or "clear it" is valid.
+    if (updates.bookmark !== undefined && updates.bookmark !== null && typeof updates.bookmark !== "string") {
+      throw new Error("bookmark must be a string");
+    }
     return engine.updatePair(pairId, updates);
   });
 
   // Cheap file/folder count so the Add-folder modal can warn about huge trees
   // before the user commits to syncing one.
-  ipcMain.handle("sync:estimate-local-folder", async (_e, { path }) => {
+  handle("sync:estimate-local-folder", async (_e, { path }) => {
     assertString(path, "path");
     if (!isAbsolute(path)) throw new Error("path must be absolute");
     return estimateFolder(path);
   });
 
-  ipcMain.handle("sync:pick-local-folder", async () => {
+  handle("sync:pick-local-folder", async (_e, opts?: { defaultPath?: string }) => {
     const win = BrowserWindow.getFocusedWindow();
     if (!win) return null;
+    const defaultPath = opts?.defaultPath;
+    if (defaultPath !== undefined) {
+      assertString(defaultPath, "defaultPath");
+      if (!isAbsolute(defaultPath)) throw new Error("defaultPath must be absolute");
+    }
     const result = await dialog.showOpenDialog(win, {
       properties: ["openDirectory", "createDirectory"],
       title: "Select sync folder",
+      ...(defaultPath ? { defaultPath } : {}),
+      // Sandboxed builds only. macOS hands back a token that reopens this exact
+      // grant after a relaunch; a saved path alone is inert in the sandbox.
+      securityScopedBookmarks: currentDistribution() === "mas",
     });
-    return result.canceled ? null : result.filePaths[0] ?? null;
+    if (result.canceled) return null;
+    const path = result.filePaths[0];
+    if (!path) return null;
+    return { path, bookmark: result.bookmarks?.[0] };
   });
 
-  ipcMain.handle("sync:get-folder-tree", async (_e, { workspaceId }) => {
+  handle("sync:get-folder-tree", async (_e, { workspaceId }) => {
     assertString(workspaceId, "workspaceId");
     return engine.getFolderTree(workspaceId);
   });
 
-  ipcMain.handle("sync:pause-pair", (_e, { pairId }) => {
+  handle("sync:pause-pair", (_e, { pairId }) => {
     assertString(pairId, "pairId");
     return engine.pausePair(pairId);
   });
-  ipcMain.handle("sync:resume-pair", (_e, { pairId }) => {
+  handle("sync:resume-pair", (_e, { pairId }) => {
     assertString(pairId, "pairId");
     return engine.resumePair(pairId);
   });
-  ipcMain.handle("sync:pause-all", () => engine.pauseAll());
-  ipcMain.handle("sync:pause-all-for", (_e, { ms }) => {
+  handle("sync:pause-all", () => engine.pauseAll());
+  handle("sync:pause-all-for", (_e, { ms }) => {
     const n = typeof ms === "number" && ms > 0 && ms <= 24 * 60 * 60 * 1000 ? ms : 60 * 60 * 1000;
     return engine.pauseAllFor(n);
   });
-  ipcMain.handle("sync:resume-all", () => engine.resumeAll());
-  ipcMain.handle("sync:sync-now", (_e, { pairId }) => {
+  handle("sync:resume-all", () => engine.resumeAll());
+  handle("sync:sync-now", (_e, { pairId }) => {
     assertString(pairId, "pairId");
     return engine.syncNow(pairId);
   });
 
-  ipcMain.handle("sync:resolve-conflict", (_e, { conflictId, resolution }) => {
+  handle("sync:resolve-conflict", (_e, { conflictId, resolution }) => {
     assertString(conflictId, "conflictId");
     assertString(resolution, "resolution");
     if (!VALID_RESOLUTIONS.includes(resolution)) {
@@ -154,14 +196,27 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     return engine.resolveConflict(conflictId, resolution as "keep-local" | "keep-remote" | "keep-both");
   });
 
-  ipcMain.handle("sync:open-sync-folder", async (_e, { pairId }) => {
+  handle("sync:open-sync-folder", async (_e, { pairId }) => {
     assertString(pairId, "pairId");
     const config = await engine.getConfig();
     const pair = config.pairs.find((p) => p.id === pairId);
     if (pair) shell.openPath(pair.localPath);
   });
 
-  ipcMain.handle("sync:get-conflicts", () => engine.getConflicts());
+  handle("sync:list-conflicts", (_e, { pairIds, offset, limit }) => {
+    if (pairIds !== undefined) assertStringArray(pairIds, "pairIds");
+    if (typeof offset !== "number" || typeof limit !== "number") throw new Error("offset and limit must be numbers");
+    return engine.listConflicts({ pairIds, offset, limit });
+  });
+
+  handle("sync:resolve-conflicts", (_e, { pairIds, resolution }) => {
+    assertStringArray(pairIds, "pairIds");
+    assertString(resolution, "resolution");
+    if (!VALID_RESOLUTIONS.includes(resolution)) {
+      throw new Error(`Invalid resolution: ${resolution}. Must be one of: ${VALID_RESOLUTIONS.join(", ")}`);
+    }
+    return engine.resolveConflicts(pairIds, resolution as ConflictResolution);
+  });
 
   /**
    * A renderer that has been open across a pair removal can still name a pair
@@ -169,7 +224,7 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
    * a button - log it and do nothing.
    */
   const withPair = (channel: string, run: (pairId: string) => unknown) =>
-    ipcMain.handle(channel, (_e, { pairId }) => {
+    handle(channel, (_e, { pairId }) => {
       assertString(pairId, "pairId");
       if (!hasPair(engine.getStatus(), pairId)) {
         console.warn(`[sync] ${channel}: no such sync folder (${pairId}) - ignoring`);
@@ -186,16 +241,28 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
   withPair("sync:confirm-pending-deletion", (pairId) => engine.confirmPendingDeletion(pairId));
   withPair("sync:dismiss-pending-deletion", (pairId) => engine.dismissPendingDeletion(pairId));
 
-  // Forward engine events to renderer
+  // Forward engine events to renderer.
+  //
+  // Only windows the user can actually see. A hidden or minimized window used
+  // to keep committing React trees at the status rate (DSK-003); the renderer
+  // pulls a fresh snapshot on "show" instead (sync-store's init/refresh).
   function broadcast(channel: string, data: unknown): void {
     for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send(channel, data);
-      }
+      if (!shouldReceiveStatus(win)) continue;
+      win.webContents.send(channel, data);
+    }
+  }
+
+  // Conflict events must still be delivered. "conflict-detected" and "error"
+  // are one-shot and the renderer must not miss them while hidden, so they
+  // stay on the unconditional path - only destroyed windows are skipped.
+  function broadcastAlways(channel: string, data: unknown): void {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(channel, data);
     }
   }
 
   engine.on("status-changed", (status) => broadcast("sync:status-changed", status));
-  engine.on("conflict-detected", (conflict) => broadcast("sync:conflict-detected", conflict));
-  engine.on("error", (err) => broadcast("sync:error", err));
+  engine.on("conflict-detected", (conflict) => broadcastAlways("sync:conflict-detected", conflict));
+  engine.on("error", (err) => broadcastAlways("sync:error", err));
 }

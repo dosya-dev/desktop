@@ -11,7 +11,7 @@ import {
   type EngineRpcMethod,
   type HostMethod,
 } from "./engine-protocol";
-import type { SyncConfig, SyncPair, SyncStatus, SyncConflict, RemoteFolderInfo } from "./types";
+import type { SyncConfig, SyncPair, SyncStatus, SyncConflict, RemoteFolderInfo, ConflictPage, ConflictPageQuery, ConflictResolution } from "./types";
 
 /**
  * The slice of SyncEngine the main process actually consumes.
@@ -30,7 +30,8 @@ export interface SyncEngineHandle {
   stop(): Promise<void>;
   isRunning(): boolean;
   getStatus(): SyncStatus;
-  getConflicts(): SyncConflict[];
+  listConflicts(query: ConflictPageQuery): Promise<ConflictPage>;
+  resolveConflicts(pairIds: string[], resolution: ConflictResolution): Promise<{ queued: number }>;
   getConfig(): Promise<SyncConfig>;
   saveGlobalConfig(updates: Partial<SyncConfig>): Promise<void>;
   addPair(pair: SyncPair): Promise<void>;
@@ -59,7 +60,8 @@ const EMPTY_STATUS: SyncStatus = {
   pairs: [],
   globalPaused: false,
   activeTransfers: [],
-  unresolvedConflicts: [],
+  unresolvedConflictCount: 0,
+  conflictCountByPair: {},
   recentLogs: [],
   fileErrorCount: 0,
 };
@@ -82,7 +84,7 @@ const PARKED_MESSAGE =
  *
  * Three things here are worth understanding before changing them:
  *
- * 1. `getStatus()`, `getConflicts()` and `isRunning()` are SYNCHRONOUS, served
+ * 1. `getStatus()` and `isRunning()` are SYNCHRONOUS, served
  *    from state the child pushes. Callers rely on that: main's power-monitor
  *    handler reads `getStatus().globalPaused` inline, and the tray reads it
  *    while building a menu. Turning them into promises would ripple through
@@ -442,8 +444,13 @@ export class SyncEngineHost extends EventEmitter implements SyncEngineHandle {
     };
   }
 
-  getConflicts(): SyncConflict[] {
-    return this.lastStatus?.unresolvedConflicts ?? [];
+  /** Status ticks carry only counts; the list itself is asked for a page at a time. */
+  async listConflicts(query: ConflictPageQuery): Promise<ConflictPage> {
+    return (await this.rpc("listConflicts", [query])) as ConflictPage;
+  }
+
+  async resolveConflicts(pairIds: string[], resolution: ConflictResolution): Promise<{ queued: number }> {
+    return (await this.rpc("resolveConflicts", [pairIds, resolution])) as { queued: number };
   }
 
   async getConfig(): Promise<SyncConfig> {

@@ -5,6 +5,7 @@ import { sentryVitePlugin } from "@sentry/vite-plugin";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { releaseName } from "./src/main/telemetry-config";
+import { acknowledgementsPlugin } from "./scripts/acknowledgements-plugin";
 
 // Source maps go to Sentry only when the release workflow supplies a token
 // (never from a developer's ~/.sentryclirc by accident). Then, and only then,
@@ -36,6 +37,12 @@ const sentryUpload = () =>
     : [];
 const sourcemap = SENTRY_UPLOAD ? ("hidden" as const) : false;
 
+// electron-vite 3.1.0 defaults `build.minify` to FALSE for main, preload AND
+// renderer (lib-DyJQBCfr.mjs:287,398,531), and there is no CLI flag for it, so
+// every shipped build carried unminified sources until this was set
+// (DSK-001). electron-builder packages `out/**` verbatim, so this is what is
+// inside every channel: direct download, Microsoft Store, snap and MAS.
+// `src/main/vite-config.test.ts` fails if any of the three loses it again.
 export default defineConfig({
   main: {
     // @sentry/electron is in the exclude list (= bundled, not externalized)
@@ -46,6 +53,7 @@ export default defineConfig({
     ],
     build: {
       outDir: "out/main",
+      minify: "esbuild",
       sourcemap,
       rollupOptions: {
         // Two entries: the main process, and the sync engine that main forks
@@ -65,13 +73,14 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ["@sentry/electron"] })],
     build: {
       outDir: "out/preload",
+      minify: "esbuild",
       rollupOptions: {
         input: { index: resolve(__dirname, "src/preload/index.ts") },
       },
     },
   },
   renderer: {
-    plugins: [react(), tailwindcss(), ...sentryUpload()],
+    plugins: [react(), tailwindcss(), acknowledgementsPlugin(__dirname), ...sentryUpload()],
     root: resolve(__dirname, "src/renderer"),
     // The HEIC decode worker (lib/heic.worker.ts) is loaded via
     // `new Worker(new URL(...), { type: "module" })`. The renderer build uses
@@ -83,6 +92,7 @@ export default defineConfig({
     server: { port: 5174, strictPort: true },
     build: {
       outDir: "out/renderer",
+      minify: "esbuild",
       sourcemap,
       rollupOptions: {
         input: resolve(__dirname, "src/renderer/index.html"),

@@ -16,6 +16,7 @@ import { flushSentry, initSentryMain } from "./telemetry";
 // register its IPC scheme before registerSchemesAsPrivileged below runs.
 initSentryMain();
 import { registerIpcHandlers } from "./ipc";
+import { makeIpcGate, rendererOrigin } from "./ipc-sender";
 import { installFileLogger } from "./file-logger";
 import { isQuitting, markQuitting } from "./quit-state";
 import { createWindowReclaimer } from "./window-reclaim";
@@ -23,17 +24,25 @@ import { captureWindowState, readWindowState, resolveWindowState, writeWindowSta
 import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { linuxProtocolInstallPlan } from "./linux-protocol";
-import { setupSession } from "./session";
+import { setupSession, appDocumentCsp } from "./session";
 import { isUnexpectedSessionLoss } from "./session-events";
 import { isSessionCookieName, HOST_SESSION_COOKIE, LEGACY_SESSION_COOKIE } from "./session-cookie";
 import { originAllowed } from "./trusted-origins";
-import { createMenu } from "./menu";
+import { createMenu, parseMenuState, type AppMenu } from "./menu";
+import { openAboutWindow } from "./about-window";
+import { summarizeSyncStatus } from "./sync-status-summary";
+import { throttleTrailing } from "./throttle";
 import { createTray } from "./tray";
 import { SyncEngine } from "./sync";
 import { SyncEngineHost, type SyncEngineHandle } from "./sync/engine-host";
 import { registerSyncIpcHandlers } from "./sync/ipc-handlers";
-import { initAutoUpdater } from "./updater";
+import { shouldRunEngineInProcess } from "./sync/engine-selection";
+import { initAutoUpdater, checkForUpdatesNow, installUpdateNow, openStoreUpdates, getUpdateStatus, onUpdateStatus } from "./updater";
 import { installQuickAction } from "./macos-services";
+import { currentDistribution } from "./distribution";
+import { rendererLogLine, type RendererConsoleDetails } from "./renderer-log";
+import { abortAllSinks } from "./lan-receive";
+import { abortAllVaultSinks } from "./vault-save";
 
 // ── File logging ────────────────────────────────────────────────────
 // Every console line also lands in <userData>/logs/main.log. A packaged
@@ -87,10 +96,51 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-/** Register the app:// handler that serves the built renderer from disk. */
+/**
+ * Register the app:// handler that serves the built renderer from disk.
+ *
+ * This is also where the renderer's Content-Security-Policy is applied. It
+ * used to be set in session.ts's `onHeadersReceived`, which had two problems
+ * this fixes at once:
+ *
+ * 1. That hook could not be given a `urls` filter while it was the thing
+ *    setting the policy, because Chromium's match-pattern parser rejects a
+ *    custom scheme outright ("Wrong scheme type", at registration, inside
+ *    `app.whenReady()`), so it stayed unfiltered and ran a blocking
+ *    main-process round trip for every request the app made.
+ * 2. Its condition was `app.isPackaged && app://`, which silently left a
+ *    third real configuration with NO policy at all: built-but-unpackaged,
+ *    i.e. `electron-vite preview` and the whole Playwright suite, where the
+ *    renderer is served from app://bundle while `app.isPackaged` is false.
+ *
+ * Here the gate is the SCHEME - every app:// document gets the policy,
+ * whoever built the bundle - and `tests/e2e/csp.spec.ts` can finally assert
+ * it, which is what makes that spec a guard for the packaged build too.
+ */
 function registerAppProtocol(): void {
   const rendererDir = join(__dirname, "../renderer");
   const rendererRoot = resolve(rendererDir);
+  const indexPath = resolve(join(rendererDir, "index.html"));
+  const documentCsp = appDocumentCsp(API_BASE);
+
+  /**
+   * Serve the renderer document with its CSP attached.
+   *
+   * `net.fetch` hands back a Response whose headers are immutable, so the
+   * policy has to go onto a NEW Response built from the same body. Status,
+   * statusText and every original header are carried over - `Content-Type`
+   * above all: drop it and Chromium sniffs the body, decides it is not HTML,
+   * and renders the entire app as a wall of plain text with no error
+   * anywhere. `new Headers(res.headers)` copies the lot, so nothing has to be
+   * re-derived by hand.
+   */
+  const documentResponse = async (fileUrl: string): Promise<Response> => {
+    const res = await net.fetch(fileUrl);
+    const headers = new Headers(res.headers);
+    headers.set("Content-Security-Policy", documentCsp);
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  };
+
   protocol.handle(APP_SCHEME, async (request) => {
     let rel: string;
     try {
@@ -105,10 +155,30 @@ function registerAppProtocol(): void {
       return new Response("Forbidden", { status: 403 });
     }
     try {
-      return await net.fetch(pathToFileURL(filePath).toString());
+      // The policy goes on DOCUMENTS only - a stylesheet or a script chunk
+      // carries no policy of its own, so putting one on every asset would
+      // mean rebuilding every Response this handler serves for no effect.
+      //
+      // "Document" is every .html this bundle serves, NOT just index.html.
+      // There are two (`out/renderer/index.html` and
+      // `out/renderer/reader/index.html`) and the second one is the one that
+      // matters most: `BookViewer.tsx` iframes `/reader/index.html`, and that
+      // frame renders UNTRUSTED book content - foliate-js plus the book's own
+      // stylesheets, fonts and media as blob/data URLs. The hook this handler
+      // replaced matched on the scheme, so it covered that subframe; an
+      // `=== indexPath` test silently did not, which left the one document
+      // with untrusted input in it as the only one with no policy at all.
+      // Whatever .html is added here next gets the policy by default, which
+      // is the right direction for that mistake to be impossible in.
+      return filePath.endsWith(".html")
+        ? await documentResponse(pathToFileURL(filePath).toString())
+        : await net.fetch(pathToFileURL(filePath).toString());
     } catch {
-      // Unknown asset → serve index.html so client-side routing still resolves.
-      return net.fetch(pathToFileURL(join(rendererDir, "index.html")).toString());
+      // Unknown asset → serve index.html so client-side routing still
+      // resolves. That fallback is a document too, and it is reachable by
+      // navigation, so it gets the policy as well - it must not be the one
+      // hole in it.
+      return documentResponse(pathToFileURL(indexPath).toString());
     }
   });
 }
@@ -117,6 +187,14 @@ let mainWindow: BrowserWindow | null = null;
 // Hoisted to module scope so the per-window listeners createWindow attaches
 // (visibility → poller cadence, reclaim) can reach the engine.
 let syncEngine: SyncEngineHandle | undefined;
+let appMenu: AppMenu | undefined;
+
+/** The renderer's base URL, exactly as createWindow loads it. */
+function rendererBaseUrl(): string {
+  return !app.isPackaged && process.env.ELECTRON_RENDERER_URL
+    ? process.env.ELECTRON_RENDERER_URL
+    : `${APP_ORIGIN}/index.html`;
+}
 
 // ── Window memory reclaim ──────────────────────────────────────────
 // The app lives in the tray: "closing" the window only hides it, which kept a
@@ -169,6 +247,34 @@ function sendToWindow(channel: string, ...args: unknown[]): void {
   } else {
     wc.send(channel, ...args);
   }
+}
+
+/**
+ * Tell a window it just became visible, so the renderer can pull a fresh
+ * snapshot of anything it stopped being sent while it was hidden.
+ *
+ * This is the other half of the status-broadcast visibility gate in
+ * sync/ipc-handlers.ts: a hidden or minimized window no longer receives
+ * `sync:status-changed`, so without this it would paint status frozen at the
+ * moment it was hidden when the user brought it back. sync-store's init()
+ * subscribes and calls its own refresh().
+ *
+ * Deliberately NOT sendToWindow(): that queues on `did-finish-load`, and
+ * queueing is wrong here. A dropped notification is the correct outcome when
+ * the renderer is still loading, because a renderer that has not finished
+ * loading has not run `init()` yet and will fetch the current status on its
+ * own - there is nothing stale to correct.
+ *
+ * That case is reached in normal operation, not never: `createWindow` shows
+ * the window from `ready-to-show`, which precedes `did-finish-load`, so the
+ * `show` for a freshly created window arrives while `isLoading()` is still
+ * true and this send is dropped. An earlier version of this comment claimed
+ * the event "can only happen to a live, loaded window", which is not true.
+ */
+function notifyWindowShown(win: BrowserWindow): void {
+  if (win.isDestroyed()) return;
+  const wc = win.webContents;
+  if (!wc.isDestroyed() && !wc.isLoading()) wc.send("window:shown");
 }
 
 // ── dosya:// URL handler ───────────────────────────────────────────
@@ -448,6 +554,26 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
     // delay period costs one wakeup every five minutes in production.
     verifyIntervalMs: WINDOW_RECLAIM_MS,
     isQuitting,
+    // Hidden means HIDDEN (closed to the tray), deliberately NOT minimized.
+    //
+    // This briefly read `!win.isVisible() || win.isMinimized()`, on the
+    // reasoning that `isVisible()` for a minimized window differs by platform
+    // so both signals should count. That reasoning is right for deciding
+    // whether to keep RENDERING (see `shouldReceiveStatus`, which does check
+    // both) and wrong for deciding whether to DESTROY. Minimizing is not
+    // closing: on Windows and Linux the window is still on the taskbar, and
+    // destroying it takes that button away five minutes later, with no way
+    // back except the tray. On a Linux desktop with no system tray - a case
+    // `window-all-closed` already acknowledges - `windowReclaimed` keeps the
+    // process alive with no window, no taskbar entry and no tray icon, which
+    // leaves the app running and unreachable.
+    //
+    // So this stays `!isVisible()`, which is what it always was. On macOS
+    // that still covers minimize, because macOS's `minimize()` emits `hide`
+    // and flips `isVisible()` to false - unchanged behaviour there. The
+    // minimize work that IS wanted (stop the renderer rendering, slow the
+    // pollers) happens in the "minimize" listener below and in the broadcast
+    // gate, neither of which destroys anything.
     isHidden: () => !win.isDestroyed() && !win.isVisible(),
     destroy: () => {
       if (win.isDestroyed()) return;
@@ -465,6 +591,29 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
   win.on("show", () => {
     syncEngine?.setAppVisible(true);
     reclaimer.onShow();
+    notifyWindowShown(win);
+  });
+
+  // Minimize is not hide, and the difference cuts both ways.
+  //
+  // Electron happens to emit "hide" on minimize on macOS 15.7.4 (measured),
+  // which is the only reason the poller cadence followed minimize at all;
+  // nothing in the code said so, and the behaviour is documented to differ
+  // per platform. So say it explicitly: a minimized window is not being
+  // looked at, and the pollers can slow down.
+  //
+  // What this deliberately does NOT do is call `reclaimer.onHide()`. Arming
+  // the destroy timer here would take the window off the taskbar five
+  // minutes after the user minimized it (see the `isHidden` note above).
+  // Minimizing stops the WORK - this line, plus the broadcast gate, which
+  // checks `isMinimized()` - without taking the window away.
+  win.on("minimize", () => {
+    syncEngine?.setAppVisible(false);
+  });
+  win.on("restore", () => {
+    syncEngine?.setAppVisible(true);
+    reclaimer.onShow();
+    notifyWindowShown(win);
   });
 
   win.on("closed", () => {
@@ -488,11 +637,19 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
   // console nobody could open, while the terminal output a user can actually
   // copy showed nothing at all. Errors and warnings only - forwarding every
   // log line would bury the sync output this log exists for.
-  win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    // Electron levels: 0 verbose, 1 info, 2 warning, 3 error.
-    if (level < 2) return;
-    const tag = level === 3 ? "error" : "warn";
-    console.error(`[renderer:${tag}] ${message}  (${sourceId}:${line})`);
+  win.webContents.on("console-message", (details, level, message, line, sourceId) => {
+    // Electron 43 fills `details` (level is a STRING there) and still passes
+    // the deprecated positional args; renderer-log.ts prefers the former and
+    // falls back to the latter. See renderer-log.ts for why reading only the
+    // positional ones is a time bomb.
+    const out = rendererLogLine(
+      details as unknown as RendererConsoleDetails,
+      level as unknown as number,
+      message as unknown as string,
+      sourceId as unknown as string,
+      line as unknown as number,
+    );
+    if (out) console.error(`[renderer:${out.tag}] ${out.text}`);
   });
 
   // A dead renderer (OOM, GPU fault) used to leave a permanently blank window
@@ -509,6 +666,14 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
     if (windowReclaimed || isQuitting()) return;
     console.error("[crash] Renderer process gone:", details.reason, "exitCode:", details.exitCode);
     if (details.reason === "clean-exit") return;
+    // The renderer that owned any in-flight LAN receive is gone, and its sink
+    // ids died with it - nothing can ever complete them. Close them and remove
+    // their partial files, or four crashes exhaust MAX_OPEN_SINKS and LAN
+    // Transfer refuses every later receive for the rest of the session.
+    void abortAllSinks().catch(() => {});
+    // A Vault download's sink is owned by that renderer too, and its id died
+    // with it, so the partial plaintext could never be completed or removed.
+    void abortAllVaultSinks().catch(() => {});
     const wasVisible = !win.isDestroyed() && win.isVisible();
     windowReclaimed = true;
     if (!win.isDestroyed()) win.destroy();
@@ -571,6 +736,22 @@ if (!gotTheLock) {
   let startSyncOnce: (() => void) | undefined;
 
   app.whenReady().then(async () => {
+    // ── Sender validation (S-1) ────────────────────────────────────
+    // The handlers registered directly in this callback (rather than in
+    // ipc.ts or sync/ipc-handlers.ts) get the same gate: `handle`/`on` below
+    // refuse a message that did not come from the app's own top-level
+    // renderer. See ipc-sender.ts. `rendererOrigin` is the same expression
+    // rendererBaseUrl() and the will-navigate guard use, minus the path - only
+    // `electron-vite dev` gets the Vite dev server; packaged builds AND the
+    // built-but-unpackaged harness both load app://bundle.
+    const ipcGate = makeIpcGate(
+      ipcMain,
+      rendererOrigin({ isPackaged: app.isPackaged, devServerUrl: process.env.ELECTRON_RENDERER_URL }),
+    );
+    // Same gate, handed to initAutoUpdater below for its 8 channels, so the
+    // allowed-origin expression exists in exactly one place per registrar.
+    const { handle, on } = ipcGate;
+
     // Serve the packaged renderer from app://bundle (must be registered before
     // the window loads that URL).
     registerAppProtocol();
@@ -591,7 +772,7 @@ if (!gotTheLock) {
     // Start an OAuth login: mint a fresh single-use nonce and hand the renderer
     // the provider URL carrying it. The dosya:// callback is only honored if it
     // echoes this exact nonce back (see handleDosyaUrl).
-    ipcMain.handle("auth:begin-oauth", (_e, provider: string) => {
+    handle("auth:begin-oauth", (_e, provider: string) => {
       if (provider !== "google" && provider !== "github" && provider !== "apple") {
         throw new Error("Unknown OAuth provider");
       }
@@ -612,7 +793,112 @@ if (!gotTheLock) {
       if (startupUrl) handleDosyaUrl(startupUrl);
     }
 
-    createMenu();
+    // The application menu. Its shape lives in menu-template.ts; here every
+    // action is routed to main (updates, sync, external links, the About
+    // window) or forwarded to the renderer as one typed "menu:action" event.
+    //
+    // Show first: on macOS the menu is reachable from the menu bar while the
+    // window sits in the tray, so showMainWindow only needs to run before
+    // sendToWindow. On Windows and Linux the menu is popped from the window's
+    // own ☰ button, so this order also covers the window being recreated:
+    // sendToWindow waits for did-finish-load when that happens.
+    const toRenderer = (channel: string, ...args: unknown[]) => {
+      showMainWindow();
+      sendToWindow(channel, ...args);
+    };
+    appMenu = createMenu(
+      {
+        distribution: currentDistribution(),
+        getUpdateState: () => getUpdateStatus().state,
+        getSync: () => {
+          const engine = syncEngine;
+          if (!engine) return null;
+          const status = engine.getStatus();
+          return {
+            summary: summarizeSyncStatus(status),
+            globalPaused: status.globalPaused,
+            unresolvedConflicts: status.unresolvedConflictCount,
+            pairs: status.pairs.map((p) => ({ pairId: p.pairId, name: p.remoteFolderName, localPath: p.localPath })),
+          };
+        },
+      },
+      (action) => {
+        switch (action.kind) {
+          case "navigate":
+            toRenderer("navigate", action.path);
+            return;
+          case "external":
+            void shell.openExternal(action.url);
+            return;
+          case "open-sync-folder": {
+            const pair = syncEngine?.getStatus().pairs.find((p) => p.pairId === action.pairId);
+            if (pair) void shell.openPath(pair.localPath);
+            return;
+          }
+          case "view":
+          case "appearance":
+            toRenderer("menu:action", action);
+            return;
+          case "simple":
+            break;
+        }
+        switch (action.id) {
+          case "about":
+            openAboutWindow({ rendererUrl: rendererBaseUrl(), preloadPath: join(__dirname, "../preload/index.js"), parent: getWindow() });
+            return;
+          case "check-for-updates":
+            // The Settings card shows the outcome (checking, downloading,
+            // ready, up to date, error) - land the user on it.
+            void checkForUpdatesNow();
+            toRenderer("navigate", "/settings?tab=updates");
+            return;
+          case "install-update":
+            installUpdateNow();
+            return;
+          case "open-store":
+            void openStoreUpdates();
+            return;
+          case "sync-now-all":
+            for (const pair of syncEngine?.getStatus().pairs ?? []) syncEngine?.syncNow(pair.pairId);
+            return;
+          case "sync-pause":
+            void syncEngine?.pauseAll();
+            return;
+          case "sync-pause-hour":
+            void syncEngine?.pauseAllFor(60 * 60 * 1000);
+            return;
+          case "sync-resume":
+            void syncEngine?.resumeAll();
+            return;
+          case "open-log-folder":
+            void shell.openPath(join(app.getPath("userData"), "logs"));
+            return;
+          case "report-problem":
+            toRenderer("report-problem:open");
+            return;
+          default:
+            // Everything else acts inside the renderer: new folder, list/grid,
+            // find, sidebar, details, back/forward, sign out, shortcuts…
+            toRenderer("menu:action", action);
+        }
+      },
+    );
+    // Re-label the update item as a check or download progresses.
+    onUpdateStatus(() => appMenu?.rebuild());
+    // The renderer tells the menu which route it is on, what is selected and
+    // which checkmarks are on. Validated: only a known shape is accepted.
+    on("menu:state", (_event, raw: unknown) => {
+      const state = parseMenuState(raw);
+      if (state) appMenu?.setState(state);
+    });
+    // Windows and Linux: the ☰ title-bar button.
+    handle("menu:popup", (event, pos: { x?: unknown; y?: unknown }) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win) return;
+      const x = typeof pos?.x === "number" ? pos.x : 0;
+      const y = typeof pos?.y === "number" ? pos.y : 0;
+      appMenu?.popup(win, x, y);
+    });
     {
       let wasOpenedAsHidden: boolean | undefined;
       try { wasOpenedAsHidden = app.getLoginItemSettings().wasOpenedAsHidden; } catch { wasOpenedAsHidden = undefined; }
@@ -620,8 +906,8 @@ if (!gotTheLock) {
       if (startedHidden) console.log("[app] Hidden launch (login item) - window stays in the tray");
     }
     createWindow({ showOnReady: shouldShowOnReady({ openedAsHidden: startedHidden }) });
-    initAutoUpdater();
-    installQuickAction();
+    initAutoUpdater(ipcGate);
+    installQuickAction({ distribution: currentDistribution() });
 
     // If app was launched via dosya://sync URL, send it once the renderer is ready
     if (pendingSyncPath && mainWindow) {
@@ -649,10 +935,10 @@ if (!gotTheLock) {
       // The escape hatch is not dead weight: when a sync bug needs a debugger,
       // DOSYA_SYNC_IN_PROCESS=1 puts the engine back in the process the
       // inspector is already attached to.
-      syncEngine =
-        process.env.DOSYA_SYNC_IN_PROCESS === "1"
-          ? new SyncEngine(API_BASE)
-          : new SyncEngineHost(API_BASE, join(__dirname, "engine.js"));
+      // The Mac App Store build also runs in-process - see engine-selection.ts.
+      syncEngine = shouldRunEngineInProcess({ env: process.env, distribution: currentDistribution() })
+        ? new SyncEngine(API_BASE)
+        : new SyncEngineHost(API_BASE, join(__dirname, "engine.js"));
       registerSyncIpcHandlers(syncEngine);
 
       // ── Troubleshooting (Settings) ─────────────────────────────────
@@ -660,14 +946,14 @@ if (!gotTheLock) {
       // clear, and a full reset that deletes everything local and starts
       // over. Registered here because the reset must stop the sync engine
       // before deleting its data out from under it.
-      ipcMain.handle("app:clear-cache", async () => {
+      handle("app:clear-cache", async () => {
         const ses = session.defaultSession;
         await ses.clearCache();
         await ses.clearCodeCaches({});
         return { ok: true };
       });
 
-      ipcMain.handle("app:factory-reset", async () => {
+      handle("app:factory-reset", async () => {
         console.log("[reset] Factory reset requested from Settings");
         try {
           await syncEngine?.stop();
@@ -731,6 +1017,9 @@ if (!gotTheLock) {
       // The tray outlives any window generation, so it gets accessors that
       // recreate a reclaimed window instead of a reference that can go stale.
       createTray({ showWindow: showMainWindow, sendToWindow }, syncEngine);
+      // The Sync menu's status line and pause/resume items follow the engine,
+      // throttled the same way the tray is.
+      syncEngine.on("status-changed", throttleTrailing(() => appMenu?.rebuild(), 1000));
       // A window that was never shown never fires "show", so the pollers
       // would run at foreground cadence for a user who is not looking.
       if (startedHidden) syncEngine.setAppVisible(false);
@@ -865,7 +1154,7 @@ if (!gotTheLock) {
     // The renderer forwards the browser's `online` event (Electron's main
     // process has no equivalent), which is the earliest reliable signal that
     // connectivity is back after an outage.
-    ipcMain.on("net:online", () => syncEngine?.notifyNetworkOnline());
+    on("net:online", () => syncEngine?.notifyNetworkOnline());
 
     // Initial battery state is handled by startSyncOnce (events only fire on
     // transitions), so sync and the battery rule are decided by one signal.
@@ -896,14 +1185,24 @@ if (!gotTheLock) {
   app.on("before-quit", (e) => {
     markQuitting();
 
-    if (!syncEngine || isShuttingDown) return;
+    if (isShuttingDown) return;
 
     // Prevent the default quit - we need to await async cleanup
     e.preventDefault();
     isShuttingDown = true;
 
     const SHUTDOWN_TIMEOUT_MS = 5000;
-    const shutdown = syncEngine.stop().catch(() => {});
+    const shutdown = Promise.all([
+      syncEngine?.stop().catch(() => {}) ?? Promise.resolve(),
+      // A receive in flight owns an open handle and a half-written file at a
+      // path the user chose. abortAllSinks() is what removes it; nothing
+      // called it before (DSK-008).
+      abortAllSinks().catch(() => {}),
+      // Same contract for a Vault download, which writes decrypted plaintext
+      // through its own sink family: a quit part-way must not leave a
+      // truncated plaintext document that looks complete.
+      abortAllVaultSinks().catch(() => {}),
+    ]).then(() => {});
     const timeout = new Promise<void>((r) => setTimeout(r, SHUTDOWN_TIMEOUT_MS));
 
     Promise.race([shutdown, timeout]).finally(() => {

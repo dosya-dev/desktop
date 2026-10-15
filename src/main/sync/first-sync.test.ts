@@ -90,8 +90,28 @@ test("adoption rows below the deletion guard's threshold are still never deleted
   assert.deepEqual(ops.filter((o) => o.kind === "delete-remote"), []);
   assert.deepEqual(
     ops.map((o) => o.kind).sort(),
-    ["download-new", "download-new"],
+    [...Array(10).fill("conflict"), "download-new", "download-new"],
   );
+});
+
+for (const sizeBytes of [120, 125]) {
+  test(`adopted metadata does not authorize overwriting an independent ${sizeBytes}-byte local version`, () => {
+    const views = viewsFor([seededRow()], new Map([
+      ["QA checklist.pdf", { sizeBytes, mtimeMs: 7_000 }],
+    ]));
+    const ops = plan({ ...views, conflictStrategy: "keep-both" });
+    assert.deepEqual(ops.map(o => o.kind), ["conflict"]);
+  });
+}
+
+test("adopted metadata never authorizes deleting a local version when the remote entry disappears", () => {
+  const views = viewsFor([seededRow()], new Map([
+    ["QA checklist.pdf", { sizeBytes: 120, mtimeMs: 7_000 }],
+  ]));
+  views.remote.filesById.clear();
+  views.remote.filesByPath.clear();
+  const ops = plan({ ...views, conflictStrategy: "keep-both" });
+  assert.deepEqual(ops.map(o => o.kind), ["upload-new"]);
 });
 
 test("a real local deletion of a downloaded file still deletes on the server", () => {

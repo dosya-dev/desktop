@@ -21,6 +21,18 @@ export const PROTOCOL_VERSION = 1;
  */
 export const CHUNK_BYTES = 16 * 1024;
 
+/**
+ * IPC round-trips to the main process have a fixed per-call cost that
+ * swamps a 16 KiB payload: measuring the real renderer -> main -> disk path
+ * showed ~109 MB/s at the wire chunk size (CHUNK_BYTES, one invoke per
+ * chunk) versus ~650 MB/s once invokes carry 256 KiB
+ * (desktop-audit/evidence/09-ipc-throughput.md). This is NOT the wire size -
+ * CHUNK_BYTES above stays 16 KiB on the network - it is only how many wire
+ * chunks `createWriteBatcher` below holds before handing them to IPC in one
+ * call.
+ */
+export const IPC_WRITE_BYTES = 256 * 1024;
+
 /** Stop a peer from opening a file whose declared size is absurd. */
 export const MAX_FILE_BYTES = 64 * 1024 * 1024 * 1024; // 64 GiB
 
@@ -70,6 +82,96 @@ export function* chunkOffsets(size: number): Generator<{ start: number; end: num
   for (let start = 0; start < size; start += CHUNK_BYTES) {
     yield { start, end: Math.min(start + CHUNK_BYTES, size) };
   }
+}
+
+/** What `createWriteBatcher` hands back to its caller. */
+export interface WriteBatcher {
+  /** Queue bytes; flushes to `write` once the buffered total reaches `flushAt`. */
+  push(bytes: Uint8Array): Promise<void>;
+  /** Flush whatever is left under the threshold. MUST be called when the
+   * caller is done pushing - skipping it silently drops the tail of every
+   * file whose size is not a multiple of `flushAt`. */
+  close(): Promise<void>;
+  /** Drop whatever is buffered without writing it - for a transfer that is
+   * being thrown away (abort), where the destination may already be gone. */
+  discard(): void;
+}
+
+/**
+ * Buffers writes until `flushAt` bytes have accumulated, then hands them to
+ * `write` as one concatenated call. This is what lets a wire protocol keep a
+ * small, network-appropriate chunk size (see CHUNK_BYTES above) while the
+ * hand-off to IPC - which has its own fixed per-call cost - amortises that
+ * cost over a much bigger buffer.
+ *
+ * Kept free of WebRTC/Electron, same as the rest of this module: it only
+ * knows "accumulate, then call `write` with one buffer." `lan-transport.ts`
+ * wires the real `write` to `window.electronAPI.lanRecvChunk`.
+ */
+export function createWriteBatcher(
+  flushAt: number,
+  write: (bytes: Uint8Array) => Promise<void>,
+): WriteBatcher {
+  let pending: Uint8Array[] = [];
+  let pendingBytes = 0;
+  /**
+   * Set once a flush has failed. The batch it was carrying is gone - the
+   * buffer is cleared before the await, because holding bytes whose file is
+   * being abandoned buys nothing - so this batcher can no longer produce a
+   * correct file and must never again behave as though it had.
+   *
+   * Without it, `close()` after a failed flush found an EMPTY buffer, had
+   * nothing to do, and resolved: the receive path then reported the file as
+   * received, with the failed batch missing from the middle of it. (The main
+   * process destroys the sink on a write error too, so either layer alone
+   * closes that hole; both do, because the consequence is a file the user is
+   * told is complete.)
+   */
+  let failed: Error | null = null;
+
+  function concat(): Uint8Array {
+    if (pending.length === 1) return pending[0];
+    const out = new Uint8Array(pendingBytes);
+    let offset = 0;
+    for (const chunk of pending) {
+      out.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return out;
+  }
+
+  async function flushPending(): Promise<void> {
+    if (failed) throw failed;
+    if (pendingBytes === 0) return;
+    const batch = concat();
+    pending = [];
+    pendingBytes = 0;
+    try {
+      await write(batch);
+    } catch (err) {
+      failed = err instanceof Error ? err : new Error(String(err));
+      throw failed;
+    }
+  }
+
+  return {
+    async push(bytes: Uint8Array): Promise<void> {
+      if (failed) throw failed;
+      pending.push(bytes);
+      pendingBytes += bytes.byteLength;
+      if (pendingBytes >= flushAt) await flushPending();
+    },
+    async close(): Promise<void> {
+      // Rejects rather than resolving on an empty buffer if a flush has
+      // already failed - that silent resolve is what let a truncated file be
+      // reported as received.
+      await flushPending();
+    },
+    discard(): void {
+      pending = [];
+      pendingBytes = 0;
+    },
+  };
 }
 
 /**

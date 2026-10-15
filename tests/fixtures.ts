@@ -22,6 +22,34 @@ export { expect } from "@playwright/test";
  * workspace - a stale id could then resolve to a *different* real workspace
  * instead of falling back to `workspaces[0]`.
  */
+/**
+ * The parent environment with `ELECTRON_RUN_AS_NODE` **removed**, not blanked.
+ *
+ * It has to be removed because Claude Code's integrated terminal exports
+ * `ELECTRON_RUN_AS_NODE=1` (it is an Electron app itself), and a child Electron
+ * that inherits it runs as plain Node: no main process, no `require("electron")`,
+ * `process.type === undefined`.
+ *
+ * This used to be `ELECTRON_RUN_AS_NODE: ""`, which is NOT the same thing. An
+ * empty string is a variable that exists with no value, and whether that counts
+ * as "set" is platform-dependent - so on Windows CI every single spec failed
+ * before even reaching the app:
+ *
+ *   electron.exe: bad option: --remote-debugging-port=0
+ *
+ * "bad option:" is Node's CLI parser, and the giveaway is that it had already
+ * ACCEPTED `-r <loader>` and `--inspect=0` - both valid Node flags - before
+ * choking on the Chromium one. Playwright passes all three to get a CDP
+ * endpoint, which is fine for a real Electron and fatal for Node. Deleting the
+ * key means the child simply does not have the variable, on every platform,
+ * whether or not the parent had it.
+ */
+function electronEnv(): Record<string, string | undefined> {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
+}
+
 export async function launchApp(apiBase: string, extraEnv: Record<string, string> = {}) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "dosya-e2e-"));
   const app = await electron.launch({
@@ -39,8 +67,7 @@ export async function launchApp(apiBase: string, extraEnv: Record<string, string
         : []),
     ],
     env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: "",
+      ...electronEnv(),
       API_BASE: apiBase,
       // The mock also stands in for the ONLYOFFICE document server, so the
       // renderer's CSP names the same origin the editor actually loads from.

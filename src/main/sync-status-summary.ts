@@ -27,7 +27,12 @@ export function summarizeSyncStatus(status: {
   const errors = pairs.filter((p) => p.status === "error").length;
   const paused = pairs.filter((p) => p.status === "paused").length;
   const syncing = pairs.filter((p) => p.status === "syncing").length;
-  const attention = pairs.filter((p) => p.status === "needs-confirmation").length;
+  // "needs-permission" (Mac App Store builds: macOS revoked the sandbox
+  // grant) is counted in the same bucket as "needs-confirmation" (a held
+  // deletion decision) - both are a folder waiting on the user, not an
+  // error and not caught up. Without this a sandboxed pair that cannot
+  // sync at all read as "All synced".
+  const attention = pairs.filter((p) => p.status === "needs-confirmation" || p.status === "needs-permission").length;
   const offline = pairs.filter((p) => p.status === "offline").length;
   const transferCount = activeTransfers.length;
   const failedFiles = status.fileErrorCount ?? 0;

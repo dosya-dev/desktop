@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { useVault, type E2eeEngine, type EncryptedEntry, type KnownWorkspace } from "./store";
+import { useVault, type E2eeEngine, type EncryptedEntry, type KnownWorkspace, type VaultSaveSink } from "./store";
 import { setActiveGlobalWorkspaceId } from "./active-workspace";
 import { ApiError } from "@/lib/api-client";
 import { SESSION_RESET_EVENT } from "@/lib/session-reset";
@@ -46,13 +46,28 @@ function makeFakeEngine(overrides: Partial<E2eeEngine> = {}): E2eeEngine {
     openWorkspace: async () => {},
     listFolder: async () => [],
     uploadFile: async () => {},
-    downloadFile: async () => new Uint8Array(),
+    downloadFileToSink: async () => {},
     listMembers: async () => [],
     inviteMember: async () => {},
     revokeMember: async () => {},
     listMyWorkspaces: async () => [],
     unlockWithRecoveryKey: async () => {},
     destroyIdentity: async () => {},
+    ...overrides,
+  };
+}
+
+/**
+ * A complete `VaultSaveSink` built from partial overrides - same pattern as
+ * `makeFakeEngine` above, so no case has to spell out the three methods it
+ * does not care about and nothing is cast.
+ */
+function okSink(overrides: Partial<VaultSaveSink> = {}): VaultSaveSink {
+  return {
+    open: async () => ({ ok: true, id: "sink-1" }),
+    write: async () => {},
+    close: async () => ({ path: "/tmp/x" }),
+    abort: async () => {},
     ...overrides,
   };
 }
@@ -72,7 +87,10 @@ beforeEach(() => {
     members: [],
     ownerUserId: null,
   });
-  useVault.getState().__setSaver(async () => ({ ok: true, path: "/tmp/x" }));
+  // A sink that accepts anything and reports a path, so the 40-odd cases that
+  // have nothing to do with saving are unaffected by it. The cases that DO
+  // care install their own below.
+  useVault.getState().__setSink(okSink());
   // The active GLOBAL workspace (active-workspace.ts) - reset to its default
   // between cases; individual tests below set it explicitly where the active
   // workspace matters.
@@ -675,38 +693,75 @@ describe("useVault: uploadFiles attaches an unscoped Space and retries once", ()
 });
 
 describe("useVault: downloadEntry", () => {
-  it("downloads bytes via the engine and hands them to the injected saver", async () => {
-    const fakeBytes = new TextEncoder().encode("secret content");
-    let downloadedArgs: [string, string] | null = null;
+  it("streams the file to the sink in manifest order and never buffers it whole", async () => {
+    const written: { index: number; text: string }[] = [];
     useVault.getState().__setEngine(
       makeFakeEngine({
-        downloadFile: async (_folderId, entryId) => {
+        downloadFileToSink: async (_folderId, entryId, sink) => {
           expect(entryId).toBe("id1");
-          return fakeBytes;
+          await sink(new TextEncoder().encode("secret "), 0);
+          await sink(new TextEncoder().encode("content"), 1);
         },
       }),
     );
-    useVault.getState().__setSaver(async (name, bytes) => {
-      downloadedArgs = [name, new TextDecoder().decode(bytes)];
-      return { ok: true, path: "/Users/x/Downloads/a.txt" };
-    });
+    let openedName: string | null = null;
+    let closed: string | null = null;
+    useVault.getState().__setSink(okSink({
+      open: async (name) => { openedName = name; return { ok: true, id: "s1" }; },
+      write: async (_id, bytes, index) => { written.push({ index, text: new TextDecoder().decode(bytes) }); },
+      close: async (id) => { closed = id; return { path: "/Users/x/Downloads/a.txt" }; },
+    }));
 
     await useVault.getState().downloadEntry("id1", "a.txt");
 
-    expect(downloadedArgs).toEqual(["a.txt", "secret content"]);
+    // The name (never a path) is what main is asked for, the plaintext arrives
+    // in manifest order one chunk at a time, and the file is closed exactly
+    // once at the end - the streaming equivalent of the old "the whole buffer
+    // was handed over in one call" assertion (DSK-010).
+    expect(openedName).toBe("a.txt");
+    expect(written).toEqual([{ index: 0, text: "secret " }, { index: 1, text: "content" }]);
+    expect(closed).toBe("s1");
     expect(useVault.getState().busy).toBe(false);
     expect(useVault.getState().error).toBeNull();
   });
 
-  it("clears busy before the save dialog opens, not after it closes", async () => {
+  it("is not busy while the save dialog is open, only while decrypting", async () => {
     let busyWhileDialogOpen: boolean | null = null;
-    useVault.getState().__setEngine(makeFakeEngine({ downloadFile: async () => new Uint8Array([1]) }));
-    useVault.getState().__setSaver(async () => {
-      busyWhileDialogOpen = useVault.getState().busy;
-      return { ok: true, path: "/x" };
-    });
+    let busyWhileDecrypting: boolean | null = null;
+    useVault.getState().__setEngine(
+      makeFakeEngine({
+        downloadFileToSink: async (_f, _e, sink) => {
+          busyWhileDecrypting = useVault.getState().busy;
+          await sink(new Uint8Array([1]), 0);
+        },
+      }),
+    );
+    useVault.getState().__setSink(okSink({
+      open: async () => { busyWhileDialogOpen = useVault.getState().busy; return { ok: true, id: "s1" }; },
+    }));
     await useVault.getState().downloadEntry("id1", "a.txt");
     expect(busyWhileDialogOpen).toBe(false);
+    expect(busyWhileDecrypting).toBe(true);
+  });
+
+  // DSK-010: a failure part-way through must not leave a partial plaintext
+  // behind. Main does the unlinking; the store's job is to ask for it.
+  it("aborts the sink (so main removes the partial file) when decryption fails midway", async () => {
+    let aborted: string | null = null;
+    useVault.getState().__setEngine(
+      makeFakeEngine({
+        downloadFileToSink: async (_f, _e, sink) => {
+          await sink(new Uint8Array([1]), 0);
+          throw new Error("chunk 2 failed to verify");
+        },
+      }),
+    );
+    useVault.getState().__setSink(okSink({ abort: async (id) => { aborted = id; } }));
+    await useVault.getState().downloadEntry("id1", "a.txt");
+    // The id main handed back at open is the one the abort names.
+    expect(aborted).toBe("sink-1");
+    expect(useVault.getState().busy).toBe(false);
+    expect(useVault.getState().error).toMatch(/verify/);
   });
 });
 
@@ -806,17 +861,25 @@ describe("useVault: destroyIdentity", () => {
 
 // Review Focus 3: a cancelled save dialog is not an error and not a success.
 describe("useVault: downloadEntry outcomes", () => {
-  it("stays quiet when the user cancels the save dialog", async () => {
-    useVault.getState().__setEngine(makeFakeEngine({ downloadFile: async () => new Uint8Array([1]) }));
-    useVault.getState().__setSaver(async () => ({ ok: false, canceled: true }));
+  it("stays quiet when the user cancels the save dialog, and never decrypts", async () => {
+    let decrypted = false;
+    useVault.getState().__setEngine(makeFakeEngine({ downloadFileToSink: async () => { decrypted = true; } }));
+    useVault.getState().__setSink(okSink({ open: async () => ({ ok: false }) }));
     await useVault.getState().downloadEntry("id1", "a.txt");
+    // The dialog comes first now, so changing your mind costs no decryption
+    // at all - it used to decrypt the whole file before asking.
+    expect(decrypted).toBe(false);
     expect(useVault.getState().busy).toBe(false);
     expect(useVault.getState().error).toBeNull();
   });
 
   it("reports a failed write as an error", async () => {
-    useVault.getState().__setEngine(makeFakeEngine({ downloadFile: async () => new Uint8Array([1]) }));
-    useVault.getState().__setSaver(async () => { throw new Error("EACCES: permission denied"); });
+    useVault.getState().__setEngine(
+      makeFakeEngine({ downloadFileToSink: async (_f, _e, sink) => { await sink(new Uint8Array([1]), 0); } }),
+    );
+    useVault.getState().__setSink(okSink({
+      write: async () => { throw new Error("EACCES: permission denied"); },
+    }));
     await useVault.getState().downloadEntry("id1", "a.txt");
     expect(useVault.getState().busy).toBe(false);
     expect(useVault.getState().error).toMatch(/EACCES/);

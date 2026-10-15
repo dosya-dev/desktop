@@ -24,6 +24,8 @@
     "src/renderer/**/*.ts",
     "src/renderer/**/*.tsx",
     "src/main/telemetry-config.ts",
+    "src/main/sync/types.ts",
+    "src/main/menu-template.ts",
     "../../packages/shared/src/**/*.ts",
     "vendor/audio-player/**/*.ts",
     "vendor/e2ee-core/**/*.d.ts",

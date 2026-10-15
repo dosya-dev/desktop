@@ -7,7 +7,7 @@ import { loadConfig, saveConfig, loadPairState, deletePairState, openSyncIndex, 
 import type { SyncIndex, PairMeta } from "./index-db";
 import { migrateJsonStateIfNeeded } from "./index-migrate";
 import { mergeStatusPairs } from "./status-merge";
-import { toFileErrorStatus, pendingFileCount, assembleSyncStatus, FILE_ERROR_LIST_CAP } from "./status-assembly";
+import { toFileErrorStatus, pendingFileCount, assembleSyncStatus, FILE_ERROR_LIST_CAP, countConflictsByPair, pageConflicts } from "./status-assembly";
 import { plan, filterOpsForMode, type BaseView, type LocalFile, type PlanOp } from "./planner";
 import { Backpressure } from "./async-queue";
 import type { QueuedOp } from "./index-db";
@@ -31,8 +31,10 @@ import {
 import { hashFile } from "./hash";
 import { chunkFile } from "./chunker";
 import { blockTrackingApplies, shouldAttemptDelta, deltaIsWorthIt } from "./delta-eligibility";
-import { conflictCopyName } from "./conflict-name";
+import { conflictCopyName, mayAutoKeepBoth, AUTO_KEEP_BOTH_COOLDOWN_MS } from "./conflict-name";
+import { createOpCountCache } from "./op-count-cache";
 import type { EnvProvider } from "./env-provider";
+import type { AccessHandle } from "./bookmarks";
 import { createElectronEnv } from "./electron-env";
 import { existsSync } from "fs";
 import type {
@@ -52,6 +54,9 @@ import type {
   SyncFolderRecord,
   SyncFileError,
   PendingDeletionStatus,
+  ConflictPage,
+  ConflictPageQuery,
+  ConflictResolution,
 } from "./types";
 
 // ── Concurrency semaphore ───��───────────────────────────────────────
@@ -142,6 +147,8 @@ interface PairRuntime {
   state: SyncPairState;
   watcher: LocalWatcher | null;
   poller: RemotePoller | null;
+  /** Releases the sandbox grant for this pair's folder. Null outside Mac App Store builds. */
+  releaseFolderAccess?: (() => void) | null;
   status: SyncPairStatus;
   errorMessage: string | null;
   syncing: boolean;
@@ -240,6 +247,12 @@ export class SyncEngine extends EventEmitter {
   private activeTransfers = new Set<ActiveTransfer>();
   private started = false;
   private conflicts: SyncConflict[] = [];
+  /** When each "pairId\0localPath" was last kept-both automatically. A path
+   *  that comes straight back as a conflict is left for the user (see
+   *  mayAutoKeepBoth) instead of being copied on every cycle. */
+  private autoKeptBothAt = new Map<string, number>();
+  /** A bulk resolve is running (one at a time). */
+  private bulkResolving = false;
 
   /** Set when a platform switch has paused this surface (see setMaintenance).
    *  Cleared in clearOffline: the same recovery probe that proves the
@@ -268,6 +281,14 @@ export class SyncEngine extends EventEmitter {
   /** Throttle emitStatus to avoid flooding IPC during large batch operations. */
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
   private statusDirty = false;
+
+  /**
+   * Memoizes the per-pair queued-op count getStatus() reads (DSK-005): a
+   * SQL COUNT(*) over the ops table, called at up to 2Hz per pair, only
+   * while that pair is syncing - exactly when the queue is deepest. See
+   * op-count-cache.ts.
+   */
+  private opCounts = createOpCountCache(2000);
 
   /** File IDs that need sync-flag set after a batch upload completes. */
   private pendingSyncFlagIds: string[] = [];
@@ -428,19 +449,6 @@ export class SyncEngine extends EventEmitter {
       folderByPath: (key) => idx.getFolder(pairId, key),
       folders: () => idx.iterFolders(pairId),
     };
-  }
-
-  /**
-   * The base tree by remote id, straight from the index.
-   *
-   * `rt.state.files` is NOT this: loadPairState returns an empty map and every
-   * write goes through the index, so anything reading storedState.files sees
-   * nothing (fix round 1, F2).
-   */
-  private baseByIdFor(rt: PairRuntime): (remoteId: string) => SyncFileRecord | undefined {
-    const pairId = rt.pair.id;
-    const idx = this.index;
-    return (remoteId) => idx.getFileById(pairId, remoteId);
   }
 
   /** Update pair-level markers in both the working copy and the index. */
@@ -636,16 +644,19 @@ export class SyncEngine extends EventEmitter {
     this.backpressures.clear();
 
     // Phase 1: Signal all pairs to stop. In-flight workers check rt.status
-    // and this.stopped - both must be set before we do anything destructive.
+    // and this.stopped - both must be set before we do anything destructive,
+    // and (now that watcher.stop() awaits chokidar's close) BEFORE the await
+    // below too: that await yields the event loop, and anything that runs in
+    // that gap must already see "paused".
     for (const [, rt] of this.runtimes) {
+      rt.status = "paused";
+      rt.syncing = false;
       rt.watcher?.removeAllListeners();
-      rt.watcher?.stop();
+      await rt.watcher?.stop();
       rt.poller?.removeAllListeners();
       rt.poller?.stop();
       if (rt.rateLimitResumeTimer) clearTimeout(rt.rateLimitResumeTimer);
       if (rt.rescanTimer) { clearInterval(rt.rescanTimer); rt.rescanTimer = null; }
-      rt.status = "paused";
-      rt.syncing = false;
     }
 
     // Phase 2: Let the event loop tick so in-flight workers see the paused
@@ -655,11 +666,16 @@ export class SyncEngine extends EventEmitter {
     // No "persist state before quitting" phase any more: every mutation was
     // already written through to the index as it happened, so there is
     // nothing buffered to lose and nothing to race a shutdown timeout.
+    for (const rt of this.runtimes.values()) {
+      rt.releaseFolderAccess?.();
+      rt.releaseFolderAccess = null;
+    }
     this.runtimes.clear();
     this.activeTransfers.clear();
     this.conflicts = [];
     this.pendingSyncFlagIds = [];
     this.recentDownloads.clear();
+    this.opCounts.clear();
     try { this.emitStatus(); } catch {}
   }
 
@@ -762,7 +778,7 @@ export class SyncEngine extends EventEmitter {
    * signal.
    */
   private setOffline(rt: PairRuntime): void {
-    if (this.stopped || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
+    if (this.stopped || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.status === "needs-permission") return;
     if (rt.status === "offline") return; // already said so - don't churn the log
     rt.status = "offline";
     rt.errorMessage = OFFLINE_MESSAGE;
@@ -850,6 +866,17 @@ export class SyncEngine extends EventEmitter {
    * the moments when a parked pair is most likely to succeed.
    */
   notifyNetworkOnline(): void {
+    // The system/corporate proxy decision is cached per origin (DSK-012).
+    // This method's only two callers are powerMonitor's "resume" and the
+    // renderer's "online" DOM event forwarded over IPC - i.e. reconnect
+    // after an outage and wake-from-sleep. That does NOT cover every proxy-
+    // relevant network change (e.g. moving between an on-prem network and a
+    // VPN without ever dropping connectivity never fires either signal, and
+    // "online" additionally needs a live renderer window). Clearing here is
+    // a freebie for the cases this method already runs for, not a general
+    // network-change detector; anything else rides out the cache's own
+    // 60s TTL.
+    this.client.clearProxyCache();
     if (this.stopped) return;
     void this.checkRecovery();
   }
@@ -870,13 +897,29 @@ export class SyncEngine extends EventEmitter {
     void this.checkRecovery();
   }
 
+  /**
+   * Log and swallow a rejection from a fire-and-forget async call (the
+   * caller uses `.catch(err => this.logSwallowed(label, err))`, not
+   * `void`). `pauseForRateLimit` and `holdPendingDeletion` became async
+   * so they could await `watcher.stop()` closing chokidar's fds, and every
+   * one of their callers fires them as a floating promise - but a floating
+   * promise that REJECTS is an `unhandledRejection`, and
+   * src/engine/main.ts turns any of those into `process.exit(1)`. A close
+   * failure (most likely right after the EMFILE path, exactly where an fs
+   * call is most prone to fail) must end up here, not take the process
+   * down.
+   */
+  private logSwallowed(label: string, err: unknown): void {
+    console.error(`[sync] ${label} failed:`, (err as { message?: string })?.message ?? err);
+  }
+
   // ── Rate limit handling helpers ──────────────────────────────────
 
   /**
    * Pause a pair due to rate limiting and schedule automatic resume.
    * The pair's watcher and poller are stopped to prevent further requests.
    */
-  private pauseForRateLimit(rt: PairRuntime, retryAfterMs: number): void {
+  private async pauseForRateLimit(rt: PairRuntime, retryAfterMs: number): Promise<void> {
     // Clear any existing rate limit timer
     if (rt.rateLimitResumeTimer) {
       clearTimeout(rt.rateLimitResumeTimer);
@@ -886,7 +929,7 @@ export class SyncEngine extends EventEmitter {
     const resumeInSec = Math.ceil(retryAfterMs / 1000);
     rt.status = "rate-limited";
     rt.errorMessage = `Rate limit reached. Resuming in ${resumeInSec}s.`;
-    rt.watcher?.stop();
+    await rt.watcher?.stop();
     rt.poller?.stop();
     rt.syncing = false;
     this.emitStatus();
@@ -928,7 +971,7 @@ export class SyncEngine extends EventEmitter {
   }
 
   private setError(rt: PairRuntime, message: string): void {
-    if (this.stopped || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
+    if (this.stopped || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.status === "needs-permission") return;
     // A connectivity failure is not a fault of this pair's: it has its own
     // status, its own message, and a recovery loop that retries it.
     if (isNetworkErrorMessage(message)) {
@@ -1064,136 +1107,23 @@ export class SyncEngine extends EventEmitter {
 
   // ── Start / stop pairs ────────────────────────────────────────────
 
-  private async startPair(pair: SyncPair): Promise<void> {
-    // Sync must only run while logged in. The engine is only started with a
-    // session present, and every path that spins up watchers/pollers/scans
-    // funnels through here - so a stopped engine (logged out) never grows
-    // sync machinery, no matter which IPC call or timer fires.
-    if (!this.started) {
-      console.log("[sync] startPair skipped - engine not started:", pair.id);
-      return;
-    }
-    if (this.runtimes.has(pair.id)) return;
-    console.log("[sync] startPair:", pair.id, "mode:", pair.syncMode, "path:", pair.localPath);
-
-    // Clean up orphaned .dosya-sync-tmp files from crashed downloads
-    try {
-      await this.cleanupTempFiles(pair.localPath, pair.excludedPatterns);
-    } catch {}
-
-    try {
-      await access(pair.localPath);
-    } catch {
-      const rt: PairRuntime = {
-        pair,
-        state: await loadPairState(pair.id),
-        watcher: null,
-        poller: null,
-        status: "error",
-        errorMessage: `Sync folder not found: ${pair.localPath}`,
-        syncing: false,
-        queuedSync: false,
-        queuedEvents: new Map(),
-        queuedOverflow: false,
-        rateLimitResumeTimer: null,
-      rescanTimer: null,
-      notices: new Map(),
-      pendingDeletion: null,
-        totalFilesInBatch: 0,
-        completedFilesInBatch: 0,
-        totalBytesInBatch: 0,
-        completedBytesInBatch: 0,
-        batchStartedAt: 0,
-        phase: null,
-        scannedFiles: 0,
-        scannedFolders: 0,
-        statusText: "",
-        localDirty: true,
-        lastFullLocalScanAt: 0,
-        syncStartedAt: 0,
-        lastProgressAt: 0,
-        lastProgressLogAt: 0,
-      };
-      this.runtimes.set(pair.id, rt);
-      this.emitStatus();
-      return;
-    }
-
-    // Fetch the workspace's actual default region
-    try {
-      const wsRegion = await this.client.getWorkspaceRegion(pair.workspaceId);
-      if (wsRegion && wsRegion !== pair.region) {
-        pair.region = wsRegion;
-        if (this.config) {
-          const idx = this.config.pairs.findIndex(p => p.id === pair.id);
-          if (idx !== -1) {
-            this.config.pairs[idx].region = wsRegion;
-            await saveConfig(this.config);
-          }
-        }
-      }
-    } catch (err: any) {
-      console.error("[sync] Failed to fetch workspace region:", err.message);
-    }
-
-    const state = await loadPairState(pair.id);
-
-    // Create a root folder on the server matching the local folder name
-    if (!pair.remoteFolderId && !state.rootFolderCreated) {
-      try {
-        const folderName = basename(pair.localPath);
-        const folderId = await this.client.createFolder(
-          pair.workspaceId,
-          folderName,
-          null,
-        );
-        pair.remoteFolderId = folderId;
-        // No runtime exists yet at this point in startPair, so this writes
-        // through to the index directly rather than via putPairMeta.
-        state.rootFolderCreated = true;
-        this.index.setPairMeta(pair.id, { rootFolderCreated: true });
-        console.log(`[sync] Created root folder on server: "${folderName}" → ${folderId}`);
-
-        try {
-          await this.client.setFolderSyncFlag(folderId, true);
-        } catch (e: any) {
-          console.error("[sync] Failed to set sync flag:", e.message);
-        }
-
-        if (this.config) {
-          const idx = this.config.pairs.findIndex(p => p.id === pair.id);
-          if (idx !== -1) {
-            this.config.pairs[idx].remoteFolderId = folderId;
-            await saveConfig(this.config);
-          }
-        }
-      } catch (err: any) {
-        console.error("[sync] Failed to create root folder:", err.message);
-      }
-    }
-
-    const mode = pair.syncMode || "push-safe";
-    const needsLocalWatch = ["two-way", "push", "push-safe"].includes(mode);
-    const needsRemotePoll = ["two-way", "pull", "pull-safe"].includes(mode);
-
-    let watcher: LocalWatcher | null = null;
-    let poller: RemotePoller | null = null;
-
-    if (needsLocalWatch) {
-      // Adaptive debounce: large trees get longer debounce to reduce CPU churn
-      const trackedFiles = this.index.countFiles(pair.id);
-      const debounceMs = trackedFiles > 5000 ? 2000 : 1000;
-      const maxWaitMs = trackedFiles > 5000 ? 8000 : 5000;
-      watcher = new LocalWatcher(pair.localPath, debounceMs, maxWaitMs, pair.excludedPatterns);
-    }
-    if (needsRemotePoll) {
-      poller = new RemotePoller(this.client, pair);
-    }
-
-    const rt: PairRuntime = {
-      pair, state, watcher, poller,
-      status: "idle",
-      errorMessage: null,
+  /**
+   * The all-defaults PairRuntime shared by startPair's early-exit branches
+   * (no sandbox grant, folder not found): no watcher, no poller, nothing in
+   * flight. Deliberately neutral on status/errorMessage - every call site
+   * states its own, so a park reason can never be mistaken for the one
+   * generic one happened to be baked into the factory. Call sites spread the
+   * result and override releaseFolderAccess once a grant was actually taken.
+   */
+  private baseRuntime(pair: SyncPair, state: SyncPairState, status: SyncPairStatus, errorMessage: string | null): PairRuntime {
+    return {
+      pair,
+      state,
+      watcher: null,
+      poller: null,
+      releaseFolderAccess: null,
+      status,
+      errorMessage,
       syncing: false,
       queuedSync: false,
       queuedEvents: new Map(),
@@ -1217,8 +1147,182 @@ export class SyncEngine extends EventEmitter {
       lastProgressAt: 0,
       lastProgressLogAt: 0,
     };
+  }
 
-    this.runtimes.set(pair.id, rt);
+  private async startPair(pair: SyncPair): Promise<void> {
+    // Sync must only run while logged in. The engine is only started with a
+    // session present, and every path that spins up watchers/pollers/scans
+    // funnels through here - so a stopped engine (logged out) never grows
+    // sync machinery, no matter which IPC call or timer fires.
+    if (!this.started) {
+      console.log("[sync] startPair skipped - engine not started:", pair.id);
+      return;
+    }
+    if (this.runtimes.has(pair.id)) return;
+    console.log("[sync] startPair:", pair.id, "mode:", pair.syncMode, "path:", pair.localPath);
+
+    // Hoisted so the catch below can release a grant taken earlier in the
+    // try, and so the mode-wiring tail after the try can still see what the
+    // try built. `grant` defaults to an always-ok no-op release so a release
+    // call before it is ever reassigned (should the sandbox call itself
+    // throw) is a no-op rather than a crash.
+    let grant: AccessHandle = { ok: true, release: () => {} };
+    let state!: SyncPairState;
+    let mode!: SyncMode;
+    let needsLocalWatch = false;
+    let watcher: LocalWatcher | null = null;
+    let poller: RemotePoller | null = null;
+    let rt!: PairRuntime;
+
+    try {
+      // Take the sandbox grant BEFORE touching the folder. Outside a Mac App
+      // Store build this always succeeds with a no-op release. Inside one,
+      // the filesystem calls just below would otherwise fail and be
+      // misreported as "sync folder not found" when the real cause is a
+      // missing grant.
+      grant = this.env.folderAccess
+        ? this.env.folderAccess(pair.bookmark, pair.localPath)
+        : { ok: true as const, release: () => {} };
+      if (!grant.ok) {
+        console.log("[sync] startPair denied - no macOS grant for", pair.localPath, `(${grant.reason})`);
+        const deniedRt: PairRuntime = this.baseRuntime(
+          pair,
+          await loadPairState(pair.id),
+          "needs-permission",
+          "macOS needs permission to this folder again. Reselect it to restore sync.",
+        );
+        this.runtimes.set(pair.id, deniedRt);
+        this.emitStatus();
+        return;
+      }
+
+      // Clean up orphaned .dosya-sync-tmp files from crashed downloads
+      try {
+        await this.cleanupTempFiles(pair.localPath, pair.excludedPatterns);
+      } catch {}
+
+      try {
+        await access(pair.localPath);
+      } catch {
+        const notFoundRt: PairRuntime = {
+          ...this.baseRuntime(pair, await loadPairState(pair.id), "error", `Sync folder not found: ${pair.localPath}`),
+          releaseFolderAccess: grant.release,
+        };
+        this.runtimes.set(pair.id, notFoundRt);
+        this.emitStatus();
+        return;
+      }
+
+      // Fetch the workspace's actual default region
+      try {
+        const wsRegion = await this.client.getWorkspaceRegion(pair.workspaceId);
+        if (wsRegion && wsRegion !== pair.region) {
+          pair.region = wsRegion;
+          if (this.config) {
+            const idx = this.config.pairs.findIndex(p => p.id === pair.id);
+            if (idx !== -1) {
+              this.config.pairs[idx].region = wsRegion;
+              await saveConfig(this.config);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.error("[sync] Failed to fetch workspace region:", err.message);
+      }
+
+      state = await loadPairState(pair.id);
+
+      // Create a root folder on the server matching the local folder name
+      if (!pair.remoteFolderId && !state.rootFolderCreated) {
+        try {
+          const folderName = basename(pair.localPath);
+          const folderId = await this.client.createFolder(
+            pair.workspaceId,
+            folderName,
+            null,
+          );
+          pair.remoteFolderId = folderId;
+          // No runtime exists yet at this point in startPair, so this writes
+          // through to the index directly rather than via putPairMeta.
+          state.rootFolderCreated = true;
+          this.index.setPairMeta(pair.id, { rootFolderCreated: true });
+          console.log(`[sync] Created root folder on server: "${folderName}" → ${folderId}`);
+
+          try {
+            await this.client.setFolderSyncFlag(folderId, true);
+          } catch (e: any) {
+            console.error("[sync] Failed to set sync flag:", e.message);
+          }
+
+          if (this.config) {
+            const idx = this.config.pairs.findIndex(p => p.id === pair.id);
+            if (idx !== -1) {
+              this.config.pairs[idx].remoteFolderId = folderId;
+              await saveConfig(this.config);
+            }
+          }
+        } catch (err: any) {
+          console.error("[sync] Failed to create root folder:", err.message);
+        }
+      }
+
+      mode = pair.syncMode || "push-safe";
+      needsLocalWatch = ["two-way", "push", "push-safe"].includes(mode);
+      const needsRemotePoll = ["two-way", "pull", "pull-safe"].includes(mode);
+
+      if (needsLocalWatch) {
+        // Adaptive debounce: large trees get longer debounce to reduce CPU churn
+        const trackedFiles = this.index.countFiles(pair.id);
+        const debounceMs = trackedFiles > 5000 ? 2000 : 1000;
+        const maxWaitMs = trackedFiles > 5000 ? 8000 : 5000;
+        watcher = new LocalWatcher(pair.localPath, debounceMs, maxWaitMs, pair.excludedPatterns);
+      }
+      if (needsRemotePoll) {
+        poller = new RemotePoller(this.client, pair);
+      }
+
+      rt = {
+        pair, state, watcher, poller,
+        releaseFolderAccess: grant.release,
+        status: "idle",
+        errorMessage: null,
+        syncing: false,
+        queuedSync: false,
+        queuedEvents: new Map(),
+        queuedOverflow: false,
+        rateLimitResumeTimer: null,
+        rescanTimer: null,
+        notices: new Map(),
+        pendingDeletion: null,
+        totalFilesInBatch: 0,
+        completedFilesInBatch: 0,
+        totalBytesInBatch: 0,
+        completedBytesInBatch: 0,
+        batchStartedAt: 0,
+        phase: null,
+        scannedFiles: 0,
+        scannedFolders: 0,
+        statusText: "",
+        localDirty: true,
+        lastFullLocalScanAt: 0,
+        syncStartedAt: 0,
+        lastProgressAt: 0,
+        lastProgressLogAt: 0,
+      };
+
+      this.runtimes.set(pair.id, rt);
+    } catch (err) {
+      // Nothing between taking the grant and storing the runtime may leak
+      // it: loadPairState, countFiles and `new LocalWatcher` can all throw,
+      // and with no runtime stored yet, nothing else would ever call
+      // release() for this attempt. The two branches above that already
+      // stored a runtime returned before reaching here, so this only
+      // fires for a genuine failure. `grant` may still be the pre-try
+      // no-op default (a throw before the sandbox call ran) or a denied
+      // grant with nothing to release - only the ok branch has one.
+      if (grant.ok) grant.release();
+      throw err;
+    }
 
     if (mode === "two-way") {
       // ── Two-way mode ──
@@ -1236,7 +1340,7 @@ export class SyncEngine extends EventEmitter {
           } else if (err instanceof MaintenanceError) {
             this.setMaintenance(rt, err.message);
           } else if (isRateLimitError(err)) {
-            this.pauseForRateLimit(rt, getRetryAfterMs(err));
+            this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
           } else if (isOfflineError(err)) {
             // The poller backs off quietly on its own; without this the pair
             // stayed "idle" and the tray kept saying everything was synced.
@@ -1305,7 +1409,7 @@ export class SyncEngine extends EventEmitter {
           } else if (err instanceof MaintenanceError) {
             this.setMaintenance(rt, err.message);
           } else if (isRateLimitError(err)) {
-            this.pauseForRateLimit(rt, getRetryAfterMs(err));
+            this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
           } else if (isOfflineError(err)) {
             this.setOffline(rt);
           } else {
@@ -1334,7 +1438,7 @@ export class SyncEngine extends EventEmitter {
     rt.rescanTimer = setInterval(() => {
       const cur = this.runtimes.get(pairId);
       if (!cur || this.stopped) return;
-      if (cur.status === "paused" || cur.status === "rate-limited" || cur.status === "needs-confirmation" || cur.syncing) return;
+      if (cur.status === "paused" || cur.status === "rate-limited" || cur.status === "needs-confirmation" || cur.status === "needs-permission" || cur.syncing) return;
       this.runInitialScan(pairId);
     }, DEGRADED_RESCAN_MS);
   }
@@ -1350,7 +1454,7 @@ export class SyncEngine extends EventEmitter {
     rt.status = "paused";
     rt.syncing = false;
     rt.watcher?.removeAllListeners();
-    rt.watcher?.stop();
+    await rt.watcher?.stop();
     rt.poller?.removeAllListeners();
     rt.poller?.stop();
     if (rt.rateLimitResumeTimer) {
@@ -1359,14 +1463,18 @@ export class SyncEngine extends EventEmitter {
     }
     // Let workers see the paused status and bail out
     await new Promise<void>(r => setTimeout(r, 100));
+    rt.releaseFolderAccess?.();
+    rt.releaseFolderAccess = null;
     this.runtimes.delete(pairId);
+    this.opCounts.drop(pairId);
   }
 
   // ── Reconcile (two-way mode) ──────────────────────────────────────
 
   private async runReconcile(pairId: string, snapshot: RemoteSnapshot): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.syncing) return;
+    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.status === "needs-permission") return;
+    if (rt.syncing) { rt.queuedSync = true; return; }
 
     rt.syncing = true;
     rt.status = "syncing";
@@ -1388,19 +1496,20 @@ export class SyncEngine extends EventEmitter {
       if (needsFullScan) {
         rt.statusText = "Scanning for changes...";
         this.emitStatus();
-        actions = await reconcile(rt.pair, rt.state, snapshot, this.baseByIdFor(rt), (files, folders) => {
+        actions = await reconcile(rt.pair, snapshot, this.baseViewFor(rt), (files, folders) => {
           rt.scannedFiles = files;
           rt.scannedFolders = folders;
           this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
           this.emitStatus();
         }, (skipped) => this.reportSkippedTooLarge(rt, skipped), (files) => this.recordUnknownParents(rt, files),
-           (count, reason) => this.reportSuppressedDeletions(rt, count, reason));
+           (count, reason) => this.reportSuppressedDeletions(rt, count, reason),
+           (ids) => ids.forEach(id => this.dropFile(rt, id)));
         rt.localDirty = false;
         rt.lastFullLocalScanAt = Date.now();
       } else {
         // Remote-only diff: only check for new/changed/deleted remote files
         // against stored state. No local filesystem walk.
-        actions = await reconcileRemoteOnly(rt.pair, rt.state, snapshot, this.baseByIdFor(rt),
+        actions = await reconcileRemoteOnly(rt.pair, snapshot, this.baseViewFor(rt),
           (files) => this.recordUnknownParents(rt, files),
           (count, reason) => this.reportSuppressedDeletions(rt, count, reason));
       }
@@ -1418,7 +1527,7 @@ export class SyncEngine extends EventEmitter {
       if (err.message === "SESSION_EXPIRED") {
         this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
-        this.pauseForRateLimit(rt, getRetryAfterMs(err));
+        this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
         return; // pauseForRateLimit sets syncing = false
       } else {
         this.setError(rt, err.message);
@@ -1426,7 +1535,15 @@ export class SyncEngine extends EventEmitter {
     } finally {
       rt.syncing = false;
       this.emitStatus();
+      this.requestQueuedReconcile(rt);
     }
+  }
+
+  private requestQueuedReconcile(rt: PairRuntime): void {
+    if (!rt.queuedSync || rt.pair.syncMode !== "two-way" || this.stopped || rt.status !== "idle") return;
+    rt.queuedSync = false;
+    rt.localDirty = true;
+    rt.poller?.triggerNow();
   }
 
   private async executeActions(rt: PairRuntime, actions: SyncAction[]): Promise<void> {
@@ -1688,6 +1805,7 @@ export class SyncEngine extends EventEmitter {
               action.record.localPath = newRelPath;
               action.record.remoteName = action.remoteFile.name;
               action.record.remoteFolderId = action.remoteFile.folder_id;
+              this.putFile(rt, action.record);
               this.markRecentDownload(newPath);
               this.dropError(rt, newRelPath);
             } catch (error) {
@@ -1771,6 +1889,19 @@ export class SyncEngine extends EventEmitter {
 
     if ((rt.pair.conflictStrategy || "keep-both") === "keep-both") {
       const original = basename(conflict.localPath);
+      const autoKey = `${conflict.pairId}\0${conflict.localPath}`;
+      const now = Date.now();
+      if (!mayAutoKeepBoth({ fileName: original, lastAutoAt: this.autoKeptBothAt.get(autoKey), now })) {
+        // Looping, not converging: leave the card in Issues for the user.
+        this.addNotice(rt, "conflict-copy",
+          `Some files keep coming back as conflicts, so automatic conflict copies are paused for them. Resolve them in Issues.`);
+        this.log(rt.pair.id, `Left "${original}" for you to resolve - it was already a conflict copy or was just kept-both`);
+        return;
+      }
+      for (const [key, at] of this.autoKeptBothAt) {
+        if (now - at >= AUTO_KEEP_BOTH_COOLDOWN_MS) this.autoKeptBothAt.delete(key);
+      }
+      this.autoKeptBothAt.set(autoKey, now);
       try {
         await this.resolveConflict(conflict.id, "keep-both");
         this.addNotice(rt, "conflict-copy",
@@ -1790,7 +1921,7 @@ export class SyncEngine extends EventEmitter {
     const rt = this.runtimes.get(pairId);
     // Also bail while stopped or paused: a trigger racing a logout/pause
     // must not flip the pair back to "syncing" mid-teardown.
-    if (!rt || this.stopped || rt.syncing || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
+    if (!rt || this.stopped || rt.syncing || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.status === "needs-permission") return;
     console.log("[sync] runInitialScan:", pairId);
 
     // Check if the server still has sync enabled for this folder
@@ -1802,7 +1933,7 @@ export class SyncEngine extends EventEmitter {
         if (!isStillSynced) {
           console.log("[sync] Sync disabled from web for pair:", pairId);
           this.setError(rt, "Sync was disabled from the web. Remove and re-add to resume.");
-          rt.watcher?.stop();
+          await rt.watcher?.stop();
           rt.poller?.stop();
           this.emitStatus();
           return;
@@ -1814,7 +1945,7 @@ export class SyncEngine extends EventEmitter {
           return;
         }
         if (isRateLimitError(err)) {
-          this.pauseForRateLimit(rt, getRetryAfterMs(err));
+          this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
           return;
         }
       }
@@ -1878,7 +2009,7 @@ export class SyncEngine extends EventEmitter {
       if (err.message === "SESSION_EXPIRED") {
         this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
-        this.pauseForRateLimit(rt, getRetryAfterMs(err));
+        this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
         return; // pauseForRateLimit sets syncing = false
       } else {
         this.setError(rt, err.message);
@@ -1900,6 +2031,7 @@ export class SyncEngine extends EventEmitter {
       }
       rt.syncing = false;
       this.emitStatus();
+      this.requestQueuedReconcile(rt);
     }
   }
 
@@ -3026,7 +3158,7 @@ export class SyncEngine extends EventEmitter {
 
   private async handleLocalChanges(pairId: string, events: WatchEvent[]): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation") return;
+    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.status === "needs-permission") return;
 
     if (rt.syncing) {
       // Buffer events (deduped by path) to process AFTER the current sync so
@@ -3213,7 +3345,7 @@ export class SyncEngine extends EventEmitter {
               // too, so a partial replay would be a half-truth. Both decision
               // paths end in a full rescan instead, which re-derives every
               // add, edit and rename from the disk - see resumeAfterDecision.
-              this.holdPendingDeletion(rt, held);
+              this.holdPendingDeletion(rt, held).catch((e) => this.logSwallowed("holdPendingDeletion", e));
               return;
             }
           }
@@ -3351,7 +3483,7 @@ export class SyncEngine extends EventEmitter {
       if (err.message === "SESSION_EXPIRED") {
         this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
-        this.pauseForRateLimit(rt, getRetryAfterMs(err));
+        this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
         return;
       } else {
         this.setError(rt, err.message);
@@ -3366,7 +3498,8 @@ export class SyncEngine extends EventEmitter {
         && (rt.status as SyncPairStatus) !== "paused"
         && (rt.status as SyncPairStatus) !== "rate-limited"
         && (rt.status as SyncPairStatus) !== "error"
-        && (rt.status as SyncPairStatus) !== "needs-confirmation";
+        && (rt.status as SyncPairStatus) !== "needs-confirmation"
+        && (rt.status as SyncPairStatus) !== "needs-permission";
       if (rt.queuedSync && canRescan) {
         rt.queuedSync = false;
         if (rt.queuedOverflow || rt.queuedEvents.size === 0) {
@@ -3388,7 +3521,7 @@ export class SyncEngine extends EventEmitter {
 
   private async handleRemoteChanges(pairId: string, snapshot: RemoteSnapshot): Promise<void> {
     const rt = this.runtimes.get(pairId);
-    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.syncing) return;
+    if (!rt || rt.status === "paused" || rt.status === "rate-limited" || rt.status === "needs-confirmation" || rt.status === "needs-permission" || rt.syncing) return;
 
     const mode = rt.pair.syncMode || "push-safe";
     if (!["pull", "pull-safe"].includes(mode)) return;
@@ -3496,7 +3629,7 @@ export class SyncEngine extends EventEmitter {
       if (err.message === "SESSION_EXPIRED") {
         this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
-        this.pauseForRateLimit(rt, getRetryAfterMs(err));
+        this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
         return;
       } else {
         this.setError(rt, err.message);
@@ -3904,7 +4037,11 @@ export class SyncEngine extends EventEmitter {
       try {
         fileErrorCount = this.index.countErrors(rt.pair.id);
         if (fileErrorCount > 0) fileErrors = toFileErrorStatus(this.index.listErrors(rt.pair.id, FILE_ERROR_LIST_CAP));
-        if (rt.syncing) queuedOps = this.index.countOpsByState(rt.pair.id, "pending") + this.index.countOpsByState(rt.pair.id, "running");
+        if (rt.syncing) {
+          queuedOps = this.opCounts.get(rt.pair.id, () =>
+            this.index.countOpsByState(rt.pair.id, "pending") +
+            this.index.countOpsByState(rt.pair.id, "running"));
+        }
       } catch (err: any) {
         // A status read must never throw - the tray builds its menu from it.
         console.error("[sync] status: could not read the error ledger:", err?.message ?? err);
@@ -3947,7 +4084,8 @@ export class SyncEngine extends EventEmitter {
       pairs: mergeStatusPairs(pairs, this.config?.pairs ?? [], this.config?.pausedGlobally ?? false),
       globalPaused: this.config?.pausedGlobally ?? false,
       activeTransfers: [...this.activeTransfers],
-      unresolvedConflicts: this.conflicts,
+      unresolvedConflictCount: this.conflicts.length,
+      conflictCountByPair: countConflictsByPair(this.conflicts),
       recentLogs: this.logs.slice(-50),
       maintenance: this.maintenance,
     });
@@ -3971,14 +4109,14 @@ export class SyncEngine extends EventEmitter {
    * watcher is stopped so nothing else acts on the vanished tree; the pair
    * reports "needs-confirmation" with the count, and the Sync page asks.
    */
-  private holdPendingDeletion(rt: PairRuntime, held: { files: { remoteId: string; localPath: string }[]; folders: string[] }): void {
+  private async holdPendingDeletion(rt: PairRuntime, held: { files: { remoteId: string; localPath: string }[]; folders: string[] }): Promise<void> {
     // Exactly one hold can be open at a time: the watcher is stopped below and
     // handleLocalChanges returns early while the pair is needs-confirmation,
     // so no second batch can arrive to merge with this one.
     rt.pendingDeletion = { files: held.files, folders: held.folders, heldAt: Date.now() };
     rt.status = "needs-confirmation";
     rt.errorMessage = null;
-    rt.watcher?.stop();
+    await rt.watcher?.stop();
     const n = rt.pendingDeletion.files.length;
     this.log(rt.pair.id, `Paused: ${n.toLocaleString()} file${n === 1 ? "" : "s"} disappeared locally. Waiting for you to decide whether to delete them from the cloud too.`);
     console.warn(`[sync] Holding ${n} local deletion(s) for pair ${rt.pair.id} - over the mass-deletion threshold`);
@@ -4082,6 +4220,10 @@ export class SyncEngine extends EventEmitter {
    */
   async retryFileErrors(pairId: string): Promise<void> {
     const reset = this.index.resetErrorsForRetry(pairId);
+    // Fixing access/connectivity need not produce a watcher event. The fast
+    // remote-only path cannot rediscover an untracked failed local upload.
+    const rt = this.runtimes.get(pairId);
+    if (rt) rt.localDirty = true;
     if (reset > 0) this.log(pairId, `Retrying ${reset.toLocaleString()} file${reset === 1 ? "" : "s"} that failed to sync`);
     this.emitStatus();
     this.syncNow(pairId);
@@ -4211,14 +4353,24 @@ export class SyncEngine extends EventEmitter {
   async pausePair(pairId: string): Promise<void> {
     const rt = this.runtimes.get(pairId);
     if (rt) {
-      rt.watcher?.stop();
+      // A denied sandbox grant is not a pause - there is no watcher/poller
+      // to stop, and overwriting the status to "paused" here would be the
+      // one thing that lets a later resumePair() mistake it for an ordinary
+      // pause and flip it to "idle" (see the comment in resumePair). Leave
+      // it exactly as is; only a reselect may leave this state.
+      if (rt.status === "needs-permission") return;
+      // Set paused FIRST - in-flight workers check this and bail out. This
+      // must happen before the `await` below: awaiting the watcher's close
+      // yields the event loop, and anything that read rt.status in that
+      // window needs to already see "paused", not whatever ran before this
+      // call.
+      rt.status = "paused";
+      await rt.watcher?.stop();
       rt.poller?.stop();
       if (rt.rateLimitResumeTimer) {
         clearTimeout(rt.rateLimitResumeTimer);
         rt.rateLimitResumeTimer = null;
       }
-      // Set paused FIRST - in-flight workers check this and bail out.
-      rt.status = "paused";
       // A scanner parked on the queue must not stay parked through a pause.
       this.backpressures.get(pairId)?.release();
       rt.errorMessage = null;
@@ -4244,6 +4396,16 @@ export class SyncEngine extends EventEmitter {
       if (rt.rateLimitResumeTimer) {
         clearTimeout(rt.rateLimitResumeTimer);
         rt.rateLimitResumeTimer = null;
+      }
+      // A denied sandbox grant outlives a pause (and a sleep/wake cycle,
+      // which drives this via resumeAllTransient): resuming must not flip
+      // it back to "idle" and scan a folder with no grant - there is no
+      // watcher/poller to start anyway. Only a reselect (updatePair with a
+      // fresh bookmark, which stops and restarts the pair) may leave this
+      // state.
+      if (rt.status === "needs-permission") {
+        this.emitStatus();
+        return;
       }
       // A held deletion outlives a pause: resuming re-asks rather than
       // silently applying or silently forgetting it.
@@ -4433,11 +4595,45 @@ export class SyncEngine extends EventEmitter {
       // Re-add conflict if resolution failed so user can retry
       this.conflicts.push(conflict);
       this.emitStatus();
+      throw err;
     }
   }
 
   getConflicts(): SyncConflict[] {
     return [...this.conflicts];
+  }
+
+  /** One page of conflicts for the Issues tab; see SyncStatus.unresolvedConflictCount. */
+  async listConflicts(query: ConflictPageQuery): Promise<ConflictPage> {
+    return pageConflicts(this.conflicts, query);
+  }
+
+  /**
+   * Resolve every conflict in these pairs the same way. Returns at once with
+   * how many were taken on: a few thousand keep-local uploads would outlive
+   * any RPC timeout, and the Issues count already shows the list draining.
+   * Works on a snapshot of ids, so a resolution that fails (and is re-queued
+   * by resolveConflict) is not retried in a loop.
+   */
+  async resolveConflicts(pairIds: string[], resolution: ConflictResolution): Promise<{ queued: number }> {
+    if (this.bulkResolving) return { queued: 0 };
+    const wanted = new Set(pairIds);
+    const ids = this.conflicts.filter((c) => wanted.has(c.pairId)).map((c) => c.id);
+    if (ids.length === 0) return { queued: 0 };
+    this.bulkResolving = true;
+    void (async () => {
+      let failed = 0;
+      try {
+        for (const id of ids) {
+          if (this.stopped) break;
+          await this.resolveConflict(id, resolution).catch(() => { failed++; });
+        }
+      } finally {
+        this.bulkResolving = false;
+        if (failed > 0) console.warn(`[sync] Bulk ${resolution}: ${failed} of ${ids.length} conflict(s) could not be resolved`);
+      }
+    })();
+    return { queued: ids.length };
   }
 
   isRunning(): boolean {
@@ -4591,14 +4787,15 @@ export class SyncEngine extends EventEmitter {
       this.emitStatus();
       this.clearUnknownParentErrors(rt);
       rt.notices.delete("deletions-held");
-      const actions = await reconcile(rt.pair, rt.state, snapshot, this.baseByIdFor(rt), (files, folders) => {
+      const actions = await reconcile(rt.pair, snapshot, this.baseViewFor(rt), (files, folders) => {
         rt.scannedFiles = files;
         rt.scannedFolders = folders;
         rt.statusText = `Scanning local files... ${files.toLocaleString()} files, ${folders.toLocaleString()} folders`;
         this.markProgress(rt, `Scanned ${files.toLocaleString()} local files, ${folders.toLocaleString()} folders...`);
         this.emitStatus();
       }, (skipped) => this.reportSkippedTooLarge(rt, skipped), (files) => this.recordUnknownParents(rt, files),
-         (count, reason) => this.reportSuppressedDeletions(rt, count, reason));
+         (count, reason) => this.reportSuppressedDeletions(rt, count, reason),
+         (ids) => ids.forEach(id => this.dropFile(rt, id)));
 
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
@@ -4624,7 +4821,7 @@ export class SyncEngine extends EventEmitter {
       if (err.message === "SESSION_EXPIRED") {
         this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {
-        this.pauseForRateLimit(rt, getRetryAfterMs(err));
+        this.pauseForRateLimit(rt, getRetryAfterMs(err)).catch((e) => this.logSwallowed("pauseForRateLimit", e));
         return;
       } else {
         this.setError(rt, err.message);
@@ -4643,6 +4840,7 @@ export class SyncEngine extends EventEmitter {
       }
       rt.syncing = false;
       this.emitStatus();
+      this.requestQueuedReconcile(rt);
     }
   }
 

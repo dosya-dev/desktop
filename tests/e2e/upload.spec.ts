@@ -5,7 +5,7 @@ test.describe("Upload Page", () => {
     await navigateTo(appPage, "/upload");
 
     await expect(
-      appPage.getByText(/drop files here/i),
+      appPage.getByText(/drop files or folders here/i),
     ).toBeVisible();
   });
 

@@ -50,6 +50,17 @@ publish: []
 # puts it in Contents/PlugIns, signed, BEFORE electron-builder signs the app
 # around it: the app's signature seals whatever is nested inside it.
 afterPack: scripts/afterPack.mjs
+# Runs once at the end of the build. When a .pkg was produced it proves the
+# signed store bundle is what App Store Connect will accept (sandbox
+# entitlement on app and extension, store identifiers, matching bundle
+# versions, embedded profiles) and fails the build naming each miss. A no-op
+# for every other target.
+#
+# NOT afterSign, which cannot work here: app-builder-lib packs the mas targets
+# with `{ sign: false }` and signs them through signMas() (macPackager.js
+# packMasTargets), a path that never emits afterSign - so an afterSign hook
+# fires only for the dmg/zip target, where there is no store bundle to check.
+afterAllArtifactBuild: scripts/afterAllArtifactBuild.mjs
 
 mac:
   target:
@@ -92,6 +103,13 @@ mac:
   # Supplied per machine and by CI from a secret; never committed, because this
   # app is published to a public mirror.
   provisioningProfile: build/embedded.provisionprofile
+  # Written into Info.plist for every macOS build. Only the Mac App Store reads
+  # it: with the key absent App Store Connect holds each upload at "Missing
+  # Compliance" until the encryption question is answered by hand; `false`
+  # (the app uses only HTTPS, which is exempt) answers it up front. Must be in
+  # THIS block: electron-builder ignores extendInfo under `mas`.
+  extendInfo:
+    ITSAppUsesNonExemptEncryption: false
 
 # dmg-background.tiff carries both @1x (540x380) and @2x (1080x760) reps,
 # combined with `tiffutil -cathidpicheck`. dmg-builder sizes the Finder
@@ -112,6 +130,82 @@ dmg:
       y: 220
       type: link
       path: /Applications
+
+# ── Mac App Store ───────────────────────────────────────────────────
+# Sandboxed sibling of the `mac` target, built from the same bundles. The
+# options here are merged OVER the mac block for the mas and mas-dev targets
+# (app-builder-lib macPackager.js), so `identity` and `icon` are inherited and
+# only what differs is listed.
+#
+# appId: dev.dosya.desktop was uploaded to App Store Connect once in July 2026
+# and that record was deleted, which spends the identifier for the store
+# forever. The DMG keeps dev.dosya.desktop; the store build is dev.dosya.mac,
+# App Store Connect app 6818700723. scripts/afterPack.mjs stamps the matching
+# dev.dosya.mac.fileprovider into the extension for this target.
+#
+# hardenedRuntime is OFF on purpose: it is a Developer ID concept, and the App
+# Sandbox in build/entitlements.mas.plist replaces it. That file carries no XML
+# comments (AMFI rejects them), so what each entitlement is for lives here:
+#   app-sandbox                       required by the store
+#   network.client                    API calls
+#   network.server                    LAN Transfer. The two peers establish a
+#                                     direct WebRTC connection with NO relay
+#                                     (iceServers is empty), so each side must
+#                                     accept an inbound connection from the
+#                                     other and receive mDNS responses while
+#                                     resolving local candidates; client alone
+#                                     is not enough. App Review questioned this
+#                                     on 2026-10-04 because the app opens no
+#                                     listening socket of its own - the inbound
+#                                     socket belongs to Chromium's WebRTC stack
+#                                     - and was answered with a written
+#                                     justification in Resolution Center and in
+#                                     App Review Information.
+#                                     Removing it does not just drop an unused
+#                                     permission: it kills LAN Transfer, so the
+#                                     title-bar entry point would have to go too.
+#   files.user-selected.read-write    sync folders and save dialogs
+#   files.bookmarks.app-scope         security-scoped bookmarks that keep a
+#                                     sync folder reachable after a relaunch
+#                                     (src/main/sync/bookmarks.ts)
+#   cs.allow-jit                      V8
+#   keychain-access-groups            the session the Finder extension reads,
+#                                     same group as the Developer ID build
+#   application-groups                the File Provider document group, same
+#                                     as the extension's
+# The inherit file for helpers has ONLY app-sandbox + inherit: a restricted
+# entitlement on a helper is unauthorized by the app's profile and every
+# child is killed at launch (see entitlementsInherit on the mac block).
+#
+# The provisioning profiles are written by CI from secrets, never committed.
+mas:
+  appId: dev.dosya.mac
+  target:
+    - target: pkg
+      arch:
+        - universal
+  category: public.app-category.productivity
+  hardenedRuntime: false
+  entitlements: build/entitlements.mas.plist
+  entitlementsInherit: build/entitlements.mas.inherit.plist
+  provisioningProfile: build/mas.provisionprofile
+  # extendInfo does NOT belong here: electron-builder reads it from the mac
+  # block only (app-builder-lib macPackager.js, platformSpecificBuildOptions),
+  # so a key placed under mas never reaches Info.plist. The export-compliance
+  # key lives in the mac block above for that reason.
+# `electron-builder --mac mas-dev`: the same bundle signed for local runs with
+# a development profile for dev.dosya.mac (a store-signed .pkg cannot be
+# launched outside the store). The target name on the CLI is `mas-dev` with a
+# hyphen; `masDev` is only this config key.
+#
+# TWO development profiles are needed, both "Mac App Development" type and
+# neither committed: build/mas-dev.provisionprofile for the app (below) and
+# build/fileprovider.mas-dev.provisionprofile for the File Provider extension
+# (scripts/afterPack.mjs EXTENSION_PROFILE_DEV). The extension is a separately
+# signed bundle with its own App ID, so the app's profile does not cover it,
+# and the store's distribution profile is refused at launch here.
+masDev:
+  provisioningProfile: build/mas-dev.provisionprofile
 
 # ── Windows ─────────────────────────────────────────────────────────
 win:

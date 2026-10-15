@@ -180,13 +180,25 @@ describe("remote-derived sync paths", () => {
       engine.conflicts.push(conflict("shared/proof.txt"));
       const upload = vi.fn(async () => {});
       engine.uploadLocalFile = upload;
-      await engine.resolveConflict("conflict", resolution);
+      await expect(engine.resolveConflict("conflict", resolution)).rejects.toThrow(/unsafe|symbolic link/i);
       expect(await readFile(join(outside, "proof.txt"), "utf8")).toBe("sentinel");
       expect(engine.conflicts).toHaveLength(1);
       expect(upload).not.toHaveBeenCalled();
       expect(errors.get("shared/proof.txt")?.error).toMatch(/unsafe|symbolic link/i);
     },
   );
+
+  it("does not announce automatic preservation when conflict resolution fails", async () => {
+    const { engine, rt } = fixture("two-way", false);
+    rt.pair.conflictStrategy = "keep-both";
+    engine.addNotice = vi.fn();
+    engine.log = vi.fn();
+    await writeFile(join(outside, "proof.txt"), "sentinel");
+    await engine.raiseConflict(rt, conflict("shared/proof.txt"));
+    expect(engine.conflicts).toHaveLength(1);
+    expect(engine.addNotice).not.toHaveBeenCalled();
+    expect(engine.log).not.toHaveBeenCalledWith("pair", expect.stringContaining("Kept both versions"));
+  });
 
   it.each(["two-way", "pull"] as const)(
     "retains a tracked file when %s deletion crosses a symlink, then deletes it after repair",

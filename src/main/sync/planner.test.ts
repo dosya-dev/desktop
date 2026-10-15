@@ -206,13 +206,13 @@ test("changed on BOTH sides picks the newer side under last-write-wins", () => {
   assert.deepEqual(kinds(localNewer), ["upload-update"]);
 });
 
-test("the reinstall sentinel (mtime 0, size matches) is adopted, not re-uploaded", () => {
+test("a reinstall sentinel cannot prove that equal-sized independent versions agree", () => {
   const ops = run({
     local: makeLocal([{ relPath: "a.txt", sizeBytes: 10, mtimeMs: 424242 }]),
     remote: makeRemote([{ remoteId: "f_1", relPath: "a.txt", sizeBytes: 10, updatedAt: 100, version: 1 }]),
     base: makeBase([baseRecord({ localMtimeMs: 0 })]),
   });
-  assert.deepEqual(ops, []);
+  assert.deepEqual(kinds(ops), ["conflict"]);
 });
 
 test("an incomplete local scan suppresses every deletion (I1)", () => {

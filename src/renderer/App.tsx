@@ -7,6 +7,8 @@ import { AuthProvider, useAuth } from "./lib/auth-context";
 import { WorkspaceProvider, useWorkspace } from "./lib/workspace-context";
 import { saveLastRoute } from "./lib/route-restore";
 import { MaintenanceGate } from "./components/MaintenanceGate";
+import { ReportProblemDialog } from "./components/ReportProblemDialog";
+import { openReport } from "./lib/report-problem-store";
 
 // Auth entry points stay eager so first paint after launch is instant.
 import { LoginPage } from "./pages/LoginPage";
@@ -14,6 +16,7 @@ import { OnboardingPage } from "./pages/OnboardingPage";
 
 // Layout (needed by every protected page - keep eager)
 import { AppShell } from "./components/layout/AppShell";
+import { MenuBridge } from "./components/MenuBridge";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Everything else is code-split into its own chunk and loaded on demand.
@@ -50,6 +53,7 @@ const CreateWorkspacePage = lazyPage(() => import("./pages/CreateWorkspacePage")
 const WorkspaceDashboardPage = lazyPage(() => import("./pages/WorkspaceDashboardPage"), "WorkspaceDashboardPage");
 const NotificationsPage = lazyPage(() => import("./pages/NotificationsPage"), "NotificationsPage");
 const VaultPage = lazyPage(() => import("./pages/VaultPage"), "VaultPage");
+const AboutPage = lazyPage(() => import("./pages/AboutPage"), "AboutPage");
 
 /**
  * Records the current page so a reclaimed window can boot straight back into
@@ -73,6 +77,8 @@ function IdlePrefetch() {
   const { isAuthenticated } = useAuth();
   useEffect(() => {
     if (!isAuthenticated) return;
+    // The About window loads this bundle too; it never visits these pages.
+    if (window.location.hash.startsWith("#/about")) return;
     const timer = setTimeout(() => {
       void import("./pages/FileBrowserPage");
       void import("./pages/UploadPage");
@@ -81,6 +87,12 @@ function IdlePrefetch() {
     }, 2_000);
     return () => clearTimeout(timer);
   }, [isAuthenticated]);
+  return null;
+}
+
+/** Help > Report a problem… (and its shortcut) arrive from main as an event. */
+function ReportProblemFromMenu() {
+  useEffect(() => window.electronAPI.onOpenReportProblem(() => openReport()), []);
   return null;
 }
 
@@ -197,6 +209,9 @@ function AppRoutes() {
       <Route path="/workspaces" element={<ProtectedPage><WorkspaceDashboardPage /></ProtectedPage>} />
       <Route path="/notifications" element={<ProtectedPage><NotificationsPage /></ProtectedPage>} />
       <Route path="/verify" element={<VerifyPage />} />
+      {/* The About window (src/main/about-window.ts) loads the bundle at this
+          route. No auth gate: it shows "not signed in" rather than redirecting. */}
+      <Route path="/about" element={<AboutPage />} />
 
       {/* Default: always start at onboarding */}
       <Route path="*" element={<Navigate to="/onboarding" replace />} />
@@ -213,6 +228,11 @@ export function App() {
           <WorkspaceProvider>
           <RouteMemory />
           <IdlePrefetch />
+          <ReportProblemFromMenu />
+          <MenuBridge />
+          {/* Outside the root boundary on purpose: a report must still be
+              possible when the shell itself has thrown. */}
+          <ReportProblemDialog />
           {/* Backstop for everything the per-page boundary cannot reach: the
               bare pages (editor, login, onboarding) and any throw from the
               shell itself. Without one, those still take the window white. */}

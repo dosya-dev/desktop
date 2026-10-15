@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  readDroppedEntries, orderedDirs, createFolderTree, resolveTargets,
+  readDroppedEntries, entriesFromPickedFiles, orderedDirs, createFolderTree, resolveTargets,
   type DroppedTree,
 } from "./dropped-entries.ts";
 
@@ -142,4 +142,44 @@ test("files land in the folder their path resolved to", () => {
   const plan = { ids: new Map([["Photos", "id_p"]]) };
   const { targets } = resolveTargets(tree(["Photos", ""], []).entries, plan, "fld_root");
   assert.deepEqual(targets.map((t) => t.folderId), ["id_p", "fld_root"]);
+});
+
+test("each target keeps its folder path, so the queue can show it as a tree", () => {
+  const plan = { ids: new Map([["Photos", "id_p"]]) };
+  const { targets } = resolveTargets(tree(["Photos", ""], []).entries, plan, null);
+  assert.deepEqual(targets.map((t) => t.path), ["Photos", ""]);
+});
+
+function picked(name: string, rel: string): File {
+  const f = new File(["x"], name);
+  Object.defineProperty(f, "webkitRelativePath", { value: rel });
+  return f;
+}
+
+test("a folder picker's webkitRelativePath becomes the folder path, ancestors included", () => {
+  const res = entriesFromPickedFiles([
+    picked("a.jpg", "Photos/a.jpg"),
+    picked("b.jpg", "Photos/2024/b.jpg"),
+  ]);
+  assert.deepEqual(res.entries.map((e) => e.path), ["Photos", "Photos/2024"]);
+  assert.deepEqual([...res.dirs].sort(), ["Photos", "Photos/2024"]);
+  assert.equal(res.hadDirectory, true);
+});
+
+test("picked files with no relative path are loose files", () => {
+  const res = entriesFromPickedFiles([new File(["x"], "a.txt")]);
+  assert.deepEqual(res.entries.map((e) => e.path), [""]);
+  assert.equal(res.hadDirectory, false);
+});
+
+test("the folder picker skips OS junk but still recreates its folder", () => {
+  const res = entriesFromPickedFiles([picked(".DS_Store", "Photos/.DS_Store")]);
+  assert.equal(res.entries.length, 0);
+  assert.deepEqual(res.dirs, ["Photos"]);
+});
+
+test("the folder picker honours the batch cap", () => {
+  const res = entriesFromPickedFiles([picked("a", "P/a"), picked("b", "P/b"), picked("c", "P/c")], 2);
+  assert.equal(res.entries.length, 2);
+  assert.equal(res.skipped, 1);
 });

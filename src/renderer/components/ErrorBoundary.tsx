@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { AlertTriangle, RotateCw } from "lucide-react";
+import { AlertTriangle, Bug, RotateCw } from "lucide-react";
 import { reportError } from "../lib/sentry";
+import { openReport } from "../lib/report-problem-store";
 
 /**
  * Catches a render-time throw so one broken page cannot take down the app.
@@ -24,13 +25,14 @@ interface Props {
 
 interface State {
   error: Error | null;
+  eventId: string | null;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null, eventId: null };
 
   static getDerivedStateFromError(error: Error): State {
-    return { error };
+    return { error, eventId: null };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
@@ -42,7 +44,8 @@ export class ErrorBoundary extends Component<Props, State> {
     );
     // React swallows a boundary-caught error before the SDK's global handler
     // sees it, so without this line the crash never leaves the machine.
-    reportError(error, { where: this.props.where ?? "app", componentStack: info.componentStack ?? "" });
+    const id = reportError(error, { where: this.props.where ?? "app", componentStack: info.componentStack ?? "" });
+    this.setState({ eventId: typeof id === "string" && id.length > 0 ? id : null });
   }
 
   render(): ReactNode {
@@ -64,13 +67,22 @@ export class ErrorBoundary extends Component<Props, State> {
         <pre className="max-w-lg overflow-x-auto rounded-lg bg-[var(--color-bg-tertiary)] px-3 py-2 text-left text-[11px] text-[var(--color-text-secondary)]">
           {error.message}
         </pre>
-        <button
-          onClick={() => this.setState({ error: null })}
-          className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
-          style={{ borderColor: "var(--color-border)" }}
-        >
-          <RotateCw size={13} /> Try again
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => this.setState({ error: null, eventId: null })}
+            className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <RotateCw size={13} /> Try again
+          </button>
+          <button
+            onClick={() => openReport({ errorRef: this.state.eventId, errorMessage: error.message })}
+            className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <Bug size={13} /> Report this problem
+          </button>
+        </div>
       </div>
     );
   }

@@ -4,7 +4,19 @@ import { mkdtempSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { embedFileProvider, embedFileProviderAddon, signWithRetry, EXTENSION_PROFILE } from "./afterPack.mjs";
+import {
+  embedFileProvider,
+  embedFileProviderAddon,
+  signWithRetry,
+  EXTENSION_PROFILE,
+  resolveIdentity,
+  isStoreTarget,
+  storeTarget,
+  STORE_APP_BUNDLE_ID,
+  STORE_EXTENSION_BUNDLE_ID,
+  EXTENSION_PROFILE_STORE,
+  EXTENSION_PROFILE_DEV,
+} from "./afterPack.mjs";
 import { ADDON_FILE_NAME } from "./build-file-provider-addon.mjs";
 
 const mac = process.platform === "darwin";
@@ -155,4 +167,127 @@ test("signing gives up after the last attempt", () => {
     /timestamp/,
   );
   assert.equal(calls, 2);
+});
+
+const BOTH_CERTS = [
+  '  1) AAAA "Developer ID Application: DOSYA PTY LTD (53HFF44WQ8)"',
+  '  2) BBBB "Apple Distribution: DOSYA PTY LTD (53HFF44WQ8)"',
+  '  3) CCCC "3rd Party Mac Developer Installer: DOSYA PTY LTD (53HFF44WQ8)"',
+  '  4) DDDD "Apple Development: DOSYA PTY LTD (53HFF44WQ8)"',
+  "     4 valid identities found",
+].join("\n");
+
+test("a Developer ID build resolves the Developer ID certificate", () => {
+  const id = resolveIdentity({
+    env: {},
+    configured: "DOSYA PTY LTD (53HFF44WQ8)",
+    findIdentities: () => BOTH_CERTS,
+  });
+  assert.equal(id, "Developer ID Application: DOSYA PTY LTD (53HFF44WQ8)");
+});
+
+test("a store build resolves the Apple Distribution certificate from the same short name", () => {
+  const id = resolveIdentity({
+    env: {},
+    configured: "DOSYA PTY LTD (53HFF44WQ8)",
+    target: "mas",
+    findIdentities: () => BOTH_CERTS,
+  });
+  assert.equal(id, "Apple Distribution: DOSYA PTY LTD (53HFF44WQ8)");
+});
+
+test("a mas-dev build resolves the development certificate, not the distribution one", () => {
+  // A store-signed .pkg cannot be launched outside the store, so mas-dev is how
+  // the sandboxed build is run locally - and electron-builder itself looks for
+  // "Apple Development"/"Mac Developer" there. Signing it with Apple
+  // Distribution produces a bundle macOS refuses to launch.
+  const id = resolveIdentity({
+    env: {},
+    configured: "DOSYA PTY LTD (53HFF44WQ8)",
+    target: "mas-dev",
+    findIdentities: () => BOTH_CERTS,
+  });
+  assert.equal(id, "Apple Development: DOSYA PTY LTD (53HFF44WQ8)");
+});
+
+test("a mas-dev build auto-discovers the development certificate with no hint", () => {
+  const id = resolveIdentity({ env: {}, target: "mas-dev", findIdentities: () => BOTH_CERTS });
+  assert.equal(id, "Apple Development: DOSYA PTY LTD (53HFF44WQ8)");
+});
+
+test("a store build falls back to the older 3rd Party Mac Developer Application name", () => {
+  // electron-builder accepts either common name for mas; only this one is in
+  // some teams' keychains.
+  const legacy = '  1) AAAA "3rd Party Mac Developer Application: DOSYA PTY LTD (53HFF44WQ8)"';
+  const id = resolveIdentity({ env: {}, target: "mas", findIdentities: () => legacy });
+  assert.equal(id, "3rd Party Mac Developer Application: DOSYA PTY LTD (53HFF44WQ8)");
+});
+
+test("a store build with only a Developer ID certificate keeps the hint and lets codesign explain", () => {
+  const onlyDevId = '  1) AAAA "Developer ID Application: DOSYA PTY LTD (53HFF44WQ8)"';
+  const id = resolveIdentity({ env: {}, configured: "DOSYA PTY LTD (53HFF44WQ8)", target: "mas", findIdentities: () => onlyDevId });
+  assert.equal(id, "DOSYA PTY LTD (53HFF44WQ8)");
+});
+
+test("storeTarget tells the two store targets apart, and neither from darwin", () => {
+  // electron-builder reports electronPlatformName "mas" for BOTH mas and
+  // mas-dev; only the Target object's name says which, and the two need
+  // different profiles and different signing identities.
+  assert.equal(storeTarget({ electronPlatformName: "mas", targets: [{ name: "pkg" }] }), "mas");
+  assert.equal(storeTarget({ electronPlatformName: "mas", targets: [{ name: "mas-dev" }] }), "mas-dev");
+  assert.equal(storeTarget({ electronPlatformName: "darwin", targets: [{ name: "dmg" }] }), null);
+  assert.equal(storeTarget({ electronPlatformName: "mas" }), "mas", "no targets listed is the store build");
+  assert.equal(storeTarget({}), null);
+});
+
+test("isStoreTarget stays true for both store targets", () => {
+  assert.equal(isStoreTarget({ electronPlatformName: "mas" }), true);
+  assert.equal(isStoreTarget({ electronPlatformName: "mas", targets: [{ name: "mas-dev" }] }), true);
+  assert.equal(isStoreTarget({ electronPlatformName: "darwin" }), false);
+  assert.equal(isStoreTarget({}), false);
+});
+
+test("the dev extension profile is its own file, not the store one", () => {
+  assert.ok(EXTENSION_PROFILE_DEV.endsWith("build/fileprovider.mas-dev.provisionprofile"));
+  assert.notEqual(EXTENSION_PROFILE_DEV, EXTENSION_PROFILE_STORE);
+});
+
+test("the store identifiers nest correctly", () => {
+  assert.equal(STORE_APP_BUNDLE_ID, "dev.dosya.mac");
+  assert.ok(STORE_EXTENSION_BUNDLE_ID.startsWith(`${STORE_APP_BUNDLE_ID}.`), "an extension's identifier must start with its app's");
+  assert.ok(EXTENSION_PROFILE_STORE.endsWith("build/fileprovider.mas.provisionprofile"));
+});
+
+test("a store build stamps the store identifier into the extension", { skip: !mac }, () => {
+  const root = mkdtempSync(join(tmpdir(), "pack-"));
+  const appPath = join(root, "dosya.app");
+  mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+  embedFileProvider({ appPath, identity: null, target: "mas" });
+  const plist = join(appPath, "Contents", "PlugIns", "DosyaFileProvider.appex", "Contents", "Info.plist");
+  const printed = execFileSync("plutil", ["-p", plist], { encoding: "utf8" });
+  assert.match(printed, /dev\.dosya\.mac\.fileprovider/);
+});
+
+test("the embedded extension carries the app's build version, not its marketing version", { skip: !mac }, () => {
+  // App Store Connect rejects an app extension whose CFBundleVersion differs
+  // from its containing app's, and the app's is electron-builder's buildVersion.
+  const root = mkdtempSync(join(tmpdir(), "pack-"));
+  const appPath = join(root, "dosya.app");
+  mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+  embedFileProvider({ appPath, identity: null, version: "3.0.10", buildVersion: "12301", target: "mas" });
+  const plist = join(appPath, "Contents", "PlugIns", "DosyaFileProvider.appex", "Contents", "Info.plist");
+  const read = (key) => execFileSync("plutil", ["-extract", key, "raw", "-o", "-", plist], { encoding: "utf8" }).trim();
+  assert.equal(read("CFBundleVersion"), "12301");
+  assert.equal(read("CFBundleShortVersionString"), "3.0.10");
+});
+
+test("a signed store build without the store extension profile is refused by name", { skip: !mac }, () => {
+  if (existsSync(EXTENSION_PROFILE_STORE)) return; // this machine has one; nothing to prove
+  const root = mkdtempSync(join(tmpdir(), "pack-"));
+  const appPath = join(root, "dosya.app");
+  mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+  assert.throws(
+    () => embedFileProvider({ appPath, identity: "Apple Distribution: DOSYA PTY LTD (53HFF44WQ8)", target: "mas" }),
+    /fileprovider\.mas\.provisionprofile/,
+  );
 });

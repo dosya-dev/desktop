@@ -1,18 +1,16 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import { useDropzone } from "react-dropzone";
+import { useState, useCallback, useRef, useEffect, type DragEvent, type ChangeEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Upload,
   X,
-  Check,
-  Loader2,
   Shield,
   Plus,
   ChevronRight,
   Pause,
   Play,
   RefreshCw,
-  AlertCircle,
+  FilePlus,
+  FolderUp,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { uploadFileInParts } from "@/lib/upload-in-parts";
@@ -21,24 +19,14 @@ import { LIBRARY_QUERY_ROOT } from "@/lib/library-request";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes } from "@/lib/format";
 import { toast } from "sonner";
-import { FileIcon, FolderIcon } from "@/components/files/FileIcon";
+import { FolderIcon } from "@/components/files/FileIcon";
+import { UploadQueueTree, type UploadQueueItem as QueueItem } from "@/components/upload/UploadQueueTree";
+import {
+  readDroppedEntries, entriesFromPickedFiles, orderedDirs, createFolderTree, resolveTargets,
+  MAX_DROPPED_FILES, type DroppedTree, type FolderPlan,
+} from "@/lib/dropped-entries";
 
 // ── Types ────────────────────────────────────────────────────────────
-
-interface QueueItem {
-  file: File;
-  id: string;
-  status: "pending" | "uploading" | "done" | "error";
-  progress: number; // 0-100 byte-level
-  bytesUploaded: number;
-  error?: string;
-  // Destination captured at enqueue time. Uploads must never retarget when
-  // the active workspace/folder changes mid-queue. The location is not part of
-  // this: files land wherever the workspace was created, which no upload can
-  // override.
-  workspaceId: string;
-  folderId: string | null;
-}
 
 interface PickerFolder {
   id: string;
@@ -229,45 +217,144 @@ export function UploadPage() {
     });
   }, [active?.id]);
 
-  // ── Drop handler ──────────────────────────────────────────────────
+  // ── Adding files ──────────────────────────────────────────────────
 
-  const onDrop = useCallback(
-    (acceptedFiles: File[]) => {
-      if (!active) return;
-      const items: QueueItem[] = acceptedFiles.map((file) => ({
-        file,
-        id: crypto.randomUUID(),
-        status: "pending" as const,
-        progress: 0,
-        bytesUploaded: 0,
-        workspaceId: active.id,
-        folderId: selectedFolder.id,
-      }));
-      setQueue((prev) => [...prev, ...items]);
-      // Start processing after state update
-      setTimeout(() => processQueue(), 50);
-    },
-    [processQueue, active, selectedFolder.id],
-  );
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const activeIdRef = useRef(active?.id);
+  activeIdRef.current = active?.id;
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    noClick: false,
-    multiple: true,
-  });
+  // Turns the second hidden input into a folder picker. Set as an attribute
+  // because React's input types have no webkitdirectory prop.
+  useEffect(() => {
+    const el = folderInputRef.current;
+    if (!el) return;
+    el.setAttribute("webkitdirectory", "");
+    el.setAttribute("directory", "");
+  }, []);
+
+  /** Find-or-create one folder; the server reuses an existing row by name. */
+  const createFolder = useCallback(async (workspaceId: string, name: string, parentId: string | null) => {
+    const res = await api.post<{ ok: boolean; folder?: { id: string }; error?: string }>("/api/folders", {
+      workspace_id: workspaceId, parent_id: parentId, name,
+    });
+    if (!res.ok || !res.folder?.id) throw new Error(res.error ?? "Could not create folder");
+    return res.folder.id;
+  }, []);
+
+  /**
+   * Queue a dropped or picked tree. Every file used to go into the selected
+   * folder, so a dropped folder arrived flat; now its folders are recreated
+   * under the selection first and each file is queued into its own.
+   */
+  const enqueueTree = useCallback(async (tree: DroppedTree) => {
+    if (!active) return;
+    const workspaceId = active.id;
+    const root = selectedFolder.id;
+    if (tree.entries.length === 0 && tree.dirs.length === 0) return;
+
+    let plan: FolderPlan = { ids: new Map(), failed: [] };
+    if (tree.hadDirectory) {
+      const dirs = orderedDirs(tree);
+      // Recreating a deep tree is a round trip per folder - say so up front,
+      // or the upload looks dead until the queue appears.
+      toast.info("Uploading folder", {
+        description: `Recreating ${dirs.length} folder${dirs.length === 1 ? "" : "s"}, then uploading ${tree.entries.length} file${tree.entries.length === 1 ? "" : "s"}.`,
+      });
+      plan = await createFolderTree(dirs, root, (name, parentId) => createFolder(workspaceId, name, parentId));
+      if (!aliveRef.current) return;
+      if (plan.failed.length > 0) {
+        toast.error("Some folders could not be created", {
+          description: `${plan.failed.length} folder${plan.failed.length === 1 ? "" : "s"} failed. ${plan.error ?? ""}`.trim(),
+        });
+      }
+      if (plan.ids.size > 0) {
+        queryClient.invalidateQueries({ queryKey: ["folders-tree"] });
+        queryClient.invalidateQueries({ queryKey: ["files"] });
+      }
+    }
+    // The workspace changed while folders were being made: these files belong
+    // to the one the user left, and the switch already cleared its queue.
+    if (activeIdRef.current !== workspaceId) return;
+
+    const { targets, skipped } = resolveTargets(tree.entries, plan, root);
+    if (skipped > 0) {
+      toast.error("Some files were skipped", {
+        description: `${skipped} file${skipped === 1 ? "" : "s"} had no folder to go in.`,
+      });
+    }
+    if (tree.skipped > 0) {
+      toast.error("Too many files in one go", {
+        description: `Only the first ${MAX_DROPPED_FILES.toLocaleString()} files were queued - ${tree.skipped} left out.`,
+      });
+    }
+    if (targets.length === 0) {
+      if (tree.hadDirectory && plan.ids.size > 0) {
+        toast.success("Folder created", { description: "There were no files inside to upload." });
+      }
+      return;
+    }
+
+    const items: QueueItem[] = targets.map((t) => ({
+      file: t.file,
+      id: crypto.randomUUID(),
+      status: "pending" as const,
+      progress: 0,
+      bytesUploaded: 0,
+      workspaceId,
+      folderId: t.folderId,
+      relativePath: t.path,
+    }));
+    setQueue((prev) => [...prev, ...items]);
+    // Start processing after state update
+    setTimeout(() => processQueue(), 50);
+  }, [processQueue, active, selectedFolder.id, createFolder, queryClient]);
+
+  const onDragOver = (e: DragEvent) => { e.preventDefault(); setDragging(true); };
+  const onDragLeave = (e: DragEvent) => {
+    // Leaving for a child element is not leaving the zone.
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+  };
+  // Not `async`, and it must stay that way: readDroppedEntries reads
+  // dataTransfer.items - the only API that can see inside a dropped folder -
+  // before its own first await, and that list is dead once this returns.
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    void readDroppedEntries(e.dataTransfer).then(enqueueTree);
+  };
+  // Files from the folder picker carry webkitRelativePath, so the same tree is
+  // rebuilt as for a drop.
+  const onPicked = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.length) void enqueueTree(entriesFromPickedFiles(e.target.files));
+    e.target.value = "";
+  };
 
   // ── Queue actions ─────────────────────────────────────────────────
 
   const clearDone = () => setQueue((prev) => prev.filter((q) => q.status !== "done"));
 
-  const removeItem = (id: string) => {
-    const ctrl = abortControllers.current.get(id);
-    if (ctrl) ctrl.abort();
-    setQueue((prev) => prev.filter((q) => q.id !== id));
+  const removeItems = (ids: string[]) => {
+    for (const id of ids) abortControllers.current.get(id)?.abort();
+    const gone = new Set(ids);
+    setQueue((prev) => prev.filter((q) => !gone.has(q.id)));
   };
 
-  const retryItem = (id: string) => {
-    updateItem(id, { status: "pending", progress: 0, bytesUploaded: 0, error: undefined });
+  const retryItems = (ids: string[]) => {
+    const again = new Set(ids);
+    setQueue((prev) =>
+      prev.map((q) =>
+        again.has(q.id) && q.status === "error"
+          ? { ...q, status: "pending" as const, progress: 0, bytesUploaded: 0, error: undefined }
+          : q,
+      ),
+    );
     setTimeout(() => processQueue(), 50);
   };
 
@@ -341,26 +428,52 @@ export function UploadPage() {
           </p>
         </div>
 
-        {/* Drop Zone */}
+        {/* Drop Zone. The pickers sit OUTSIDE it: a hidden input's click
+            bubbles, and inside the zone it would also fire the zone's own
+            file picker - which is how "pick a folder" broke on the web. */}
+        <input ref={fileInputRef} type="file" multiple hidden onChange={onPicked} data-testid="upload-files-input" />
+        <input ref={folderInputRef} type="file" multiple hidden onChange={onPicked} data-testid="upload-folder-input" />
         <div
-          {...getRootProps()}
+          onClick={() => fileInputRef.current?.click()}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
           className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 transition-colors ${
-            isDragActive
+            dragging
               ? "border-[var(--color-primary)] bg-[var(--color-primary)]/5"
               : "border-[var(--color-border)] hover:border-[var(--color-primary)]/50"
           }`}
         >
-          <input {...getInputProps()} />
           <Upload
             size={40}
-            className={`mb-4 ${isDragActive ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"}`}
+            className={`mb-4 ${dragging ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"}`}
           />
           <p className="text-sm font-medium">
-            {isDragActive ? "Drop files here" : "Drop files here to upload"}
+            {dragging ? "Drop files or folders here" : "Drop files or folders here to upload"}
           </p>
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-            Drag and drop anything, or <span className="font-semibold cursor-pointer">browse your computer</span>
+            Folders keep their subfolders. Or browse your computer:
           </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-bg-secondary)]"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              <FilePlus size={13} />
+              Select files
+            </button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click(); }}
+              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-bg-secondary)]"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              <FolderUp size={13} />
+              Select folder
+            </button>
+          </div>
           <div className="mt-3 flex gap-2">
             {["Video", "Images", "Documents", "Archives", "Any format"].map((t) => (
               <span key={t} className="rounded-full bg-[var(--color-bg-tertiary)] px-2.5 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)]">
@@ -422,61 +535,8 @@ export function UploadPage() {
               )}
             </div>
 
-            {/* File list */}
-            <div className="space-y-0.5 max-h-80 overflow-auto">
-              {queue.map((item) => (
-                <div key={item.id} className="group flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-[var(--color-bg-secondary)]">
-                  {/* Status icon */}
-                  {item.status === "done" ? (
-                    <Check size={16} className="text-[var(--color-primary)] shrink-0" />
-                  ) : item.status === "uploading" ? (
-                    <Loader2 size={16} className="animate-spin text-[var(--color-primary)] shrink-0" />
-                  ) : item.status === "error" ? (
-                    <AlertCircle size={16} className="text-[var(--color-danger)] shrink-0" />
-                  ) : (
-                    <FileIcon name={item.file.name} size={16} className="shrink-0" />
-                  )}
-
-                  {/* File info + progress */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between">
-                      <span className="truncate text-sm">{item.file.name}</span>
-                      <span className="text-xs text-[var(--color-text-muted)] ml-2 shrink-0">
-                        {item.status === "uploading"
-                          ? `${formatBytes(item.bytesUploaded)} / ${formatBytes(item.file.size)}`
-                          : formatBytes(item.file.size)}
-                      </span>
-                    </div>
-                    {/* Per-file progress bar */}
-                    {item.status === "uploading" && (
-                      <div className="mt-1 h-1 w-full rounded-full bg-[var(--color-border)]">
-                        <div
-                          className="h-1 rounded-full transition-all duration-200"
-                          style={{ width: `${Math.max(item.progress, 1)}%`, background: "var(--color-primary)" }}
-                        />
-                      </div>
-                    )}
-                    {item.status === "error" && item.error && (
-                      <p className="mt-0.5 text-[11px] text-[var(--color-danger)] truncate">{item.error}</p>
-                    )}
-                  </div>
-
-                  {/* Actions */}
-                  <div className="shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {item.status === "error" && (
-                      <button onClick={() => retryItem(item.id)} className="rounded p-1 text-[var(--color-text-muted)] hover:text-[var(--color-primary)]" title="Retry">
-                        <RefreshCw size={13} />
-                      </button>
-                    )}
-                    {(item.status === "pending" || item.status === "uploading" || item.status === "error") && (
-                      <button onClick={() => removeItem(item.id)} className="rounded p-1 text-[var(--color-text-muted)] hover:text-[var(--color-danger)]" title="Remove">
-                        <X size={13} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+            {/* File list, grouped under the folders it came from */}
+            <UploadQueueTree queue={queue} onRetry={retryItems} onRemove={removeItems} />
           </div>
         )}
       </div>

@@ -42,15 +42,20 @@
 // An entry is addressed by its central-directory INDEX, never by its path.
 // That is the server's contract and the reason traversal is unreachable here;
 // do not "helpfully" switch to names.
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Folder, Lock, Ban, Search, Download, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, Folder, Lock, Ban, Search, Download, Loader2, Save } from "lucide-react";
+import { toast } from "sonner";
 import { api, apiBase, ApiError } from "@/lib/api-client";
 import { buildArchiveTree, type ArchiveEntry, type TreeNode } from "@/lib/archive-tree";
-import { colorFor, labelFor, humanSize, isImage, isVideo, isAudio, isPdf } from "@/lib/file-type";
+import { planFolderSave, runFolderSave, MAX_FOLDER_SAVE_FILES, type SavePlan } from "@/lib/archive-save";
+import { FolderPickerModal, type PickerFolder } from "@/components/files/FolderPickerModal";
+import { colorFor, labelFor, humanSize, extOf, isImage, isVideo, isAudio, isPdf } from "@/lib/file-type";
 import { isTextReadable } from "@/lib/text-detect";
 import type { ViewerFile } from "@/components/files/FileViewer";
 
 interface ArchiveIndex {
+  /** What the API opened it as. Older cached responses may omit it. */
+  kind?: "zip" | "iso";
   archiveSize: number;
   totalEntries: number;
   truncated: boolean;
@@ -59,6 +64,18 @@ interface ArchiveIndex {
 
 /** Compression methods the server will actually stream (store and deflate). */
 const OPENABLE_METHODS = new Set([0, 8]);
+
+const DISK_IMAGE_EXTS = new Set(["iso", "img"]);
+
+/** The noun for the summary line: what the API says it opened, else what the
+ *  extension suggests (the API is the authority once it has answered). */
+function kindLabel(index: ArchiveIndex | null, name: string): string {
+  if (index?.kind === "iso" || (!index?.kind && DISK_IMAGE_EXTS.has(extOf(name)))) return "disk image";
+  return "archive";
+}
+
+/** One sonner toast, updated in place, carries a folder save's progress. */
+const PROGRESS_TOAST_ID = "archive-save-progress";
 
 // Matches TextViewer's threshold in FileViewer.tsx (2 MB). The server bills
 // egress on the entry's UNCOMPRESSED size for every byte it streams - gating
@@ -101,10 +118,13 @@ export function ArchiveViewer({
   file,
   version,
   onDownload,
+  workspaceId,
 }: {
   file: ViewerFile;
   version?: number;
   onDownload: (index: number, name: string) => void;
+  /** Scope for the Save actions' destination picker. Without it, no Save is offered. */
+  workspaceId?: string;
 }) {
   const [index, setIndex] = useState<ArchiveIndex | null>(null);
   const [error, setError] = useState<{ status: number | null; message: string } | null>(null);
@@ -163,6 +183,108 @@ export function ArchiveViewer({
     });
   }, []);
 
+  // Saving INTO dosya. The server saves one entry per request (the api's
+  // archive/save.ts); a folder is planned and driven from here one file at a
+  // time through lib/archive-save.ts, the same module the web pane runs.
+  // `pending` is what the folder picker is deciding a destination for.
+  const [pending, setPending] = useState<{ kind: "entry"; node: TreeNode } | { kind: "folder"; plan: SavePlan } | null>(null);
+  const [pickerFolder, setPickerFolder] = useState<string | null>(null);
+  const [pickerFolders, setPickerFolders] = useState<PickerFolder[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const cancelRef = useRef(false);
+  const canSave = !!workspaceId;
+
+  // The folder tree is fetched when the picker opens, not with the archive:
+  // most opens never save anything.
+  useEffect(() => {
+    if (!pending || !workspaceId) return;
+    let cancelled = false;
+    setPickerFolders(null);
+    api
+      .get<{ ok: boolean; folders: PickerFolder[] }>(`/api/folders/tree?workspace_id=${workspaceId}`)
+      .then((res) => { if (!cancelled) setPickerFolders(res.folders ?? []); })
+      .catch(() => { if (!cancelled) setPickerFolders([]); });
+    return () => { cancelled = true; };
+  }, [pending, workspaceId]);
+
+  // `name` is the TREE's cleaned segment (archive-tree.ts neutralises control
+  // and bidi characters for display). Sent as the override so the file that
+  // lands carries the name the user clicked, not a spoofed raw entry name.
+  const saveEntry = useCallback(
+    (entryIndex: number, folderId: string | null, name: string) =>
+      api.post<{ ok: boolean; file_id: string; name: string; size_bytes: number }>(
+        `/api/files/${file.id}/archive/save`,
+        { i: entryIndex, folder_id: folderId, name },
+      ),
+    [file.id],
+  );
+
+  // POST /api/folders/batch answers `folders` (the api's folders/batch.ts), one
+  // row per requested folder, existing or new, with its id.
+  const createFolders = useCallback(
+    async (parentId: string | null, names: string[]) => {
+      const res = await api.post<{ ok: boolean; folders: { name: string; parent_id: string | null; id: string }[] }>(
+        "/api/folders/batch",
+        { workspace_id: workspaceId, folders: names.map((name) => ({ name, parent_id: parentId })) },
+      );
+      return new Map(res.folders.map((r) => [r.name, r.id]));
+    },
+    [workspaceId],
+  );
+
+  const startFolderSave = (nodes: TreeNode[], rootName: string) => {
+    const plan = planFolderSave(nodes, rootName);
+    if ("tooMany" in plan) {
+      toast.error("Too many files to save at once", {
+        description: `This folder has ${plan.tooMany.toLocaleString()} files. Save smaller folders (up to ${MAX_FOLDER_SAVE_FILES}), or download the archive.`,
+      });
+      return;
+    }
+    setPickerFolder(null);
+    setPending({ kind: "folder", plan });
+  };
+
+  const onPicked = async () => {
+    const job = pending;
+    const folderId = pickerFolder;
+    setPending(null);
+    if (!job) return;
+    if (job.kind === "entry") {
+      if (job.node.index === null) return;
+      try {
+        const out = await saveEntry(job.node.index, folderId, job.node.name);
+        toast.success("Saved to dosya", { description: out.name });
+      } catch (err) {
+        toast.error("Could not save this file", { description: err instanceof Error ? err.message : "Request failed" });
+      }
+      return;
+    }
+    cancelRef.current = false;
+    setSaving(true);
+    const total = job.plan.files.length;
+    const progress = (done: number) =>
+      toast.loading(`Saving ${done} of ${total} into ${job.plan.rootName}`, {
+        id: PROGRESS_TOAST_ID,
+        action: { label: "Cancel", onClick: () => { cancelRef.current = true; } },
+      });
+    progress(0);
+    const out = await runFolderSave(job.plan, folderId, {
+      createFolders,
+      saveEntry,
+      onProgress: (done) => progress(done),
+      isCancelled: () => cancelRef.current,
+    });
+    setSaving(false);
+    toast.dismiss(PROGRESS_TOAST_ID);
+    const parts = [`Saved ${out.saved} ${out.saved === 1 ? "file" : "files"}`];
+    if (out.skipped) parts.push(`${out.skipped} skipped`);
+    if (out.failed.length) parts.push(`${out.failed.length} failed`);
+    if (out.cancelled) parts.push("cancelled");
+    const summary = parts.join(", ");
+    if (out.failed.length) toast.error(summary, { description: `${out.failed[0]!.name}: ${out.failed[0]!.message}` });
+    else toast.success(summary, { description: job.plan.rootName });
+  };
+
   if (error) {
     // 422 is the one shape that means "this file itself is not a valid zip";
     // 413 means the opposite - a perfectly valid archive the server declined to
@@ -170,7 +292,8 @@ export function ArchiveViewer({
     // (404/403/a network failure) is a request problem, not a claim about the
     // archive, so it keeps a heading that cannot contradict a body like
     // "Network error. Please try again."
-    const heading = error.status === 422 ? "This file isn't a valid zip"
+    const noun = DISK_IMAGE_EXTS.has(extOf(file.name)) ? "disk image" : "zip";
+    const heading = error.status === 422 ? `This file isn't a valid ${noun}`
       : error.status === 413 ? "This archive is too large to list"
       : "This archive could not be opened";
     return (
@@ -201,6 +324,8 @@ export function ArchiveViewer({
                 <span className="font-mono">{index.totalEntries.toLocaleString()} entries</span>
                 <span aria-hidden="true">&middot;</span>
                 <span className="font-mono">{humanSize(index.archiveSize)}</span>
+                <span aria-hidden="true">&middot;</span>
+                <span data-testid="archive-kind">{kindLabel(index, file.name)}</span>
               </>
             ) : (
               <span className="font-mono">Opening&hellip;</span>
@@ -222,6 +347,17 @@ export function ArchiveViewer({
               className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--color-text-muted)]"
             />
           </label>
+          {canSave && (
+            <button
+              type="button"
+              data-testid="archive-save-all"
+              disabled={!index || saving || tree.length === 0}
+              onClick={() => startFolderSave(tree, file.name.replace(/\.[^.]+$/, "") || file.name)}
+              className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-[var(--color-border)] text-[11px] font-medium hover:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-muted)] disabled:cursor-not-allowed disabled:hover:bg-transparent self-start"
+            >
+              <Save className="size-3.5 text-[var(--color-text-muted)]" aria-hidden="true" /> Save all to dosya
+            </button>
+          )}
         </div>
 
         {/* Not role="tree": nothing below carries role="treeitem"/"group" or
@@ -265,6 +401,8 @@ export function ArchiveViewer({
                 onToggle={toggleDir}
                 selected={selected}
                 onSelect={setSelected}
+                onSaveDir={canSave ? (n) => startFolderSave(n.children, n.name) : undefined}
+                saving={saving}
               />
             ))}
 
@@ -283,8 +421,27 @@ export function ArchiveViewer({
       </div>
 
       <div className="flex-1 min-w-0 bg-[oklch(0.135_0.018_238.9)] relative flex flex-col">
-        <EntryPreview file={file} node={selected} version={version} onDownload={onDownload} />
+        <EntryPreview
+          file={file}
+          node={selected}
+          version={version}
+          onDownload={onDownload}
+          onSave={canSave ? (n) => { setPickerFolder(null); setPending({ kind: "entry", node: n }); } : undefined}
+        />
       </div>
+
+      {pending && (
+        <FolderPickerModal
+          title="Save to folder"
+          actionLabel="Save here"
+          folders={pickerFolders ?? []}
+          selectedId={pickerFolder}
+          isPending={pickerFolders === null}
+          onSelect={setPickerFolder}
+          onConfirm={() => { void onPicked(); }}
+          onClose={() => setPending(null)}
+        />
+      )}
     </div>
   );
 }
@@ -298,6 +455,8 @@ function Row({
   onToggle,
   selected,
   onSelect,
+  onSaveDir,
+  saving,
 }: {
   node: TreeNode;
   path: string;
@@ -307,6 +466,10 @@ function Row({
   onToggle: (p: string) => void;
   selected: TreeNode | null;
   onSelect: (n: TreeNode) => void;
+  /** Absent when the pane has no workspace to save into. */
+  onSaveDir?: (n: TreeNode) => void;
+  /** A folder save is running: one at a time, since they share the progress toast. */
+  saving: boolean;
 }) {
   const q = filter.trim().toLowerCase();
   const matches = q === "" || node.name.toLowerCase().includes(q);
@@ -326,16 +489,23 @@ function Row({
         onToggle={onToggle}
         selected={selected}
         onSelect={onSelect}
+        onSaveDir={onSaveDir}
+        saving={saving}
       />
     ));
     return (
       <>
-        <button
-          type="button"
+        {/* A div with role="button", not a <button>: the row carries its own
+            Save control, and a button inside a button is invalid markup that
+            browsers split unpredictably. Enter and Space toggle like a button. */}
+        <div
+          role="button"
+          tabIndex={0}
           data-testid={`archive-dir-${path}`}
           onClick={() => onToggle(path)}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(path); } }}
           aria-expanded={open}
-          className="flex items-center gap-2 h-[30px] w-full px-2 rounded-md hover:bg-[var(--color-bg-tertiary)] text-left"
+          className="flex items-center gap-2 h-[30px] w-full px-2 rounded-md hover:bg-[var(--color-bg-tertiary)] text-left cursor-pointer"
           style={{ paddingLeft: `${8 + depth * 22}px` }}
         >
           {open ? (
@@ -348,7 +518,20 @@ function Row({
           <span className="font-mono text-[11px] text-[var(--color-text-muted)] ml-auto shrink-0">
             {node.fileCount}
           </span>
-        </button>
+          {onSaveDir && (
+            <button
+              type="button"
+              data-testid={`archive-save-dir-${path}`}
+              aria-label={`Save folder ${node.name} to dosya`}
+              title="Save folder to dosya"
+              disabled={saving}
+              onClick={(e) => { e.stopPropagation(); onSaveDir(node); }}
+              className="inline-flex items-center justify-center size-6 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg)] shrink-0 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
+            >
+              <Save className="size-3.5" aria-hidden="true" />
+            </button>
+          )}
+        </div>
         {open && kids}
       </>
     );
@@ -441,11 +624,13 @@ function EntryPreview({
   node,
   version,
   onDownload,
+  onSave,
 }: {
   file: ViewerFile;
   node: TreeNode | null;
   version?: number;
   onDownload: (index: number, name: string) => void;
+  onSave?: (n: TreeNode) => void;
 }) {
   if (!node || node.index === null) {
     return (
@@ -456,6 +641,35 @@ function EntryPreview({
   }
 
   const url = entryUrl(file.id, node.index, version);
+
+  // Download and Save for the selected entry, above whatever the stage shows.
+  // On the dark stage, so literal stage colors rather than theme tokens (see
+  // STAGE_TEXT above).
+  const actions = (
+    <div className={`h-10 shrink-0 flex items-center justify-between gap-3 px-3 border-b border-white/10 ${STAGE_TEXT}`}>
+      <span className="text-[12px] truncate">{node.name}</span>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={() => onDownload(node.index ?? -1, node.name)}
+          className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-white/15 text-[11px] font-medium hover:bg-white/10"
+        >
+          <Download className="size-3.5" aria-hidden="true" /> Download
+        </button>
+        {onSave && (
+          <button
+            type="button"
+            data-testid="archive-save-entry"
+            data-index={node.index}
+            onClick={() => onSave(node)}
+            className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-white/15 text-[11px] font-medium hover:bg-white/10"
+          >
+            <Save className="size-3.5" aria-hidden="true" /> Save to dosya
+          </button>
+        )}
+      </div>
+    </div>
+  );
 
   // PDF brings its own toolbar and scroller via Chromium's native viewer -
   // the same iframe FileViewer.tsx's own isPdf branch uses - so centering it
@@ -468,6 +682,7 @@ function EntryPreview({
   if (isPdf(node.name)) {
     return (
       <div className="absolute inset-0 flex flex-col">
+        {actions}
         <iframe src={`${url}#toolbar=1`} className="h-full w-full border-none bg-white" title={`PDF: ${node.name}`} />
       </div>
     );
@@ -504,13 +719,16 @@ function EntryPreview({
   }
 
   return (
-    <div className="flex-1 flex items-center justify-center overflow-auto p-6 relative">
-      {body}
-      <p
-        className={`absolute bottom-3 left-1/2 -translate-x-1/2 font-mono text-[11px] ${STAGE_TEXT} ${STAGE_CAPTION_BG} rounded px-2 py-0.5`}
-      >
-        {caption}
-      </p>
+    <div className="flex-1 flex flex-col min-h-0">
+      {actions}
+      <div className="flex-1 flex items-center justify-center overflow-auto p-6 relative">
+        {body}
+        <p
+          className={`absolute bottom-3 left-1/2 -translate-x-1/2 font-mono text-[11px] ${STAGE_TEXT} ${STAGE_CAPTION_BG} rounded px-2 py-0.5`}
+        >
+          {caption}
+        </p>
+      </div>
     </div>
   );
 }

@@ -18,16 +18,33 @@ export function heicCacheKey({ fileId, version, maxDim }: HeicRequest): string {
 // (which lives in heic.ts and would create an import cycle).
 const liveCaches = new Set<{ clear: () => void }>();
 
+// Same pattern, for the decode worker pool: heic.ts owns the pool singleton
+// (it's the one that constructs real Workers), and heic-cache.ts must not
+// import heic.ts back - so heic.ts registers its pool here instead of this
+// module reaching for it directly.
+const livePools = new Set<{ destroy: () => void }>();
+
+/**
+ * Registers a decode pool so `clearHeicCaches()` tears it down on logout too
+ * - an account's decode machinery (and the WASM heap high-water mark its
+ * workers are holding) goes with its LRU, not just the LRU itself.
+ */
+export function registerHeicPool(pool: { destroy: () => void }): void {
+  livePools.add(pool);
+}
+
 /** Cache API store name - mirrors CACHE_NAME in heic-persist.ts. */
 const PERSIST_CACHE_NAME = 'heic-thumbs-v1';
 
 /**
  * Clears every decoded HEIC preview: the in-memory LRU(s) (revoking all their
- * object URLs) and the persistent Cache API store. Call on logout so one
- * account's decoded photos never linger in memory or on disk for the next.
+ * object URLs), any registered decode pool's workers, and the persistent
+ * Cache API store. Call on logout so one account's decoded photos - and the
+ * decode machinery behind them - never linger for the next.
  */
 export async function clearHeicCaches(): Promise<void> {
   for (const c of liveCaches) c.clear();
+  for (const p of livePools) p.destroy();
   try {
     if (typeof caches !== 'undefined') await caches.delete(PERSIST_CACHE_NAME);
   } catch {

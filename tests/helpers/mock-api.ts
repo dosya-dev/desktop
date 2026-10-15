@@ -25,6 +25,11 @@ export interface MockApiOptions {
   /** Delay (ms) before the upload PUT responds - lets tests catch mid-flight state. */
   uploadDelayMs?: number;
   /**
+   * Overrides for the signed-in user (GET /api/me, login, 2FA). Used by the
+   * screenshot captures to show a believable identity instead of the fixture's.
+   */
+  user?: Partial<typeof data.mockUser>;
+  /**
    * What GET /api/e2ee/user-keys answers: no identity (404, the gate shows
    * Setup), an identity (200, Unlock), or a server error (500, Retry).
    */
@@ -40,7 +45,8 @@ export interface MockServer {
 export async function startMockServer(
   options: MockApiOptions = {},
 ): Promise<MockServer> {
-  const { authenticated = true, workspaces = [data.mockWorkspace], uploadDelayMs = 0, e2eeIdentity = "none" } = options;
+  const { authenticated = true, workspaces = [data.mockWorkspace], uploadDelayMs = 0, e2eeIdentity = "none", user: userOverrides = {} } = options;
+  const mockUser = { ...data.mockUser, ...userOverrides };
 
   // Test-only instrumentation: counts POST /api/upload/init calls so specs
   // can assert no *new* upload activity happens after a given point (e.g.
@@ -222,11 +228,11 @@ export async function startMockServer(
       // Saved appearance rides along like production: auth-context reconciles
       // ui_theme/ui_mode from /api/me onto <html> at boot, so a PUT that the
       // mock forgot would make every theme choice revert on reload.
-      return json({ ok: true, user: { ...data.mockUser, ...savedAppearance } }, 200, {
+      return json({ ok: true, user: { ...mockUser, ...savedAppearance } }, 200, {
         "Set-Cookie": `dosya_session=${currentSession()}; Path=/`,
       });
     }
-    if (path === "/api/me" && method === "PATCH") return json({ ok: true, user: data.mockUser });
+    if (path === "/api/me" && method === "PATCH") return json({ ok: true, user: mockUser });
     if (path === "/api/me/appearance" && method === "PUT") {
       return readBody(req).then((body) => {
         savedAppearance = { ui_theme: body.theme, ui_mode: body.mode };
@@ -252,12 +258,12 @@ export async function startMockServer(
       // but the fresh one works, same as production. The serial bump gives
       // the cookie a new value so the cookie jar reports a real change.
       sessionSerial++;
-      return json({ ok: true, user: data.mockUser }, 200, {
+      return json({ ok: true, user: mockUser }, 200, {
         "Set-Cookie": `dosya_session=${currentSession()}; Path=/`,
       });
     }
     if (path === "/api/auth/signup" && method === "POST") return json({ ok: true });
-    if (path === "/api/auth/2fa/verify" && method === "POST") return json({ ok: true, user: data.mockUser });
+    if (path === "/api/auth/2fa/verify" && method === "POST") return json({ ok: true, user: mockUser });
     if (path.startsWith("/api/auth/forgot") && method === "POST") return json({ ok: true });
     if (path.startsWith("/api/auth/reset") && method === "POST") return json({ ok: true });
     if (path === "/api/auth/verify-email" && method === "POST") return json({ ok: true });
@@ -282,7 +288,7 @@ export async function startMockServer(
     if (path === "/api/dashboard" && method === "GET") {
       return json({
         ok: true,
-        user_name: "Test User",
+        user_name: mockUser.name,
         stats: {
           total_files: 42,
           files_this_week: 3,
@@ -300,7 +306,7 @@ export async function startMockServer(
           { id: "file_2", name: "Photo.png", size_bytes: 2_097_152, extension: "png", created_at: 1740912000, share_count: 0 },
         ],
         activity: [
-          { id: "act_1", action: "file.upload", entity_type: "file", metadata: null, created_at: 1740825600, user_name: "Test User", meta: { name: "Project Report.pdf" } },
+          { id: "act_1", action: "file.upload", entity_type: "file", metadata: null, created_at: 1740825600, user_name: mockUser.name, meta: { name: "Project Report.pdf" } },
         ],
         team_stats: [],
       });
@@ -662,7 +668,7 @@ export async function startMockServer(
           is_edited: 0,
           created_at: now,
           updated_at: now,
-          user_name: "Test User",
+          user_name: mockUser.name,
           user_email: "test@example.com",
           user_avatar: null,
         };

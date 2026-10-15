@@ -8,7 +8,7 @@ import {
   renameWorkspace as engineRenameWorkspace,
   listFolder as engineListFolder,
   uploadFile as engineUploadFile,
-  downloadFile as engineDownloadFile,
+  downloadFileTo as engineDownloadFileTo,
   grantAccess as engineGrantAccess,
   revokeAccess as engineRevokeAccess,
   listMembers as engineListMembers,
@@ -79,7 +79,19 @@ export interface E2eeEngine {
   openWorkspace(id: string, selfFounded: boolean): Promise<void>;
   listFolder(folderId: string): Promise<EncryptedEntry[]>;
   uploadFile(folderId: string, name: string, bytes: Uint8Array): Promise<void>;
-  downloadFile(folderId: string, entryId: string): Promise<Uint8Array>;
+  /**
+   * Fetch, verify and decrypt a file one chunk at a time, handing each
+   * plaintext chunk to `sink` in MANIFEST ORDER (that ordering is
+   * e2ee-client's `downloadFileTo` contract, and `index` is passed through so
+   * the receiver can enforce it). There is no whole-buffer download on
+   * purpose: holding a decrypted file in the renderer's heap and cloning it
+   * across IPC cost twice the file across two processes (DSK-010).
+   */
+  downloadFileToSink(
+    folderId: string,
+    entryId: string,
+    sink: (bytes: Uint8Array, index: number) => Promise<void>,
+  ): Promise<void>;
   /** The currently-open workspace's members (email + ed25519 signing pubkey for display/revoke). */
   listMembers(): Promise<WorkspaceMember[]>;
   /** Invite a dosya user (by email) into the currently-open workspace. */
@@ -245,8 +257,8 @@ export function defaultEngine(): E2eeEngine {
       await engineUploadFile(fileDeps(), folderId, name, bytes);
     },
 
-    async downloadFile(folderId, entryId) {
-      return await engineDownloadFile(fileDeps(), folderId, entryId);
+    async downloadFileToSink(folderId, entryId, sink) {
+      await engineDownloadFileTo(fileDeps(), folderId, entryId, sink);
     },
 
     async listMembers() {
@@ -265,7 +277,7 @@ export function defaultEngine(): E2eeEngine {
       // instead of just appending a remove-entry -- it mutates `ws` IN PLACE
       // (wk/wkVersion/lastSeen) on success, so this facade's closed-over `ws`
       // reference is immediately at v2 for every subsequent call
-      // (listFolder/uploadFile/downloadFile) with no re-open needed.
+      // (listFolder/uploadFile/downloadFileToSink) with no re-open needed.
       await engineRevokeAccess(e2ee, session, ws, { userId, ed25519Pub });
     },
 

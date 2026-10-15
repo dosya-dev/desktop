@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { execFile } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
+import type { Distribution } from "./distribution";
 
 const WORKFLOW_NAME = "Sync with dosya.workflow";
 
@@ -32,10 +33,21 @@ const LEGACY_WORKFLOW_NAMES = ["Sync with Dosya.workflow"];
 // else. Existing installs must be rewritten or they keep the old label.
 const WORKFLOW_VERSION = "3";
 
-export function installQuickAction(): void {
+export function installQuickAction({
+  distribution,
+  servicesDir = join(homedir(), "Library", "Services"),
+}: { distribution: Distribution; servicesDir?: string }): void {
   if (process.platform !== "darwin") return;
+  // The App Sandbox refuses writes to ~/Library/Services, and pbs cannot be
+  // spawned from inside it, so the Mac App Store build has no Quick Action.
+  // distribution is required (not read here) so this file never imports
+  // currentDistribution as a value - only the type, which is erased - and
+  // stays loadable by Node's test runner without an explicit .ts extension.
+  if (distribution === "mas") {
+    console.log("[services] store build: Quick Action not installed");
+    return;
+  }
 
-  const servicesDir = join(homedir(), "Library", "Services");
   const workflowDir = join(servicesDir, WORKFLOW_NAME);
   const contentsDir = join(workflowDir, "Contents");
   const versionFile = join(contentsDir, ".dosya-version");

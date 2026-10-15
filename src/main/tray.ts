@@ -59,6 +59,12 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
           case "rate-limited": return { icon: "⏳", text: "Waiting" };
           case "offline": return { icon: "⚠", text: "Offline" };
           case "needs-confirmation": return { icon: "⚠", text: "Needs attention" };
+          // Mac App Store builds only: macOS revoked the sandbox grant for
+          // this folder. Same icon family as "needs attention" - it is
+          // waiting on the user, not a transient error - but its own label
+          // so "Reselect" (added with the rest of the reselect UI) reads as
+          // the obvious next step rather than a vague "attention".
+          case "needs-permission": return { icon: "⚠", text: "Needs permission" };
           default: return { icon: "•", text: "" };
         }
       };

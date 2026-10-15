@@ -70,3 +70,31 @@ export function conflictCopyName(input: ConflictNameInput): string {
   // known to be taken.
   return `${base} ${label} #${Date.now()}${ext}`;
 }
+
+/** Matches the label conflictCopyName() writes, with or without a #n tie-break. */
+const COPY_LABEL = /\(conflict copy \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} from [^)]*\)/;
+
+/** True when `fileName` is a conflict copy this engine (or another device) made. */
+export function isConflictCopyName(fileName: string): boolean {
+  return COPY_LABEL.test(fileName);
+}
+
+/** How long a path that was just kept-both waits before it may be again. */
+export const AUTO_KEEP_BOTH_COOLDOWN_MS = 60 * 60 * 1000;
+
+/**
+ * Whether a keep-both pair may resolve this conflict on its own by writing a
+ * conflict copy, or must leave it for the user.
+ *
+ * Automatic copies are only safe while they converge. A conflict copy that is
+ * itself flagged again, or a path that comes back as a conflict right after
+ * being kept-both, means the engine is looping: on 2026-10-15 a 16-file folder
+ * grew to 10,600 files of "x (conflict copy ...) (conflict copy ...)" in three
+ * hours, uploaded to the cloud as it went. Either sign stops the automatic
+ * copy; the conflict still shows in Issues for the user to decide.
+ */
+export function mayAutoKeepBoth(input: { fileName: string; lastAutoAt: number | undefined; now: number }): boolean {
+  if (isConflictCopyName(input.fileName)) return false;
+  if (input.lastAutoAt !== undefined && input.now - input.lastAutoAt < AUTO_KEEP_BOTH_COOLDOWN_MS) return false;
+  return true;
+}

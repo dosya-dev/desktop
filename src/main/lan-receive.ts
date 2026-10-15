@@ -1,8 +1,24 @@
-import { app, dialog } from "electron";
 import { open as fsOpen, unlink, type FileHandle } from "fs/promises";
 import { basename, join } from "path";
 import { randomUUID } from "crypto";
+import { createRequire } from "node:module";
 import { longPath } from "./sync/paths";
+
+// No top-level `import { app, dialog } from "electron"` here on purpose:
+// outside the Electron runtime that named import throws ("electron" is a
+// CJS module whose export has no `app`/`dialog` properties to destructure),
+// which would make this whole file - and the real cleanup path it holds -
+// unloadable under `node --test`. Deferred into the default-deps factory
+// below via `require`, so it is only ever reached when `openSink` is called
+// without an injected `deps` (i.e. real production use, never a test).
+const electronRequire = createRequire(import.meta.url);
+function realLanOpenDeps(): LanOpenDeps {
+  const { app, dialog } = electronRequire("electron") as typeof import("electron");
+  return {
+    showSaveDialog: (o) => dialog.showSaveDialog(o),
+    downloadsDir: () => app.getPath("downloads"),
+  };
+}
 
 /**
  * Where a file arriving over LAN Transfer is written.
@@ -34,12 +50,26 @@ interface Sink {
 
 const sinks = new Map<string, Sink>();
 
+/** How many receive sinks are open. Lets the quit/crash paths be asserted. */
+export function openSinkCount(): number {
+  return sinks.size;
+}
+
 export interface LanOpenResult {
   ok: boolean;
   id?: string;
 }
 
-export async function openSink(name: unknown, size: unknown): Promise<LanOpenResult> {
+export interface LanOpenDeps {
+  showSaveDialog: (opts: { title: string; defaultPath: string }) => Promise<{ canceled: boolean; filePath?: string }>;
+  downloadsDir: () => string;
+}
+
+export async function openSink(
+  name: unknown,
+  size: unknown,
+  deps: LanOpenDeps = realLanOpenDeps(),
+): Promise<LanOpenResult> {
   if (typeof name !== "string" || name.length === 0 || name.length > 500) {
     throw new Error("Invalid file name");
   }
@@ -50,9 +80,9 @@ export async function openSink(name: unknown, size: unknown): Promise<LanOpenRes
   // Reduce to a leaf name, then strip anything that could still steer a path.
   const safeName = basename(name).replace(/[/\\]/g, "_").replace(/^\.+/, "") || "received-file";
 
-  const { canceled, filePath } = await dialog.showSaveDialog({
+  const { canceled, filePath } = await deps.showSaveDialog({
     title: "Save file from the other device",
-    defaultPath: join(app.getPath("downloads"), safeName),
+    defaultPath: join(deps.downloadsDir(), safeName),
   });
   if (canceled || !filePath) return { ok: false };
 
@@ -76,14 +106,39 @@ export async function writeSink(id: unknown, bytes: unknown): Promise<void> {
     await destroySink(id as string, true);
     throw new Error("Transfer exceeded the size the sender declared");
   }
-  await sink.handle.write(buf);
+  // A failed write must END the transfer, not just report an error for this
+  // one call. Without this, the sink stayed open and valid: the batch was
+  // gone (the renderer's batcher clears its buffer before awaiting), later
+  // batches still succeeded, and the sender's `file-end` then closed the sink
+  // normally - so the user was told the file had been received, and got one
+  // with a hole in the middle. Destroying the sink removes the partial file
+  // AND invalidates the id, so the `close` that follows cannot succeed.
+  // `vault-save.ts` already treats a write error this way; this is the same
+  // contract on the LAN path.
+  try {
+    await sink.handle.write(buf);
+  } catch (err) {
+    await destroySink(id as string, true);
+    throw new Error(
+      `Write failed after ${sink.written} bytes; the partial file was removed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
   sink.written += buf.byteLength;
 }
 
 export async function closeSink(id: unknown): Promise<{ path: string }> {
   const sink = requireSink(id);
-  await sink.handle.close();
-  sinks.delete(id as string);
+  try {
+    await sink.handle.close();
+  } finally {
+    // In a finally, not after the await: a close that rejects left the entry
+    // in the map forever, permanently burning one of MAX_OPEN_SINKS and
+    // leaving an id the renderer could call again. There is no handle left to
+    // retry with either way. (Same contract as `closeVaultSink`.)
+    sinks.delete(id as string);
+  }
   return { path: sink.path };
 }
 

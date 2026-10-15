@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { useLocation } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Settings,
@@ -16,6 +17,7 @@ import {
   Globe,
   Eraser,
   RotateCcw,
+  Bug,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -25,6 +27,7 @@ import { UpdatesSection } from "@/components/UpdatesSection";
 import { toast } from "sonner";
 import { webAppUrl } from "../lib/web-app-url";
 import { SwatchPicker } from "../components/SwatchPicker";
+import { openReport } from "../lib/report-problem-store";
 
 /** Shape of GET /api/workspaces/:id. */
 interface SettingsResponse {
@@ -65,6 +68,10 @@ const LIMIT_PERMISSIONS = [
   "change_max_concurrent_uploads",
 ] as const;
 
+function isTab(v: string | null): v is Tab {
+  return v !== null && TABS.some((t) => t.id === v);
+}
+
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "general", label: "General", icon: <Settings size={16} /> },
   { id: "limits", label: "Hard limits", icon: <HardDrive size={16} /> },
@@ -78,7 +85,12 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
 export function SettingsPage() {
   const { active } = useWorkspace();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<Tab>("general");
+  // `?tab=updates` lands the user on a section: the menu's Check for Updates
+  // sends them here to watch the check it just started.
+  const location = useLocation();
+  const requestedTab = new URLSearchParams(location.search).get("tab");
+  const [tab, setTab] = useState<Tab>(() => (isTab(requestedTab) ? requestedTab : "general"));
+  useEffect(() => { if (isTab(requestedTab)) setTab(requestedTab); }, [requestedTab]);
   const { can } = usePermissions();
   const canSaveLimits = LIMIT_PERMISSIONS.some((p) => can(p));
   // The security toggles are all manage_settings fields on the server.
@@ -438,6 +450,25 @@ function TroubleshootingSection() {
 
   return (
     <div className="space-y-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="mb-1 font-semibold">Report a bug</h3>
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Opens a support ticket with this app's version, your system and, if
+            you choose, the recent log attached.
+          </p>
+        </div>
+        <button
+          onClick={() => openReport()}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          <Bug size={14} /> Report a bug
+        </button>
+      </div>
+
+      <div className="border-t" style={{ borderColor: "var(--color-border)" }} />
+
       <div className="flex items-start justify-between gap-4">
         <div>
           <h3 className="mb-1 font-semibold">Clear cache</h3>

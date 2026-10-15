@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ChevronRight,
   LayoutGrid,
@@ -50,6 +49,7 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes, formatDate } from "@/lib/format";
 import { activeFilter as readActiveFilter } from "@/lib/files-params";
+import { restoreTarget } from "@/lib/view-restore";
 import { useLibrary } from "@/lib/use-library";
 import {
   kindForFilter, sortOptionsFor, plural, KIND_COPY, LIBRARY_QUERY_ROOT,
@@ -58,6 +58,7 @@ import {
 import { timeAgo, extOf, colorFor, originLabel, isOfficeFile, hiddenTitle, kindLabel, regionLabel } from "@/lib/file-type";
 import { toast } from "sonner";
 import { FileIcon, FolderIcon, fileIconSrc } from "@/components/files/FileIcon";
+import { FolderPickerModal } from "@/components/files/FolderPickerModal";
 import { FileViewer, downloadViaDialog } from "@/components/files/FileViewer";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { FileDetailPanel } from "@/components/files/FileDetailPanel";
@@ -72,6 +73,7 @@ import {
   type ColumnKey, type FileRow, type FolderRow,
 } from "@/lib/file-columns";
 import { Modal } from "@/components/files/Modal";
+import { isSimple, useMenuActions, useMenuState } from "@/lib/menu-bus";
 import {
   readDroppedEntries, orderedDirs, createFolderTree, resolveTargets,
   MAX_DROPPED_FILES, type FolderPlan,
@@ -283,8 +285,15 @@ export function FileBrowserPage() {
   const [unlockError, setUnlockError] = useState("");
   const [unlocking, setUnlocking] = useState(false);
 
-  // Guards the one-shot restore of ?view=/?panel= from the URL on first load.
-  const openRestored = useRef(false);
+  // Deep-link restore memory (see `restoreTarget` in @/lib/view-restore):
+  // `lastRestoredId` is the id the restore effect itself last opened, so a
+  // repeat of that same id (the url-mirror effect writing it straight back)
+  // is a no-op, while a genuinely different id - even on an already-mounted
+  // page - restores. `restorePassed` is separate: it only latches once the
+  // loading gate below has cleared at least once, and gates the url-mirror
+  // effect so it never fires before the first restore attempt has run.
+  const lastRestoredId = useRef<string | null>(null);
+  const restorePassed = useRef(false);
 
   /** Open state of the collapsed-breadcrumb "…" menu. */
   const [crumbsOpen, setCrumbsOpen] = useState(false);
@@ -647,29 +656,69 @@ export function FileBrowserPage() {
     // In library mode the listing query is disabled, so `data` never arrives -
     // wait on the library feed instead, or a ?view=/?panel= link into the
     // library would never restore.
-    if (openRestored.current || (isLibraryView ? library.isLoading : isLoading || !data)) return;
-    const viewId = searchParams.get("view");
-    const panelId = searchParams.get("panel");
-    const id = viewId || panelId;
-    const action: "view" | "detail" = viewId ? "view" : "detail";
-    if (!id) { openRestored.current = true; return; }
+    if (isLibraryView ? library.isLoading : isLoading || !data) return;
+    restorePassed.current = true;
+    const decision = restoreTarget(searchParams, lastRestoredId.current);
+    if (decision.type === "clear") { lastRestoredId.current = null; return; }
+    if (decision.type === "noop") return;
+    const { id, action } = decision;
     const inList = allFiles.find((f) => f.id === id);
-    if (inList) { openFileWithLockCheck(inList, action); openRestored.current = true; return; }
+    if (inList) { openFileWithLockCheck(inList, action); lastRestoredId.current = id; return; }
     let cancelled = false;
     (async () => {
+      let opened = false;
       try {
         const res = await api.get<{ ok: boolean; file?: FileRow }>(`/api/files/${id}`);
-        if (!cancelled && res.ok && res.file) openFileWithLockCheck(res.file, action);
-      } catch { /* stale/deleted file - the mirror effect will drop the param */ }
-      finally { if (!cancelled) openRestored.current = true; }
+        if (!cancelled && res.ok && res.file) {
+          openFileWithLockCheck(res.file, action);
+          opened = true;
+        }
+      } catch { /* stale or deleted file: cleared below */ }
+      finally {
+        if (!cancelled) {
+          lastRestoredId.current = id;
+          // Drop the dead param here. The mirror effect cannot do it - it
+          // runs on [viewerFile, panel], and nothing opened, so neither
+          // changed and it never fires. Without this the URL keeps naming a
+          // file that no longer exists, and a reload re-fetches a 404 every
+          // time. Removing `view`/`panel` makes the next pass of the restore
+          // effect take its "clear" branch, which resets lastRestoredId and
+          // stops, so this cannot loop.
+          if (!opened) {
+            setSearchParams((prev) => {
+              const next = new URLSearchParams(prev);
+              next.delete("view");
+              next.delete("panel");
+              return next.toString() === prev.toString() ? prev : next;
+            }, { replace: true });
+          }
+        }
+      }
     })();
+    // A param change before this fetch resolves re-runs the effect, which
+    // runs this cleanup first - `cancelled` stops the stale response from
+    // opening the wrong file (or marking a id no longer in the params as
+    // "restored").
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoading, data, isLibraryView, library.isLoading]);
+  }, [isLoading, data, isLibraryView, library.isLoading, searchParams]);
 
   // Mirror the open viewer/panel into the URL so it survives a reload.
+  //
+  // `viewerFile`/`panel` are this effect's only deps, so EVERY way either one
+  // can change - a row click, a context-menu open, next/prev navigation, an
+  // unlock, a close, or the restore effect's own open - runs this effect.
+  // That makes it the single funnel to record "what the url now reflects
+  // is state we already have": set `lastRestoredId` here, before writing
+  // the params, so the restore effect that this write re-triggers (via its
+  // own `searchParams` dependency) sees a match and decides `noop` instead
+  // of opening the same file a second time. Without this, a plain click
+  // would: setPanel -> mirror writes ?panel=<id> -> searchParams changes ->
+  // restore effect re-runs with a stale (pre-click) `lastRestoredId` ->
+  // sees a "new" id -> calls openFileWithLockCheck again.
   useEffect(() => {
-    if (!openRestored.current) return;
+    lastRestoredId.current = viewerFile?.id ?? panel?.file.id ?? null;
+    if (!restorePassed.current) return;
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       if (viewerFile) { next.set("view", viewerFile.id); next.delete("panel"); }
@@ -855,6 +904,74 @@ export function FileBrowserPage() {
       setVersionUploadTarget(null);
     }
   }, [versionUploadTarget]);
+
+  // ── Application menu ───────────────────────────────────────
+
+  // What File and View need to enable and check: the folder listing's layout
+  // (the library keeps its own per-kind layout, so it reports none) and how
+  // much is selected. Reset when the page unmounts so a stale count cannot
+  // leave "Download Selected…" lit on the dashboard.
+  useMenuState(
+    {
+      viewMode: isLibraryView ? null : viewMode,
+      // Trashed items are restored or purged, never downloaded, shared or
+      // inspected, so the trash reports no selection to the menu.
+      selectionCount: showDeleted ? 0 : selected.size + selectedFolders.size,
+    },
+    { viewMode: null, selectionCount: 0 },
+  );
+
+  useMenuActions((action) => {
+    if (action.kind === "view") {
+      if (!isLibraryView) setViewMode(action.mode);
+      return true;
+    }
+    if (action.kind !== "simple") return false;
+    switch (action.id) {
+      case "new-folder":
+        if (!showDeleted && !isLibraryView) setShowCreateFolder(true);
+        return true;
+      case "download-selected": {
+        if (!can("download_files") || (selected.size === 0 && selectedFolders.size === 0)) return true;
+        void (async () => {
+          try {
+            const r = await window.electronAPI.downloadArchive(Array.from(selected), Array.from(selectedFolders));
+            if (r.ok) toast.success("Downloaded", { description: `Saved to ${r.path ?? "disk"}` });
+            else if (!r.canceled) toast.error("Download failed");
+          } catch (e: any) {
+            toast.error(e instanceof ApiError ? e.message : "Failed");
+          }
+        })();
+        return true;
+      }
+      case "share-selected": {
+        if (!can("create_share_links")) return true;
+        // A share link names one file or one folder (ShareTarget), the same
+        // rule the toolbar's Share button follows.
+        const fileIds = Array.from(selected);
+        const folderIds = Array.from(selectedFolders);
+        if (fileIds.length === 1 && folderIds.length === 0) {
+          const file = allFiles.find((f) => f.id === fileIds[0]);
+          setShareTarget({ target: { kind: "file", fileIds: [fileIds[0]] }, name: file?.name ?? "file" });
+        } else if (folderIds.length === 1 && fileIds.length === 0) {
+          const folder = allFolders.find((f) => f.id === folderIds[0]);
+          setShareTarget({ target: { kind: "folder", folderId: folderIds[0] }, name: folder?.name ?? "folder" });
+        } else if (fileIds.length + folderIds.length > 0) {
+          toast.error("Select one file or one folder to share");
+        }
+        return true;
+      }
+      case "toggle-details": {
+        if (panel) { setPanel(null); return true; }
+        if (showDeleted || selected.size !== 1 || selectedFolders.size !== 0) return true;
+        const file = allFiles.find((f) => f.id === Array.from(selected)[0]);
+        if (file) setPanel({ file, tab: "info" });
+        return true;
+      }
+      default:
+        return false;
+    }
+  });
 
   // ── Keyboard shortcuts (web parity) ────────────────────────
 
@@ -2316,6 +2433,7 @@ export function FileBrowserPage() {
           files={files}
           onClose={() => setViewerFile(null)}
           onNavigate={(f) => setViewerFile(f as FileRow)}
+          workspaceId={active?.id}
         />
       )}
     </div>
@@ -2502,128 +2620,3 @@ function FileCard({
   );
 }
 
-function FolderPickerModal({
-  title,
-  actionLabel,
-  folders,
-  selectedId,
-  excludeId,
-  isPending,
-  onSelect,
-  onConfirm,
-  onClose,
-}: {
-  title: string;
-  actionLabel: string;
-  folders: { id: string; name: string; parent_id: string | null; file_count: number }[];
-  selectedId: string | null;
-  excludeId?: string;
-  isPending: boolean;
-  onSelect: (id: string | null) => void;
-  onConfirm: () => void;
-  onClose: () => void;
-}) {
-  type Folder = { id: string; name: string; parent_id: string | null; file_count: number };
-
-  // Flatten the (always-expanded) tree into a single ordered list ONCE, in
-  // O(n) via a children map - the old code re-filtered the whole array at every
-  // node (O(n²)) and rendered every folder unconditionally. Row 0 is the
-  // synthetic "Root" option so the whole thing virtualizes uniformly.
-  const rows = useMemo(() => {
-    const childrenMap = new Map<string | null, Folder[]>();
-    for (const f of folders) {
-      if (f.id === excludeId) continue; // drop the excluded folder (and thus its subtree)
-      const arr = childrenMap.get(f.parent_id);
-      if (arr) arr.push(f);
-      else childrenMap.set(f.parent_id, [f]);
-    }
-    const out: { folder: Folder | null; depth: number }[] = [{ folder: null, depth: 0 }];
-    const walk = (parentId: string | null, depth: number) => {
-      for (const f of childrenMap.get(parentId) ?? []) {
-        out.push({ folder: f, depth });
-        walk(f.id, depth + 1);
-      }
-    };
-    walk(null, 0);
-    return out;
-  }, [folders, excludeId]);
-
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const ROW_H = 36;
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_H,
-    overscan: 12,
-  });
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div
-        className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="border-b px-5 py-4" style={{ borderColor: "var(--color-border)" }}>
-          <h3 className="text-lg font-semibold">{title}</h3>
-          <p className="text-xs text-[var(--color-text-muted)]">Select destination folder</p>
-        </div>
-
-        <div ref={scrollRef} className="max-h-72 overflow-y-auto p-2">
-          <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
-            {virtualizer.getVirtualItems().map((vi) => {
-              const row = rows[vi.index];
-              const isRoot = row.folder === null;
-              const id = isRoot ? null : row.folder!.id;
-              const selected = selectedId === id;
-              return (
-                <button
-                  key={vi.key}
-                  onClick={() => onSelect(id)}
-                  className={`absolute left-0 flex w-full items-center gap-2.5 rounded-lg pr-3 text-sm transition-colors ${
-                    selected
-                      ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
-                      : "hover:bg-[var(--color-bg-secondary)]"
-                  }`}
-                  style={{
-                    top: 0,
-                    height: ROW_H,
-                    transform: `translateY(${vi.start}px)`,
-                    paddingLeft: `${12 + (isRoot ? 0 : row.depth * 20)}px`,
-                  }}
-                >
-                  <FolderIcon fileCount={isRoot ? 1 : row.folder!.file_count} size={16} />
-                  <span className="truncate">{isRoot ? "Root (top level)" : row.folder!.name}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {folders.length === 0 && (
-            <p className="py-4 text-center text-sm text-[var(--color-text-muted)]">
-              No folders yet
-            </p>
-          )}
-        </div>
-
-        <div className="flex justify-end gap-2 border-t px-5 py-4" style={{ borderColor: "var(--color-border)" }}>
-          <button
-            onClick={onClose}
-            className="rounded-lg border px-4 py-2 text-sm"
-            style={{ borderColor: "var(--color-border)" }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={isPending}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
-            style={{ background: "var(--color-primary)" }}
-          >
-            {isPending ? "Working..." : actionLabel}
-          </button>
-        </div>
-      </div>
-      <div className="fixed inset-0 -z-10" onClick={onClose} />
-    </div>
-  );
-}

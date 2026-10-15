@@ -16,8 +16,8 @@
  *             from a terminal that itself runs inside some other snap is not
  *             mistaken for a Snap Store install (that would silently disable
  *             its updates).
- *   mas       Electron sets process.mas for a Mac App Store build. Not shipped
- *             yet; recognised now so nothing here needs rewiring when it is.
+ *   mas       Electron sets process.mas for a Mac App Store build, which is
+ *             what the sandboxed `mas` target in electron-builder.yml produces.
  *
  * Pure: no Electron import, so Node's test runner covers every branch.
  */
@@ -41,6 +41,23 @@ export function detectDistribution(signals: DistributionSignals): Distribution {
   if (signals.mas === true) return "mas";
   if (signals.env.SNAP && signals.env.SNAP_NAME === SNAP_NAME) return "snap";
   return "direct";
+}
+
+/** The subset of `process` the detection reads. Named so a test can hand in a fake. */
+export interface ProcessSignals {
+  windowsStore?: boolean;
+  mas?: boolean;
+  env: Record<string, string | undefined>;
+}
+
+/**
+ * The distribution of the running process. The only place `process.mas` and
+ * `process.windowsStore` are read; everything else takes the resulting value.
+ */
+export function currentDistribution(
+  proc: ProcessSignals = process as unknown as ProcessSignals,
+): Distribution {
+  return detectDistribution({ windowsStore: proc.windowsStore, mas: proc.mas, env: proc.env });
 }
 
 /** True when a store, not electron-updater, delivers updates for this install. */

@@ -1,6 +1,7 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
+import { acknowledgementsPlugin } from "./scripts/acknowledgements-plugin";
 
 /**
  * Component-level renderer tests only. The main-process suite (src/main/**)
@@ -10,7 +11,8 @@ import path from "node:path";
  * node:test path cannot give it.
  */
 export default defineConfig({
-  plugins: [react()],
+  // The same virtual module the renderer build gets (AboutPage imports it).
+  plugins: [react(), acknowledgementsPlugin(__dirname)],
   resolve: {
     // Mirrors tsconfig.web.json's "@/*" -> "./src/renderer/*" - a component
     // test's import graph reaches modules that use the alias (e.g.
@@ -31,6 +33,10 @@ export default defineConfig({
       // which node:test cannot resolve, so its suite runs here instead (the
       // same reason as the sync files below).
       "src/renderer/lib/lan-peer.test.ts",
+      // lan-transport.ts imports "@/lib/api-client" (a bundler-style path
+      // alias) which node:test cannot resolve either - same reason as
+      // lan-peer.ts above, so this suite runs here too.
+      "src/renderer/lib/lan-transport.test.ts",
       // Pure-function tests ported straight from the web copy (see the file's
       // own header) - vitest's own `describe`/`it` don't run under node:test,
       // so this needs the same explicit carve-out as lan-peer.test.ts above.
@@ -53,9 +59,33 @@ export default defineConfig({
       "src/main/sync/sync-engine-session-expired.test.ts",
       "src/main/sync/filesystem-safety.test.ts",
       "src/main/sync/sync-engine-path-safety.test.ts",
+      "src/main/sync/sync-engine-keep-both-loop.test.ts",
       "src/main/sync/remote-client.path-safety.test.ts",
       "src/main/sync/remote-client.refusals.test.ts",
       "src/main/sync/sync-engine-refusals.test.ts",
+      "src/main/sync/sync-engine-bookmarks.test.ts",
+      // LocalWatcher uses a TS parameter property too
+      // (`private localPath: string`), so Node's type-stripping runner
+      // refuses it with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX - same reason as
+      // the sync files above.
+      "src/main/sync/local-watcher.test.ts",
+      "src/main/sync/reconciler-index.test.ts",
+      // lan-receive.ts imports longPath from ./sync/paths with an
+      // extensionless relative specifier (same bundler-style resolution as
+      // the sync files above) - node:test cannot resolve it, so this one
+      // runs here instead of the node:test convention every other
+      // src/main/*.test.ts file uses.
+      "src/main/lan-receive.test.ts",
+      // ipc-sender.ts imports originAllowed from ./trusted-origins with the
+      // same extensionless relative specifier, so its suite runs here for the
+      // same reason as lan-receive above. Its sibling
+      // src/main/ipc-gate-coverage.test.ts reads source files as plain text
+      // and has no import graph, so that one stays on node:test.
+      "src/main/ipc-sender.test.ts",
+      // vault-save.ts grew an incremental sink that imports longPath from
+      // ./sync/paths with the same extensionless relative specifier, so its
+      // suite moved here from node:test for the same reason as lan-receive.
+      "src/main/vault-save.test.ts",
     ],
   },
 });

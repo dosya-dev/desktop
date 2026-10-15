@@ -27,6 +27,8 @@ export class RemotePoller extends EventEmitter {
   private polling = false;
   /** Set when a poll is requested while one is already running; re-runs once after. */
   private pollRequested = false;
+  /** User/watcher requests need reconciliation even without cloud changes. */
+  private snapshotRequested = false;
   private consecutiveErrors = 0;
   private lastSnapshotHash = "";
   private backedOff = false;
@@ -75,6 +77,7 @@ export class RemotePoller extends EventEmitter {
   }
 
   triggerNow(): void {
+    this.snapshotRequested = true;
     // User/watcher triggered - reset to active interval
     this.lastChangeAt = Date.now();
     if (this.currentIntervalMs !== this.pair.pollIntervalMs && !this.backedOff) {
@@ -116,9 +119,12 @@ export class RemotePoller extends EventEmitter {
     try {
       const snapshot = await this.fetchSnapshot();
 
-      // Only emit if snapshot actually changed
+      // Ordinary idle polls can skip unchanged snapshots. An explicit local
+      // retry/change must still reach the reconciler; remote equality says
+      // nothing about the local version or a corrected access error.
       const hash = this.hashSnapshot(snapshot);
-      if (hash !== this.lastSnapshotHash) {
+      if (hash !== this.lastSnapshotHash || this.snapshotRequested) {
+        this.snapshotRequested = false;
         this.lastSnapshotHash = hash;
         this.lastChangeAt = Date.now(); // reset idle timer
         this.emit("snapshot", snapshot);

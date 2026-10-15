@@ -6,7 +6,7 @@ test.describe("Upload queue vs workspace switch", () => {
 
     // Enqueue one file through the dropzone's hidden input; the mock PUT
     // stalls 8s so it is guaranteed to still be uploading when we switch.
-    await appPage.locator('input[type="file"]').setInputFiles({
+    await appPage.getByTestId("upload-files-input").setInputFiles({
       name: "big.bin",
       mimeType: "application/octet-stream",
       buffer: Buffer.alloc(1024 * 1024),
@@ -36,7 +36,7 @@ test.describe("Upload queue vs workspace switch", () => {
       mimeType: "application/octet-stream",
       buffer: Buffer.alloc(1024),
     }));
-    await appPage.locator('input[type="file"]').setInputFiles(files);
+    await appPage.getByTestId("upload-files-input").setInputFiles(files);
     await expect(appPage.getByText("Uploading")).toBeVisible({ timeout: 10_000 });
 
     const readInitCount = () =>

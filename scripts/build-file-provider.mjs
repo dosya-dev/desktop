@@ -21,6 +21,31 @@ const NAME = "DosyaFileProvider";
  *  extension silently never loads on a Mac where the app runs fine. */
 const DEPLOYMENT_TARGET = "12.0";
 
+/** The extension identifier of the Developer ID build. The store build passes its own. */
+export const DEFAULT_EXTENSION_BUNDLE_ID = "dev.dosya.desktop.fileprovider";
+
+/**
+ * Fills the Info.plist template. Pure, so the substitution is testable without
+ * compiling Swift. Throws on a missing identifier or a surviving placeholder:
+ * an extension whose identifier does not start with the app's is refused by
+ * macOS at registration with no useful message.
+ */
+export function renderInfoPlist({ template, version = "0.0.0", buildVersion = version, bundleId } = {}) {
+  if (!bundleId) throw new Error("renderInfoPlist: bundleId is required");
+  // Two separate values, and on a store build they differ: CFBundleVersion is
+  // the app's build version (one monotonic integer per upload, which App Store
+  // Connect requires the extension to match exactly), CFBundleShortVersionString
+  // the marketing version.
+  const filled = template
+    .replaceAll("__BUILD_VERSION__", buildVersion)
+    .replaceAll("__VERSION__", version)
+    .replaceAll("__BUNDLE_ID__", bundleId);
+  const values = filled.replace(/<!--[\s\S]*?-->/g, "");
+  const leftover = values.match(/__[A-Z_]+__/);
+  if (leftover) throw new Error(`Info.plist still carries an unexpanded placeholder: ${leftover[0]}`);
+  return filled;
+}
+
 /**
  * The keychain group, read from the Swift rather than restated here. The
  * extension resolves whichever entitled group ends in this suffix, so a
@@ -52,7 +77,7 @@ function swiftSources() {
     .map((f) => join(sources, String(f)));
 }
 
-export function buildFileProvider({ outDir, arches = ["arm64", "x86_64"], version = "0.0.0" } = {}) {
+export function buildFileProvider({ outDir, arches = ["arm64", "x86_64"], version = "0.0.0", buildVersion = version, bundleId = DEFAULT_EXTENSION_BUNDLE_ID } = {}) {
   if (process.platform !== "darwin") {
     console.log("[file-provider] not macOS, skipping");
     return null;
@@ -100,12 +125,11 @@ export function buildFileProvider({ outDir, arches = ["arm64", "x86_64"], versio
   mkdirSync(join(appex, "Contents", "MacOS"), { recursive: true });
   execFileSync("lipo", ["-create", ...slices, "-output", join(appex, "Contents", "MacOS", NAME)]);
 
-  // The plist is a template: the version is stamped from the app's.
-  const plist = readFileSync(plistTemplate, "utf8").replaceAll("__VERSION__", version);
+  const plist = renderInfoPlist({ template: readFileSync(plistTemplate, "utf8"), version, buildVersion, bundleId });
   writeFileSync(join(appex, "Contents", "Info.plist"), plist);
 
   rmSync(work, { recursive: true, force: true });
-  console.log(`[file-provider] built ${appex} (${arches.join(", ")}, version ${version})`);
+  console.log(`[file-provider] built ${appex} (${arches.join(", ")}, version ${version}, ${bundleId})`);
   return appex;
 }
 
@@ -114,15 +138,17 @@ export function buildFileProvider({ outDir, arches = ["arm64", "x86_64"], versio
  * in. Returns null when the team id is unknown, which is the caller's signal
  * that it must not sign.
  */
-export function materializeEntitlements({ outDir, teamId }) {
+export function materializeEntitlements({ outDir, teamId, bundleId = DEFAULT_EXTENSION_BUNDLE_ID }) {
   if (!teamId) return null;
+  if (!bundleId) throw new Error("materializeEntitlements: bundleId is required");
   const template = readFileSync(join(here, "..", "build", "entitlements.fileprovider.plist"), "utf8");
-  const filled = template.replaceAll("__TEAM_ID__", teamId);
+  const filled = template.replaceAll("__TEAM_ID__", teamId).replaceAll("__BUNDLE_ID__", bundleId);
   // Comments are stripped before the check: the template explains in prose why
   // $(AppIdentifierPrefix) is NOT used, and that sentence is not a value.
   const values = filled.replace(/<!--[\s\S]*?-->/g, "");
-  if (values.includes("__TEAM_ID__") || values.includes("$(")) {
-    throw new Error("entitlements still carry an unexpanded placeholder");
+  const leftover = values.match(/__[A-Z_]+__/);
+  if (leftover || values.includes("$(")) {
+    throw new Error(`entitlements still carry an unexpanded placeholder: ${leftover ? leftover[0] : "$("}`);
   }
   // Comments are removed, not just ignored: codesign hands entitlements to
   // AMFI, whose XML parser rejects them outright with "syntax error near line N".

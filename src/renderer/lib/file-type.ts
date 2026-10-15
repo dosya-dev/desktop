@@ -102,7 +102,9 @@ export function isBook(name: string): boolean {
 // Deliberately narrow. `.cbz` and `.epub` are zips too, but both already
 // route to the book reader, and claiming them here would take a working
 // experience away and replace it with a file tree.
-const ARCHIVE_EXTS = new Set(["zip"]);
+// `iso` and `img` open in the same pane: the API lists an ISO 9660 image the
+// way it lists a zip, and refuses a raw .img with a sentence the pane shows.
+const ARCHIVE_EXTS = new Set(["zip", "iso", "img"]);
 export function isArchive(name: string): boolean {
   return ARCHIVE_EXTS.has(extOf(name));
 }

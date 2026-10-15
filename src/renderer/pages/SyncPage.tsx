@@ -1,5 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "../lib/auth-context";
+import { useDistribution } from "../lib/use-distribution";
+import { chooseSyncFolder } from "../lib/sync-folder-choice";
 import { FinderLocationToggle } from "../components/FinderLocationToggle";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -27,13 +30,16 @@ import {
   ArrowDown,
   ShieldCheck,
   HardDriveDownload,
+  Bug,
 } from "lucide-react";
-import { useSyncStore, type SyncPairRuntimeStatus, type SyncConflict, type SyncLogEntry, type ActiveTransfer } from "@/lib/sync-store";
+import { useSyncStore, type SyncPairRuntimeStatus, type SyncLogEntry, type ActiveTransfer } from "@/lib/sync-store";
 import { useWorkspace } from "@/lib/workspace-context";
 import { api } from "@/lib/api-client";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { FolderIcon, syncIconSrc } from "@/components/files/FileIcon";
 import { toast } from "sonner";
+import { openReport } from "../lib/report-problem-store";
+import { ConflictList } from "../components/sync/ConflictList";
 
 type Tab = "overview" | "conflicts" | "activity" | "settings";
 
@@ -41,7 +47,6 @@ type Tab = "overview" | "conflicts" | "activity" | "settings";
 // reference on every render when the store is momentarily empty.
 const EMPTY_PAIRS: SyncPairRuntimeStatus[] = [];
 const EMPTY_TRANSFERS: ActiveTransfer[] = [];
-const EMPTY_CONFLICTS: SyncConflict[] = [];
 
 /** Format an elapsed duration as m:ss or h:mm:ss. */
 function formatElapsed(ms: number): string {
@@ -67,15 +72,29 @@ const SYNC_MODES = [
 
 export function SyncPage() {
   const { active, workspaces } = useWorkspace();
-  const { status, conflicts, isLoading, loadFailed, init, refresh } = useSyncStore();
+  const { status, isLoading, loadFailed, init, refresh } = useSyncStore();
   const [tab, setTab] = useState<Tab>("overview");
   const [showAdd, setShowAdd] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // Sync › Add Folder to Sync… arrives as `/sync?add=1`.
+  const location = useLocation();
+  const addRequested = new URLSearchParams(location.search).get("add") === "1";
+  useEffect(() => { if (addRequested) setShowAdd(true); }, [addRequested, location.key]);
 
   useEffect(() => {
     const cleanup = init();
     return cleanup;
   }, [init]);
+
+  // Sandboxed builds: reopening the picker is the only way to get a fresh
+  // macOS grant. The new bookmark is saved with whatever folder the user
+  // points at, which may legitimately be a moved or renamed one.
+  const reselectFolder = async (pairId: string, currentPath: string) => {
+    const picked = await window.electronAPI.pickLocalFolder({ defaultPath: currentPath });
+    if (!picked) return;
+    await window.electronAPI.updateSyncPair(pairId, { localPath: picked.path, bookmark: picked.bookmark });
+    await refresh();
+  };
 
   // Tick every second while anything is syncing so the elapsed-time readouts
   // advance even when the engine emits no status updates (a slow or stuck
@@ -90,9 +109,6 @@ export function SyncPage() {
 
   const allPairs = status?.pairs ?? EMPTY_PAIRS;
   const allTransfers = status?.activeTransfers ?? EMPTY_TRANSFERS;
-  // Use unresolvedConflicts from status (always up-to-date) as primary source,
-  // fall back to the separate conflicts array from the store
-  const allConflicts = (status?.unresolvedConflicts?.length ? status.unresolvedConflicts : conflicts) ?? EMPTY_CONFLICTS;
 
   // Show only data belonging to the active workspace.
   // Sync runs in the background for all workspaces - this is just a UI filter.
@@ -106,7 +122,13 @@ export function SyncPage() {
   );
   const pairs = useMemo(() => allPairs.filter((p) => pairIds.has(p.pairId)), [allPairs, pairIds]);
   const transfers = useMemo(() => allTransfers.filter((t) => pairIds.has(t.pairId)), [allTransfers, pairIds]);
-  const wsConflicts = useMemo(() => allConflicts.filter((c) => pairIds.has(c.pairId)), [allConflicts, pairIds]);
+  // Status carries counts only; ConflictList pages the list itself.
+  const conflictCountByPair = status?.conflictCountByPair;
+  const wsPairIds = useMemo(() => [...pairIds], [pairIds]);
+  const wsConflictCount = useMemo(
+    () => wsPairIds.reduce((n, id) => n + (conflictCountByPair?.[id] ?? 0), 0),
+    [wsPairIds, conflictCountByPair],
+  );
 
   // Aggregate progress across all syncing pairs
   const syncProgress = useMemo(() => {
@@ -365,7 +387,7 @@ export function SyncPage() {
       <div className="flex gap-1 border-b" style={{ borderColor: "var(--color-border)" }}>
         {([
           { id: "overview" as Tab, label: "Overview" },
-          { id: "conflicts" as Tab, label: "Issues", count: wsConflicts.length + pairs.filter((p) => p.status === "error").length },
+          { id: "conflicts" as Tab, label: "Issues", count: wsConflictCount + pairs.filter((p) => p.status === "error").length },
           { id: "activity" as Tab, label: "Activity" },
           { id: "settings" as Tab, label: "Settings" },
         ]).map((t) => (
@@ -474,12 +496,15 @@ export function SyncPage() {
 
       {tab === "conflicts" && (() => {
         const errorPairs = pairs.filter((p) => p.status === "error" && p.errorMessage);
+        // Sandboxed (Mac App Store) builds only: macOS dropped the grant for
+        // this folder. Not a Retry - the fix is picking the folder again.
+        const permissionPairs = pairs.filter((p) => p.status === "needs-permission");
         // Pairs that are working but in a degraded state, or silently leaving
         // files out. These aren't errors, so they never appeared anywhere -
         // a folder could sit on 10-minute polling, or skip a 200 GB disk
         // image, with nothing but a console line to say so.
         const noticePairs = pairs.filter((p) => p.notices?.length > 0);
-        const hasIssues = wsConflicts.length > 0 || errorPairs.length > 0 || noticePairs.length > 0;
+        const hasIssues = wsConflictCount > 0 || errorPairs.length > 0 || permissionPairs.length > 0 || noticePairs.length > 0;
 
         return (
           <div className="space-y-3">
@@ -490,6 +515,25 @@ export function SyncPage() {
               </div>
             ) : (
               <>
+                {/* Dropped sandbox grants: a reselect, never a retry. */}
+                {permissionPairs.map((p) => (
+                  <div key={p.pairId} className="flex items-start gap-3 rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
+                    <AlertCircle size={16} className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">{p.remoteFolderName}</p>
+                      <p className="mt-0.5 text-xs text-[var(--color-warning)]">macOS needs permission to this folder again.</p>
+                      <p className="mt-1 truncate font-mono text-[11px] text-[var(--color-text-muted)]">{p.localPath}</p>
+                    </div>
+                    <button
+                      onClick={() => void reselectFolder(p.pairId, p.localPath)}
+                      className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+                      style={{ borderColor: "var(--color-border)" }}
+                    >
+                      Reselect folder
+                    </button>
+                  </div>
+                ))}
+
                 {/* Pair errors */}
                 {errorPairs.map((p) => (
                   <div
@@ -503,13 +547,22 @@ export function SyncPage() {
                       <p className="mt-0.5 text-xs text-[var(--color-danger)]">{p.errorMessage}</p>
                       <p className="mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
                     </div>
-                    <button
-                      onClick={() => { window.electronAPI.syncNow(p.pairId); refresh(); }}
-                      className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
-                      style={{ borderColor: "var(--color-border)" }}
-                    >
-                      Retry
-                    </button>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        onClick={() => { window.electronAPI.syncNow(p.pairId); refresh(); }}
+                        className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+                        style={{ borderColor: "var(--color-border)" }}
+                      >
+                        Retry
+                      </button>
+                      <button
+                        onClick={() => openReport({ errorMessage: p.errorMessage ?? "Sync folder in error" })}
+                        className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+                        style={{ borderColor: "var(--color-border)" }}
+                      >
+                        <span className="inline-flex items-center gap-1.5"><Bug size={12} /> Report</span>
+                      </button>
+                    </div>
                   </div>
                 ))}
 
@@ -546,9 +599,8 @@ export function SyncPage() {
                 )}
 
                 {/* File conflicts */}
-                {wsConflicts.map((c) => (
-                  <ConflictCard key={c.id} conflict={c} onResolve={refresh} />
-                ))}
+                {/* Paged: thousands of cards at once ate gigabytes of RAM. */}
+                <ConflictList pairIds={wsPairIds} total={wsConflictCount} />
               </>
             )}
           </div>
@@ -696,6 +748,7 @@ function SyncPairRow({
     offline: { icon: <AlertCircle size={12} />, color: "#f59e0b", label: "Offline", dot: "bg-yellow-500" },
     "rate-limited": { icon: <Clock size={12} />, color: "#f59e0b", label: "Waiting", dot: "bg-yellow-500" },
     "needs-confirmation": { icon: <AlertTriangle size={12} />, color: "#f59e0b", label: "Needs attention", dot: "bg-yellow-500" },
+    "needs-permission": { icon: <AlertCircle size={12} />, color: "var(--color-warning)", label: "Needs permission", dot: "bg-yellow-500" },
   };
 
   // Unknown/transient status falls back to a neutral state, NOT "Error" - a
@@ -802,13 +855,19 @@ function SyncPairRow({
               {s.icon} {s.label}
             </span>
           )}
-          {pair.errorMessage && (pair.status === "error" || pair.status === "offline") && (
+          {pair.errorMessage && (pair.status === "error" || pair.status === "offline" || pair.status === "needs-permission") && (
             // Offline is not a fault of this folder's, so it is warning-toned
             // rather than red - but it IS shown: the row used to say nothing
-            // at all while the poller quietly backed off.
+            // at all while the poller quietly backed off. A dropped sandbox
+            // grant is warning-toned too: it isn't the folder's fault either.
             <p
               className="mt-0.5 max-w-[140px] truncate text-[10px]"
-              style={{ color: pair.status === "offline" ? "#f59e0b" : "var(--color-danger)" }}
+              style={{
+                color:
+                  pair.status === "offline" ? "#f59e0b" :
+                  pair.status === "needs-permission" ? "var(--color-warning)" :
+                  "var(--color-danger)",
+              }}
               title={pair.errorMessage}
             >
               {pair.errorMessage}
@@ -1049,46 +1108,6 @@ function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatu
   );
 }
 
-// ── ConflictCard ────────────────────────────────────────────────────
-
-function ConflictCard({ conflict, onResolve }: { conflict: SyncConflict; onResolve: () => void }) {
-  const resolve = async (resolution: string) => {
-    await window.electronAPI.resolveConflict(conflict.id, resolution);
-    onResolve();
-    toast.success("Conflict resolved");
-  };
-
-  return (
-    <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-      <p className="text-sm font-semibold">{conflict.remoteName}</p>
-      <p className="mt-1 text-xs text-[var(--color-text-muted)] font-mono">{conflict.localPath}</p>
-      <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-        <div className="rounded-lg bg-[var(--color-bg-secondary)] p-2.5">
-          <p className="font-medium">Local</p>
-          <p className="text-[var(--color-text-muted)]">{formatBytes(conflict.localSizeBytes)}</p>
-          <p className="text-[var(--color-text-muted)]">{formatRelative(conflict.localMtimeMs)}</p>
-        </div>
-        <div className="rounded-lg bg-[var(--color-bg-secondary)] p-2.5">
-          <p className="font-medium">Remote</p>
-          <p className="text-[var(--color-text-muted)]">{formatBytes(conflict.remoteSizeBytes)}</p>
-          <p className="text-[var(--color-text-muted)]">{formatRelative(conflict.remoteUpdatedAt)}</p>
-        </div>
-      </div>
-      <div className="mt-3 flex gap-2">
-        <button onClick={() => resolve("keep-local")} className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
-          Keep local
-        </button>
-        <button onClick={() => resolve("keep-remote")} className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
-          Keep remote
-        </button>
-        <button onClick={() => resolve("keep-both")} className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
-          Keep both
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ── SyncSettings ────────────────────────────────────────────────────
 
 // ── SyncActivityLog ────────────────────────────────────────────────
@@ -1212,6 +1231,7 @@ function SyncSettings() {
   const [downloadKbps, setDownloadKbps] = useState(0);
   const [pauseOnBattery, setPauseOnBattery] = useState(false);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [launchSupported, setLaunchSupported] = useState(true);
 
   useEffect(() => {
     window.electronAPI.getSyncConfig().then((c: any) => {
@@ -1226,6 +1246,7 @@ function SyncSettings() {
       // the next save).
     });
     window.electronAPI.getLaunchAtLogin?.().then(setLaunchAtLogin).catch(() => {});
+    window.electronAPI.getLaunchAtLoginSupported?.().then(setLaunchSupported).catch(() => {});
   }, []);
 
   const save = async () => {
@@ -1285,7 +1306,7 @@ function SyncSettings() {
       {/* Desktop app */}
       <div className="space-y-3 border-t pt-5" style={border}>
         <h3 className="text-sm font-semibold">Desktop app</h3>
-        <PrefToggle label="Launch at login" description="Start dosya automatically when you sign in" checked={launchAtLogin} onChange={toggleLaunch} />
+        {launchSupported && <PrefToggle label="Launch at login" description="Start dosya automatically when you sign in" checked={launchAtLogin} onChange={toggleLaunch} />}
         <FinderLocationToggle userId={user?.id ?? null} />
       </div>
 
@@ -1330,11 +1351,13 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
   const { active } = useWorkspace();
   const workspaceId = active?.id ?? "";
   const [step, setStep] = useState(1);
+  const distribution = useDistribution();
 
   // Step 1: folders
   const [remoteFolderId, setRemoteFolderId] = useState<string | null>(null);
   const [remoteFolderName, setRemoteFolderName] = useState("Root");
   const [localPath, setLocalPath] = useState("");
+  const [localBookmark, setLocalBookmark] = useState<string | undefined>(undefined);
   const [stdPaths, setStdPaths] = useState<{ desktop: string | null; documents: string | null; pictures: string | null; downloads: string | null; home: string | null } | null>(null);
 
   useEffect(() => {
@@ -1399,10 +1422,15 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
     return map;
   }, [foldersData]);
 
-  const pickFolder = async () => {
-    const path = await window.electronAPI.pickLocalFolder();
-    if (path) setLocalPath(path);
+  const applyPicked = (picked: { path: string; bookmark?: string } | null) => {
+    if (!picked) return;
+    setLocalPath(picked.path);
+    setLocalBookmark(picked.bookmark);
   };
+  const pickFolder = async () =>
+    applyPicked(await chooseSyncFolder({ distribution, pick: (o) => window.electronAPI.pickLocalFolder(o) }));
+  const pickPreset = async (preset: string) =>
+    applyPicked(await chooseSyncFolder({ distribution, preset, pick: (o) => window.electronAPI.pickLocalFolder(o) }));
 
   const addPattern = () => {
     const p = newPattern.trim();
@@ -1430,6 +1458,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
         remoteFolderId,
         remoteFolderName,
         localPath,
+        bookmark: localBookmark,
         selectiveFolders: [],
         region,
         pollIntervalMs: 30000,
@@ -1555,13 +1584,13 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 </p>
                 <div className="flex gap-2">
                   <div
-                    className="flex flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-sm"
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-sm"
                     style={{ borderColor: localPath ? "var(--color-primary)" : "var(--color-border)", background: "var(--color-bg-secondary)" }}
                   >
                     {localPath ? (
                       <>
                         <FolderOpen size={14} className="shrink-0 text-[var(--color-primary)]" />
-                        <span className="truncate font-mono text-xs">{localPath}</span>
+                        <span className="min-w-0 truncate font-mono text-xs" title={localPath}>{localPath}</span>
                       </>
                     ) : (
                       <span className="text-[var(--color-text-muted)]">No folder selected</span>
@@ -1576,7 +1605,9 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                   </button>
                 </div>
 
-                {/* Known-folder quick backup presets */}
+                {/* Known-folder quick backup presets. On the Mac App Store build each one
+                    opens the picker at that folder (sync-folder-choice.ts): a path alone
+                    grants nothing in the sandbox. */}
                 {stdPaths && (
                   <div className="mt-2">
                     <p className="mb-1.5 text-xs text-[var(--color-text-muted)]">Quick backup:</p>
@@ -1592,7 +1623,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                           <button
                             key={label}
                             type="button"
-                            onClick={() => setLocalPath(p!)}
+                            onClick={() => void pickPreset(p!)}
                             className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                             style={{ borderColor: localPath === p ? "var(--color-primary)" : "var(--color-border)", color: localPath === p ? "var(--color-primary)" : undefined }}
                           >

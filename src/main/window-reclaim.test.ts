@@ -271,3 +271,66 @@ test("without verifyIntervalMs there is no backstop timer", () => {
 
   assert.equal(clock.pendingCount(), 0);
 });
+
+// ── Minimize must NOT be reclaimed (DSK-003, second pass) ────────────
+//
+// Electron's isVisible() for a minimized window is documented to differ per
+// platform. On macOS 15.7.4 it happens to return false while minimized,
+// which is the only reason this reclaimer ever covered minimize - nothing in
+// the code said so.
+//
+// A first pass at DSK-003 "fixed" that by widening index.ts's predicate to
+// `!win.isVisible() || win.isMinimized()`, so minimize was reclaimed on
+// every platform. That was wrong, and this test is the guard against it
+// coming back: minimizing is not closing. On Windows and Linux the window is
+// still on the taskbar, and destroying it five minutes later takes that
+// button away with no route back but the tray - and on a Linux desktop with
+// no system tray, `windowReclaimed` keeps the process alive with no window,
+// no taskbar entry and no tray icon at all.
+//
+// So index.ts passes `!win.isDestroyed() && !win.isVisible()`, and
+// `win.on("minimize")` does not arm the timer. The work that minimize SHOULD
+// stop (rendering, poller cadence) is handled by `shouldReceiveStatus`, which
+// does check `isMinimized()`, and by setAppVisible - neither of which
+// destroys anything.
+
+test("a window that stays 'visible' while minimized is NOT reclaimed", () => {
+  let now = 0;
+  const timers: { fn: () => void; at: number }[] = [];
+  let destroyed = false;
+  // The Windows/Linux shape: minimized, but isVisible() stays true - so the
+  // predicate index.ts supplies reports NOT hidden, and nothing may be armed
+  // even if onHide() were called by mistake.
+  const r = createWindowReclaimer({
+    delayMs: 1000,
+    isQuitting: () => false,
+    isHidden: () => false,
+    destroy: () => { destroyed = true; },
+    schedule: (fn, ms) => { const h = { fn, at: now + ms }; timers.push(h); return h; },
+    cancel: (h) => { const i = timers.indexOf(h as never); if (i >= 0) timers.splice(i, 1); },
+  });
+  r.onHide();
+  now = 1000;
+  timers.splice(0).forEach((t) => t.fn());
+  assert.equal(destroyed, false, "a minimized, still-visible window must keep its taskbar entry");
+});
+
+test("a window hidden to the tray IS still reclaimed", () => {
+  // The other half of the same decision: reverting the minimize behaviour
+  // must not have disarmed the case the reclaimer exists for.
+  let now = 0;
+  const timers: { fn: () => void; at: number }[] = [];
+  let destroyed = false;
+  const r = createWindowReclaimer({
+    delayMs: 1000,
+    isQuitting: () => false,
+    isHidden: () => true,
+    destroy: () => { destroyed = true; },
+    schedule: (fn, ms) => { const h = { fn, at: now + ms }; timers.push(h); return h; },
+    cancel: (h) => { const i = timers.indexOf(h as never); if (i >= 0) timers.splice(i, 1); },
+  });
+  r.onHide();
+  now = 1000;
+  timers.splice(0).forEach((t) => t.fn());
+  assert.equal(destroyed, true);
+});

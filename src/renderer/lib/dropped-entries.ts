@@ -138,6 +138,35 @@ export async function readDroppedEntries(
   return tree;
 }
 
+/**
+ * The same shape from an `<input webkitdirectory>` picker, whose files carry a
+ * `webkitRelativePath` like "Photos/2024/b.jpg" instead of entry objects.
+ */
+export function entriesFromPickedFiles(
+  files: FileList | File[],
+  max: number = MAX_DROPPED_FILES,
+): DroppedTree {
+  const tree: DroppedTree = { entries: [], dirs: [], hadDirectory: false, skipped: 0 };
+  const seen = new Set<string>();
+  for (const file of Array.from(files)) {
+    const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
+    const path = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    if (path) {
+      tree.hadDirectory = true;
+      // Record every ancestor, so "Photos/2024" also creates "Photos".
+      const parts = path.split("/");
+      for (let i = 1; i <= parts.length; i++) {
+        const p = parts.slice(0, i).join("/");
+        if (!seen.has(p)) { seen.add(p); tree.dirs.push(p); }
+      }
+    }
+    if (isJunk(file.name)) continue;
+    if (tree.entries.length >= max) { tree.skipped++; continue; }
+    tree.entries.push({ path, file });
+  }
+  return tree;
+}
+
 const depth = (p: string) => p.split("/").length;
 
 /**
@@ -198,6 +227,13 @@ export async function createFolderTree(
   return plan;
 }
 
+export interface UploadTarget {
+  file: File;
+  folderId: string | null;
+  /** The file's folder path inside the drop ("" for a loose file), for display. */
+  path: string;
+}
+
 /**
  * Pair every file with the folder id its path resolved to. Files under a folder
  * that failed are reported, never redirected somewhere the user did not ask for.
@@ -206,14 +242,14 @@ export function resolveTargets(
   entries: DroppedEntry[],
   plan: Pick<FolderPlan, "ids">,
   rootId: string | null,
-): { targets: { file: File; folderId: string | null }[]; skipped: number } {
-  const targets: { file: File; folderId: string | null }[] = [];
+): { targets: UploadTarget[]; skipped: number } {
+  const targets: UploadTarget[] = [];
   let skipped = 0;
   for (const entry of entries) {
-    if (!entry.path) { targets.push({ file: entry.file, folderId: rootId }); continue; }
+    if (!entry.path) { targets.push({ file: entry.file, folderId: rootId, path: "" }); continue; }
     const id = plan.ids.get(entry.path);
     if (!id) { skipped++; continue; }
-    targets.push({ file: entry.file, folderId: id });
+    targets.push({ file: entry.file, folderId: id, path: entry.path });
   }
   return { targets, skipped };
 }

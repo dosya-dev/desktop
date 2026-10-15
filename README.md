@@ -113,5 +113,7 @@ public issue.
 | [cli](https://github.com/dosya-dev/cli) | Command-line interface | Source-available |
 | [app.dosya.dev](https://github.com/dosya-dev/app.dosya.dev) | Web application | Source-available |
 | [shared](https://github.com/dosya-dev/shared) | Shared TypeScript types & utilities | Source-available |
+| [wordpress](https://github.com/dosya-dev/wordpress) | WordPress plugin - backup, restore, migrate | GPL-2.0-or-later |
+| [browser-extensions](https://github.com/dosya-dev/browser-extensions) | Browser extension - Save to dosya for Chrome, Edge, Firefox | Source-available |
 | [dosya-js](https://github.com/dosya-dev/dosya-js) | Official JavaScript SDK | MIT |
 | [dosya-java](https://github.com/dosya-dev/dosya-java) | Official Java SDK | MIT |

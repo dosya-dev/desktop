@@ -12,8 +12,21 @@
 // shared column definitions, under a single table header. The columns come from
 // the caller (`libraryColumnsFor(kind)`) so the library table and the folder
 // listing's table never drift apart.
-import type { MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
+//
+// The grid is VIRTUALIZED: only the rows the viewport can see are mounted.
+// Flattening months into rows and the sticky-header bookkeeping both live in
+// `@/lib/library-window`, so they are tested without a renderer - see that
+// file's header for why (audit finding DSK-004).
+import {
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type CSSProperties, type MouseEvent as ReactMouseEvent, type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { useVirtualizer, defaultRangeExtractor } from "@tanstack/react-virtual";
 import { Image as ImageIcon, Lock, Search, Star, Upload, AlertCircle, RefreshCw, Loader2, Play, FileText } from "lucide-react";
+import {
+  tileColumns, buildLibraryRows, rowOffsets, rowIndexAtOffset, stickyHeaderIndex,
+  type LibraryRow,
+} from "@/lib/library-window";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { FileIcon } from "@/components/files/FileIcon";
 import { extOf, colorFor, humanSize } from "@/lib/file-type";
@@ -57,6 +70,36 @@ const GRID = {
   documents: { small: "grid gap-1.5 grid-cols-[repeat(auto-fill,minmax(148px,1fr))]", large: "grid gap-1.5 grid-cols-[repeat(auto-fill,minmax(228px,1fr))]" },
 } as const;
 
+/**
+ * The same numbers GRID's class strings encode, as values the row model can do
+ * arithmetic with: `minmax(<min>px,1fr)` and the `gap-*` step in px. They have
+ * to agree - `tileColumns` reproduces what `auto-fill` would have chosen, and a
+ * virtualized row then pins exactly that many columns, so a row can never wrap.
+ */
+const TILE = {
+  photos: { small: { min: 148, gap: 6 }, large: { min: 228, gap: 6 } },
+  videos: { small: { min: 220, gap: 8 }, large: { min: 320, gap: 8 } },
+  documents: { small: { min: 148, gap: 6 }, large: { min: 228, gap: 6 } },
+} as const;
+
+/** `aspect-square` / `aspect-video`, as the ratio that turns a tile's width into its height. */
+const ASPECT = { photos: 1, videos: 9 / 16, documents: 1 } as const;
+
+/**
+ * The month header's own box: pt-4 (16) + the heading's `leading-5` line box
+ * (20) + pb-2.5 (10), plus 2px of slack for the baseline-aligned captions
+ * beside it. The heading is pinned to an explicit line height for this reason -
+ * the row model's offsets are exact arithmetic, so a header whose height
+ * depended on the inherited line-height would bleed into the tiles below it.
+ */
+const HEADER_H = 48;
+/** A table row: py-2 (8+8) around the 28px thumbnail slot, plus the gap-0.5 (2) under it. */
+const LIST_ROW_H = 44;
+const LIST_GAP = 2;
+
+/** Rows kept mounted above and below the viewport - the same cushion the folder picker uses. */
+const OVERSCAN = 4;
+
 /** Every kind stacks the same way in the table layout. */
 const LIST = "flex flex-col gap-0.5";
 
@@ -71,6 +114,15 @@ const LIST_SKELETON = "h-10 rounded-lg";
 
 const btn = "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs hover:bg-[var(--color-bg-secondary)] disabled:opacity-50";
 
+/** The caller's scroller - the nearest ancestor that actually scrolls. */
+function scrollParentOf(el: HTMLElement): HTMLElement {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const { overflowY } = getComputedStyle(p);
+    if (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") return p;
+  }
+  return (document.scrollingElement as HTMLElement | null) ?? document.body;
+}
+
 export function LibraryGrid(props: LibraryGridProps) {
   const {
     kind, months, total, loaded, hasMore, isLoading, isLoadingMore, error, search,
@@ -83,6 +135,135 @@ export function LibraryGrid(props: LibraryGridProps) {
   const skeletonClass = `animate-pulse bg-[var(--color-bg-tertiary)] ${list ? LIST_SKELETON : SKELETON[kind]}`;
   const EmptyIcon = KIND_ICON[kind];
   const anySelected = selected.size > 0;
+  const remaining = Math.max(0, total - loaded);
+  const pct = total > 0 ? Math.max(2, Math.round((loaded / total) * 100)) : 100;
+
+  // ── The virtualized row model ──────────────────────────────
+  //
+  // The scroller belongs to the caller (FileBrowserPage wraps the grid in
+  // `flex-1 overflow-auto`), and it is also what the month headers stick to, so
+  // find it instead of introducing a second one: a nested scroller would give
+  // the headers the wrong scrollport and leave the page's own scrollbar dead.
+  const [root, setRoot] = useState<HTMLDivElement | null>(null);
+  const [scroller, setScroller] = useState<HTMLElement | null>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    if (!root) return;
+    setScroller(scrollParentOf(root));
+    setWidth(root.clientWidth);
+    // The tile width - and with it the row height and the column count -
+    // follows the window, the sidebar and the details panel. None of those
+    // fire a window resize, so observe the element itself.
+    const ro = new ResizeObserver((entries) => setWidth(entries[0].contentRect.width));
+    ro.observe(root);
+    return () => ro.disconnect();
+  }, [root]);
+
+  const spec = TILE[kind][tileSize];
+  const cols = list ? 1 : tileColumns(width, spec.min, spec.gap);
+  const gap = list ? LIST_GAP : spec.gap;
+  // Exact rather than estimated: the row pins `cols` equal columns, so a tile
+  // is the row's width divided by them, times the kind's aspect ratio. Before
+  // the first measurement a tile is at its minimum - the narrowest it can be,
+  // so the total height is never over-reported.
+  const itemH = list
+    ? LIST_ROW_H
+    : Math.max(1, Math.round((width > 0 ? (width - gap * (cols - 1)) / cols : spec.min) * ASPECT[kind]));
+
+  const skeletonCount = isLoadingMore ? (Math.min(LIBRARY_PAGE_SIZE, remaining) || 6) : 0;
+  const rows = useMemo(() => buildLibraryRows(months, cols, skeletonCount), [months, cols, skeletonCount]);
+  const offsets = useMemo(() => rowOffsets(rows, { headerH: HEADER_H, itemH, gap }), [rows, itemH, gap]);
+
+  // In the table layout the shared column header sits above the rows, so the
+  // model's offsets start that far down the scroller. It only changes when the
+  // header itself appears or changes shape, which is why this is not measured
+  // on every render - a forced layout per scroll frame is the cost this whole
+  // change exists to remove.
+  //
+  // KNOWN LIMITATION, not a fixed one. These deps catch the things this
+  // component can see change. They do NOT catch something ELSE inside the
+  // same scroller changing height above the rows box - a bulk-selection bar
+  // appearing, a header wrapping onto two lines at narrow width. When that
+  // happens `scrollMargin` is stale by that delta, which offsets both
+  // `vi.start - scrollMargin` below and the virtualizer's own range
+  // calculation, so the grid sits that far off and the sticky header index
+  // shifts with it.
+  //
+  // It is not fixed here because the element whose height changed belongs to
+  // `FileBrowserPage`, not to this component, and a ResizeObserver cannot see
+  // a POSITION change - only a size one - so there is nothing local to
+  // observe. The fix is for the owner of that layout to pass a signal down
+  // (or to hoist the measurement), and that is a change to the page, not to
+  // the grid.
+  const rowsBox = useRef<HTMLDivElement | null>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  useLayoutEffect(() => {
+    const el = rowsBox.current;
+    if (!el || !scroller) return;
+    const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    setScrollMargin((prev) => (Math.abs(prev - top) > 0.5 ? top : prev));
+  }, [scroller, root, list, columns.length]);
+
+  const rangeExtractor = useCallback(
+    (range: { startIndex: number; endIndex: number; overscan: number; count: number }) => {
+      const indexes = defaultRangeExtractor(range);
+      // The pinned month header must stay mounted even when its own row has
+      // scrolled far above the viewport - it IS the sticky separator.
+      const sticky = stickyHeaderIndex(rows, range.startIndex);
+      return sticky >= 0 && !indexes.includes(sticky) ? [sticky, ...indexes] : indexes;
+    },
+    [rows],
+  );
+
+  // DO NOT wrap `getItemKey` in a useCallback, however much it looks like it
+  // wants one. virtual-core memoizes its measurements on a dep list that
+  // includes `getItemKey` but NOT `estimateSize`, so the fresh identity on
+  // every render is the only thing currently forcing a re-measure. Stabilize
+  // it and a width change that alters `itemH` without altering `rows.length`
+  // - widening inside the same column count - would leave the virtualizer on
+  // the old row heights, with nothing calling `virtualizer.measure()` to
+  // correct them. If this ever needs to be memoized for its own sake, add an
+  // explicit `virtualizer.measure()` on an `itemH` change in the same commit.
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scroller,
+    estimateSize: (i) => (rows[i].type === "header" ? HEADER_H : itemH + gap),
+    overscan: OVERSCAN,
+    getItemKey: (i) => rows[i].key,
+    rangeExtractor,
+    scrollMargin,
+  });
+
+  // Keep the viewport on the same photos when rows leave the HEAD of the model
+  // - a refresh that drops the first month, a delete of the photos above the
+  // fold, anything that shortens the feed in front of where the user is
+  // reading. Absolutely positioned rows do not reflow the scroll position the
+  // way flow content does, so without this the content under the viewport
+  // would shift up by however much left the head.
+  const previous = useRef<{ rows: LibraryRow[]; offsets: number[] } | null>(null);
+  useLayoutEffect(() => {
+    const prev = previous.current;
+    previous.current = { rows, offsets };
+    if (!prev || !scroller || prev.rows.length === 0 || rows.length === 0) return;
+    // There is deliberately no `prev.rows[0].key === rows[0].key` early
+    // return here. Row 0 is always the FIRST MONTH'S HEADER, so that test
+    // only caught the case where a whole month left the head - a delete of
+    // photos inside the first month, which is the ordinary case, left row 0's
+    // key identical and skipped the compensation, and the content under the
+    // viewport jumped up by the removed rows' height.
+    //
+    // Nothing is needed in its place: the body below already locates the row
+    // the user was looking at and only touches scrollTop when its offset
+    // actually moved, so a tail append (load more) computes delta 0 and does
+    // nothing. The cost of not short-circuiting is one binary search and one
+    // findIndex per model change, which is noise next to rendering it.
+    const top = scroller.scrollTop;
+    const was = rowIndexAtOffset(prev.offsets, top - scrollMargin);
+    const to = rows.findIndex((r) => r.key === prev.rows[was].key);
+    if (to < 0) return;
+    const delta = offsets[to] - prev.offsets[was];
+    if (delta !== 0) scroller.scrollTop = Math.max(0, top + delta);
+  }, [rows, offsets, scroller, scrollMargin]);
 
   if (error && months.length === 0) {
     return (
@@ -120,9 +301,6 @@ export function LibraryGrid(props: LibraryGridProps) {
     );
   }
 
-  const remaining = Math.max(0, total - loaded);
-  const pct = total > 0 ? Math.max(2, Math.round((loaded / total) * 100)) : 100;
-
   // List layout only: what the header and each month's rows need before they
   // start scrolling instead of shrinking - the checkbox slot (16px), the
   // thumbnail slot (28px), Name's floor, the columns' own px widths, and the
@@ -133,8 +311,13 @@ export function LibraryGrid(props: LibraryGridProps) {
     columns.filter((c) => c.key !== "name").reduce((n, c) => n + (c.width ?? 0), 0) +
     12 * (columns.length + 1);
 
+  // The month header to pin: the one for the row at the top of the viewport.
+  // Derived from the scroll offset rather than from the rendered range, so the
+  // overscan above the viewport cannot pin the previous month's header.
+  const stickyIndex = stickyHeaderIndex(rows, rowIndexAtOffset(offsets, (virtualizer.scrollOffset ?? 0) - scrollMargin));
+
   return (
-    <div data-testid="library-grid">
+    <div ref={setRoot} data-testid="library-grid">
       {/* One table header for the whole listing, above the first month. It is a
           plain div, not role="row": there is no table/grid/rowgroup around it,
           and an orphan row role is invalid ARIA. The columns are not sort
@@ -159,26 +342,82 @@ export function LibraryGrid(props: LibraryGridProps) {
           ))}
         </div>
       )}
-      {months.map((m, mi) => {
-        const selectable = m.files.filter((f) => f.lock_mode !== "full_lock" || unlockedFiles.has(f.id)).map((f) => f.id);
-        const partial = m.files.length < m.count;
-        const isLast = mi === months.length - 1;
-        return (
-          <section key={m.key} className="group/month" data-month={m.key}>
-            <div className="sticky top-0 z-10 flex items-baseline gap-2.5 pb-2.5 pt-4 backdrop-blur-md" style={{ background: "color-mix(in oklab, var(--color-bg) 90%, transparent)" }}>
-              <h3 className="text-[15px] font-semibold tracking-tight">{m.label}</h3>
-              <span className="text-xs tabular-nums text-[var(--color-text-muted)]">{plural(kind, m.count)}</span>
-              {partial && <span className="text-[11px] tabular-nums text-[var(--color-text-muted)]">· {m.files.length} loaded</span>}
-              <button
-                type="button"
-                className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-[var(--color-text-muted)] opacity-0 transition-opacity hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)] focus-visible:opacity-100 group-hover/month:opacity-100"
-                onClick={() => onSelectMany(selectable)}
+      {/* The virtualized rows. Only what the viewport can see (plus OVERSCAN
+          rows either side, plus the pinned month header) is mounted, so the
+          DOM stops growing with the feed and a "Load more" commits a constant
+          number of elements however many pages are loaded. */}
+      <div
+        ref={rowsBox}
+        data-testid="library-rows"
+        style={{
+          position: "relative",
+          width: "100%",
+          height: virtualizer.getTotalSize(),
+          minWidth: list ? listMinWidth : undefined,
+        }}
+      >
+        {virtualizer.getVirtualItems().map((vi) => {
+          const row = rows[vi.index];
+          const pinned = vi.index === stickyIndex;
+          // The pinned header is the one row that is NOT absolutely
+          // positioned: an absolutely positioned, transformed box cannot be
+          // `position: sticky`, and the month separators are sticky here.
+          const box: CSSProperties = pinned
+            ? { position: "sticky", top: 0, zIndex: 10, width: "100%", height: HEADER_H }
+            : {
+                position: "absolute", top: 0, left: 0, width: "100%",
+                height: row.type === "header" ? HEADER_H : itemH,
+                transform: `translateY(${vi.start - scrollMargin}px)`,
+              };
+
+          if (row.type === "header") {
+            const m = months[row.month];
+            const selectable = m.files.filter((f) => f.lock_mode !== "full_lock" || unlockedFiles.has(f.id)).map((f) => f.id);
+            const partial = m.files.length < m.count;
+            return (
+              <div
+                key={vi.key}
+                data-month={m.key}
+                className="group/month flex items-baseline gap-2.5 pb-2.5 pt-4 backdrop-blur-md"
+                style={{ ...box, background: "color-mix(in oklab, var(--color-bg) 90%, transparent)" }}
               >
-                {partial ? `Select ${selectable.length} loaded` : "Select all"}
-              </button>
-            </div>
-            <div className={bodyClass} style={list ? { minWidth: listMinWidth } : undefined}>
-              {m.files.map((f) => {
+                <h3 className="text-[15px] font-semibold leading-5 tracking-tight">{m.label}</h3>
+                <span className="text-xs tabular-nums text-[var(--color-text-muted)]">{plural(kind, m.count)}</span>
+                {partial && <span className="text-[11px] tabular-nums text-[var(--color-text-muted)]">· {m.files.length} loaded</span>}
+                <button
+                  type="button"
+                  className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-[var(--color-text-muted)] opacity-0 transition-opacity hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)] focus-visible:opacity-100 group-hover/month:opacity-100"
+                  onClick={() => onSelectMany(selectable)}
+                >
+                  {partial ? `Select ${selectable.length} loaded` : "Select all"}
+                </button>
+              </div>
+            );
+          }
+
+          // One strip of tiles (or one table row). The columns are pinned to
+          // the count `tileColumns` derived, rather than left to `auto-fill`,
+          // so a row can never wrap and the model's height is exact.
+          const strip: CSSProperties = {
+            ...box,
+            display: list ? "flex" : "grid",
+            flexDirection: list ? "column" : undefined,
+            gridTemplateColumns: list ? undefined : `repeat(${cols}, minmax(0, 1fr))`,
+            gap,
+          };
+
+          if (row.type === "skeletons") {
+            return (
+              <div key={vi.key} style={strip} aria-hidden="true">
+                {Array.from({ length: row.count }, (_, i) => <div key={i} className={skeletonClass} />)}
+              </div>
+            );
+          }
+
+          const m = months[row.month];
+          return (
+            <div key={vi.key} data-month={m.key} style={strip}>
+              {m.files.slice(row.from, row.from + row.count).map((f) => {
                 // Every item, tile or row, gets the same wiring - only the
                 // shape differs. The row has no favourite button (the star in
                 // the name cell is an indicator), so onFavourite is tile-only.
@@ -199,13 +438,10 @@ export function LibraryGrid(props: LibraryGridProps) {
                 if (kind === "videos") return <VideoCard key={f.id} {...tile} />;
                 return <DocumentTile key={f.id} {...tile} />;
               })}
-              {isLast && isLoadingMore && Array.from({ length: Math.min(LIBRARY_PAGE_SIZE, remaining) || 6 }, (_, i) => (
-                <div key={`sk-${i}`} className={skeletonClass} />
-              ))}
             </div>
-          </section>
-        );
-      })}
+          );
+        })}
+      </div>
 
       <div className="flex flex-col items-center gap-2.5 pb-2 pt-8">
         {hasMore ? (

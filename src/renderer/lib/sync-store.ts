@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { queryClient } from "./query-client";
 import { LIBRARY_QUERY_ROOT } from "./library-request";
 import { syncJustSettled } from "./sync-settled";
+import { syncSummaryKey, syncPairCardsKey } from "./sync-summary";
+import type { SyncPairStatus } from "../../main/sync/types";
 
 /** Mirrors SyncNotice in src/main/sync/types.ts. */
 export interface SyncNotice {
@@ -31,7 +33,7 @@ export interface SyncPairRuntimeStatus {
   remoteFolderName: string;
   localPath: string;
   syncMode: string;
-  status: "idle" | "syncing" | "paused" | "error" | "offline" | "rate-limited" | "needs-confirmation";
+  status: SyncPairStatus;
   lastSyncedAt: number | null;
   errorMessage: string | null;
   /** Non-fatal conditions worth showing while the pair keeps working. */
@@ -88,7 +90,9 @@ export interface SyncStatus {
   pairs: SyncPairRuntimeStatus[];
   globalPaused: boolean;
   activeTransfers: ActiveTransfer[];
-  unresolvedConflicts: SyncConflict[];
+  /** Counts only; the Issues tab pages the list with listSyncConflicts. */
+  unresolvedConflictCount: number;
+  conflictCountByPair: Record<string, number>;
   recentLogs: SyncLogEntry[];
   /** Failed files across every pair (Contract 9). */
   fileErrorCount: number;
@@ -96,7 +100,6 @@ export interface SyncStatus {
 
 interface SyncStore {
   status: SyncStatus | null;
-  conflicts: SyncConflict[];
   isLoading: boolean;
   /** The status IPC itself failed - render "couldn't read sync status", never
    *  the "no folders yet" empty state (they used to be indistinguishable). */
@@ -110,13 +113,11 @@ const EMPTY_STATUS: SyncStatus = {
   pairs: [],
   globalPaused: false,
   activeTransfers: [],
-  unresolvedConflicts: [],
+  unresolvedConflictCount: 0,
+  conflictCountByPair: {},
   recentLogs: [],
   fileErrorCount: 0,
 };
-
-/** Cap on retained conflicts so a long session can't grow this unbounded. */
-const MAX_CONFLICTS = 200;
 
 // Single shared subscription, ref-counted so every consumer (TitleBar,
 // Sidebar, Dashboard, SyncPage) shares ONE IPC listener instead of each
@@ -127,7 +128,6 @@ let unsubscribers: Array<() => void> = [];
 
 export const useSyncStore = create<SyncStore>((set) => ({
   status: null,
-  conflicts: [],
   isLoading: true,
   loadFailed: false,
 
@@ -137,10 +137,6 @@ export const useSyncStore = create<SyncStore>((set) => ({
       window.electronAPI.getSyncStatus()
         .then((s: SyncStatus) => set({ status: s, isLoading: false, loadFailed: false }))
         .catch(() => set({ status: EMPTY_STATUS, isLoading: false, loadFailed: true }));
-
-      window.electronAPI.getSyncConflicts()
-        .then((c: SyncConflict[]) => set({ conflicts: c.slice(-MAX_CONFLICTS) }))
-        .catch(() => {});
 
       const unsub1 = window.electronAPI.onSyncStatusChanged((s: SyncStatus) => {
         // The sync engine writes files from the main process, where there is no
@@ -158,10 +154,22 @@ export const useSyncStore = create<SyncStore>((set) => ({
         }
         set({ status: s, loadFailed: false });
       });
-      const unsub2 = window.electronAPI.onSyncConflictDetected((c: SyncConflict) =>
-        set((state) => ({ conflicts: [...state.conflicts, c].slice(-MAX_CONFLICTS) })),
-      );
-      unsubscribers = [unsub1, unsub2];
+      // The main process stops broadcasting sync:status-changed to a window
+      // that is hidden or minimized (DSK-003), so a window reopened from the
+      // tray would otherwise paint status frozen at the moment it was hidden.
+      // Pull a fresh snapshot the instant it is shown or restored.
+      const unsub3 = window.electronAPI.onWindowShown(() => {
+        useSyncStore.getState().refresh().catch(() => {
+          // This pull is the ONLY thing that corrects the display after a
+          // hidden spell, because `broadcast` sends on change: if the engine
+          // is now idle, no further tick is coming and a silent failure here
+          // leaves status frozen at the moment the window was hidden,
+          // looking current. Say so with the same flag the first load uses
+          // ("couldn't read sync status") rather than showing stale state.
+          useSyncStore.setState({ loadFailed: true });
+        });
+      });
+      unsubscribers = [unsub1, unsub3];
     }
 
     return () => {
@@ -174,11 +182,8 @@ export const useSyncStore = create<SyncStore>((set) => ({
   },
 
   refresh: async () => {
-    const [status, conflicts] = await Promise.all([
-      window.electronAPI.getSyncStatus(),
-      window.electronAPI.getSyncConflicts(),
-    ]);
-    set({ status, conflicts: conflicts.slice(-MAX_CONFLICTS), loadFailed: false });
+    const status = await window.electronAPI.getSyncStatus();
+    set({ status, loadFailed: false });
   },
 }));
 
@@ -196,3 +201,23 @@ export const useSyncHasError = () =>
 export const useSyncHasPairs = () => useSyncStore((s) => (s.status?.pairs.length ?? 0) > 0);
 export const useSyncPairs = (): SyncPairRuntimeStatus[] =>
   useSyncStore((s) => s.status?.pairs ?? EMPTY_PAIRS);
+
+// The sidebar's per-workspace dots used to read `useSyncPairs()` directly and
+// re-derive the summary in a `useMemo`. That still re-rendered on every tick:
+// `status.pairs` arrives over IPC as a new array identity each time, so the
+// `useMemo`'s input changed even when its output wouldn't have (DSK-002,
+// isolated in evidence/12-selector-identity.md - a frozen, byte-identical
+// payload still produced ~2 commits/s). This selector returns a primitive
+// string instead, built by `syncSummaryKey` (see sync-summary.ts), so the
+// subscribing component only re-renders when a workspace's displayed state
+// actually changes.
+export const useWorkspaceSyncSummaryKey = (): string =>
+  useSyncStore((s) => syncSummaryKey(s.status?.pairs ?? EMPTY_PAIRS));
+
+// Same reasoning for the dashboard's Sync card, which the sidebar fix did
+// not reach: it renders four fields per pair and none of them advance per
+// tick, but it subscribed to the pairs array, so the dashboard kept
+// re-rendering at 2 Hz. The 64-minute soak is what caught that - act 2 was
+// still at ~59 commits per 30 s sample with the sidebar already fixed.
+export const useSyncPairCardsKey = (): string =>
+  useSyncStore((s) => syncPairCardsKey(s.status?.pairs ?? EMPTY_PAIRS));

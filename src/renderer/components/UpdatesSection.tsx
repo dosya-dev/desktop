@@ -47,6 +47,7 @@ function statusHint(status: Status): string {
     case "available": return `Update available: v${status.version}`;
     case "downloading": return `Downloading ${status.percent ?? 0}%`;
     case "ready": return `Update ready: v${status.version}`;
+    case "installing": return "Installing… dosya will reopen in a moment";
     case "error": return "Update check failed";
     case "not-available": return "Up to date";
     default: return "";
@@ -180,6 +181,14 @@ export function UpdatesSection() {
             style={{ background: "var(--color-primary)" }}
           >
             <RefreshCw size={14} /> Restart &amp; install
+          </button>
+        ) : status.state === "installing" ? (
+          <button
+            disabled
+            className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium opacity-60"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <Loader2 size={14} className="animate-spin" /> Installing…
           </button>
         ) : (
           <button

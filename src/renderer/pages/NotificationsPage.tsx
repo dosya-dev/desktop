@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, CheckCheck, X, Loader2 } from "lucide-react";
+import { NotificationIcon } from "@/components/notifications/NotificationIcon";
 import {
   mergeInboxPages, groupByDay, parseActions, isUnread, relativeTime, mapActionPath,
   type NotificationItem,
@@ -108,13 +109,23 @@ export function NotificationsPage() {
                   className="flex gap-3 border-b px-4 py-3 last:border-b-0 hover:bg-black/5"
                   style={{ borderColor: "var(--color-border)" }}
                 >
-                  <span
-                    data-testid={isUnread(item) ? `unread-dot-${item.id}` : undefined}
-                    className="mt-2 size-2 shrink-0 rounded-full"
-                    style={{ background: isUnread(item) ? "var(--color-primary)" : "transparent" }}
+                  <NotificationIcon
+                    icon={item.icon}
+                    category={item.category}
+                    priority={item.priority}
+                    unread={isUnread(item)}
                   />
                   <button onClick={() => openItem(item)} className="min-w-0 flex-1 text-left">
-                    <p className={`text-sm ${isUnread(item) ? "font-semibold" : ""}`}>{item.title}</p>
+                    <p className={`flex items-center gap-2 text-sm ${isUnread(item) ? "font-semibold" : ""}`}>
+                      <span>{item.title}</span>
+                      {isUnread(item) && (
+                        <span
+                          data-testid={`unread-dot-${item.id}`}
+                          className="size-2 shrink-0 rounded-full"
+                          style={{ background: "var(--color-primary)" }}
+                        />
+                      )}
+                    </p>
                     {item.body && (
                       <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">{item.body}</p>
                     )}

@@ -32,6 +32,7 @@ describe("ErrorBoundary", () => {
 
   it("reports a caught render error with the surface it came from", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
+    reportError.mockReturnValue("evt_42");
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -50,6 +51,45 @@ describe("ErrorBoundary", () => {
     expect((err as Error).message).toBe("render exploded");
     expect(extra).toMatchObject({ where: "the map" });
     expect(typeof extra.componentStack).toBe("string");
+    const report = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Report this problem"));
+    expect(report).toBeTruthy();
+  });
+
+  it("opens the bug report with the error message and the event id", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    reportError.mockReturnValue("evt_42");
+    const { useReportProblem } = await import("../lib/report-problem-store");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root!.render(
+        <ErrorBoundary where="the map">
+          <Boom />
+        </ErrorBoundary>,
+      );
+    });
+    const report = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Report this problem"))!;
+    act(() => { report.click(); });
+    const state = useReportProblem.getState();
+    expect(state.open).toBe(true);
+    expect(state.prefill.errorRef).toBe("evt_42");
+    expect(state.prefill.errorMessage).toBe("render exploded");
+    act(() => state.closeReport());
+  });
+
+  it("carries a null error reference when the reporter returns nothing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    reportError.mockReturnValue(undefined);
+    const { useReportProblem } = await import("../lib/report-problem-store");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => { root!.render(<ErrorBoundary where="x"><Boom /></ErrorBoundary>); });
+    const report = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Report this problem"))!;
+    act(() => { report.click(); });
+    expect(useReportProblem.getState().prefill.errorRef).toBeNull();
+    act(() => useReportProblem.getState().closeReport());
   });
 
   it("reports nothing when the subtree renders", () => {

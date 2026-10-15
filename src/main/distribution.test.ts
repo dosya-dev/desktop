@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   SNAP_NAME,
+  currentDistribution,
   detectDistribution,
   isStoreManaged,
   storeDisplayName,
@@ -72,4 +73,16 @@ test("store names and update pages", () => {
   // snapd refreshes on its own; there is no page to send the user to.
   assert.equal(storeUpdatesUrl("snap"), null);
   assert.equal(storeUpdatesUrl("direct"), null);
+});
+
+test("currentDistribution reads the platform's own signals off a process-like object", () => {
+  assert.equal(currentDistribution({ env: {} }), "direct");
+  assert.equal(currentDistribution({ mas: true, env: {} }), "mas");
+  assert.equal(currentDistribution({ windowsStore: true, env: {} }), "ms-store");
+  assert.equal(currentDistribution({ env: { SNAP: "/snap/dosya/1", SNAP_NAME: SNAP_NAME } }), "snap");
+});
+
+test("currentDistribution defaults to the real process", () => {
+  // In this test process nothing is set, so it is a direct build.
+  assert.equal(currentDistribution(), "direct");
 });

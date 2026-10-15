@@ -22,7 +22,8 @@ export function setSentryUser(userId: string | null): void {
   setUser(userId ? { id: userId } : null);
 }
 
-/** Report an error the app caught itself (boundaries, swallowed catches). */
-export function reportError(error: unknown, extra?: Record<string, unknown>): void {
-  captureException(error, extra ? { extra } : undefined);
+/** Report an error the app caught itself (boundaries, swallowed catches).
+ *  Returns the event id, which a bug report carries as "Error reference". */
+export function reportError(error: unknown, extra?: Record<string, unknown>): string {
+  return captureException(error, extra ? { extra } : undefined);
 }

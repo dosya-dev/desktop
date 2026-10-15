@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseInline, parseMarkdown } from "./markdown.ts";
+import { parseInline, parseMarkdown, isLinkableUrl } from "./markdown.ts";
 
 test("resolves bold, italic, code and links in one line", () => {
   assert.deepEqual(parseInline("a **b** *c* `d` [e](https://x.test)"), [
@@ -44,4 +44,24 @@ test("collects lists and quotes", () => {
   assert.equal((blocks[0] as { ordered: boolean }).ordered, false);
   assert.equal((blocks[1] as { ordered: boolean }).ordered, true);
   assert.deepEqual(blocks[2], { kind: "quote", inline: [{ kind: "text", text: "a b" }] });
+});
+
+test("classifies only http/https/mailto as linkable", () => {
+  assert.equal(isLinkableUrl("https://example.com/"), true);
+  assert.equal(isLinkableUrl("http://example.com/"), true);
+  assert.equal(isLinkableUrl("mailto:a@b.c"), true);
+  assert.equal(isLinkableUrl("javascript:alert(1)"), false);
+  assert.equal(isLinkableUrl("JavaScript:alert(1)"), false); // Review Focus #4
+  assert.equal(isLinkableUrl("data:text/html,<script>"), false);
+  assert.equal(isLinkableUrl("vbscript:msgbox"), false);
+  assert.equal(isLinkableUrl("foo/bar"), true); // relative stays renderable
+  assert.equal(isLinkableUrl(""), false);
+});
+
+test("treats a colon before the first slash as a scheme, not a relative path", () => {
+  assert.equal(isLinkableUrl("//evil.example/x"), false); // protocol-relative, inherits whatever scheme embeds it
+  assert.equal(isLinkableUrl(":"), false);
+  assert.equal(isLinkableUrl("foo/bar:baz"), true); // colon AFTER the first slash is a legal relative path
+  assert.equal(isLinkableUrl("#anchor"), true);
+  assert.equal(isLinkableUrl("?q=1"), true);
 });

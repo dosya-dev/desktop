@@ -27,7 +27,7 @@ import {
   type EngineRpcMethod,
   type HostMethod,
 } from "../main/sync/engine-protocol";
-import type { SyncConfig, SyncPair } from "../main/sync/types";
+import type { SyncConfig, SyncPair, ConflictPageQuery, ConflictResolution } from "../main/sync/types";
 
 // Crash reporting for this process. No DSN: the utility SDK posts envelopes to
 // the main process over a message port the main SDK hands it after fork, and
@@ -84,6 +84,8 @@ function buildHandlers(e: SyncEngine): Record<EngineRpcMethod, (args: unknown[])
     syncNow: (a) => e.syncNow(a[0] as string),
     resolveConflict: (a) =>
       e.resolveConflict(a[0] as string, a[1] as "keep-local" | "keep-remote" | "keep-both"),
+    listConflicts: (a) => e.listConflicts(a[0] as ConflictPageQuery),
+    resolveConflicts: (a) => e.resolveConflicts(a[0] as string[], a[1] as ConflictResolution),
     setAppVisible: (a) => e.setAppVisible(a[0] as boolean),
     notifyNetworkOnline: () => e.notifyNetworkOnline(),
     notifySessionRefreshed: () => e.notifySessionRefreshed(),

@@ -1,0 +1,6 @@
+What's new in 3.1.4
+
+• Family plans: manage your family from the Profile page. Invite people, resend or revoke invites, remove members, leave a family, and see how much of the shared storage each person uses.
+• Sync issues open a page at a time, so a long list no longer slows the app down, and you can resolve every conflict at once.
+• Safer conflict copies: a file that keeps coming back as a conflict is left for you to decide instead of being copied again.
+• Restart and install now shows an Installing state while the update is applied.

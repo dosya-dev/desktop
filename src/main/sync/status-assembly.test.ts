@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toFileErrorStatus, pendingFileCount, assembleSyncStatus, hasPair, FILE_ERROR_LIST_CAP } from "./status-assembly.ts";
-import type { SyncFileError, SyncPairRuntimeStatus } from "./types.ts";
+import { toFileErrorStatus, pendingFileCount, assembleSyncStatus, hasPair, FILE_ERROR_LIST_CAP, countConflictsByPair, pageConflicts, CONFLICT_PAGE_MAX } from "./status-assembly.ts";
+import type { SyncConflict, SyncFileError, SyncPairRuntimeStatus } from "./types.ts";
 
 // Field report 2026-09-02 (desktop #6): getStatus() never exported the
 // fileErrors ledger and hard-coded filesInQueue to 0, so the UI could not tell
@@ -61,7 +61,8 @@ test("fileErrorCount at the top level is the sum of every pair's TRUE count, not
     ],
     globalPaused: false,
     activeTransfers: [],
-    unresolvedConflicts: [],
+    unresolvedConflictCount: 0,
+    conflictCountByPair: {},
     recentLogs: [],
   });
   assert.equal(status.fileErrorCount, 252);
@@ -75,9 +76,40 @@ test("hasPair tells the IPC layer whether a pairId names a live pair", () => {
   // engine to act on a pair that no longer exists.
   const status = assembleSyncStatus({
     pairs: [pairStatus({ pairId: "sp_1" }), pairStatus({ pairId: "sp_2" })],
-    globalPaused: false, activeTransfers: [], unresolvedConflicts: [], recentLogs: [],
+    globalPaused: false, activeTransfers: [], unresolvedConflictCount: 0, conflictCountByPair: {}, recentLogs: [],
   });
   assert.equal(hasPair(status, "sp_1"), true);
   assert.equal(hasPair(status, "sp_9"), false);
   assert.equal(hasPair(status, ""), false);
+});
+
+function conflictsFor(pairId: string, n: number): SyncConflict[] {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `${pairId}-${i}`, pairId, localPath: `/x/${i}`, remoteName: `${i}`, remoteId: `r${i}`,
+    localMtimeMs: 0, remoteUpdatedAt: 0, localSizeBytes: 0, remoteSizeBytes: 0, detectedAt: 0,
+  }));
+}
+
+test("the status tick carries conflict counts per pair, not the conflicts", () => {
+  // 2026-10-15: a runaway folder held 7,000+ conflicts and every tick shipped
+  // all of them engine -> main -> renderer.
+  const all = [...conflictsFor("a", 3), ...conflictsFor("b", 2)];
+  assert.deepEqual(countConflictsByPair(all), { a: 3, b: 2 });
+  assert.deepEqual(countConflictsByPair([]), {});
+});
+
+test("pageConflicts filters to the asked pairs and reports the filtered total", () => {
+  const all = [...conflictsFor("a", 120), ...conflictsFor("b", 7)];
+  const page = pageConflicts(all, { pairIds: ["a"], offset: 100, limit: 50 });
+  assert.equal(page.total, 120);
+  assert.deepEqual(page.conflicts.map((c) => c.id), Array.from({ length: 20 }, (_, i) => `a-${100 + i}`));
+  assert.equal(pageConflicts(all, { offset: 0, limit: 10 }).total, 127);
+  assert.equal(pageConflicts(all, { pairIds: [], offset: 0, limit: 10 }).total, 0);
+});
+
+test("pageConflicts clamps a hostile or silly page request", () => {
+  const all = conflictsFor("a", 1000);
+  assert.equal(pageConflicts(all, { offset: 0, limit: 1e9 }).conflicts.length, CONFLICT_PAGE_MAX);
+  assert.equal(pageConflicts(all, { offset: -5, limit: 0 }).conflicts[0].id, "a-0");
+  assert.equal(pageConflicts(all, { offset: Number.NaN, limit: Number.NaN }).conflicts.length, 1);
 });

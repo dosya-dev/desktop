@@ -18,6 +18,7 @@ import {
   versionConflictFrom,
 } from "./upload-metadata";
 import type { RemoteFileInfo, RemoteFolderInfo } from "./types";
+import { createProxyCache, type ProxyCache } from "./proxy-cache";
 import http from "http";
 import https from "https";
 import { HttpProxyAgent } from "http-proxy-agent";
@@ -140,13 +141,36 @@ function getProxyAgent(targetUrl: string | URL, proxyUrl: string): http.Agent {
  * agent routed through the resolved system/corporate proxy. The host provider
  * already applies PAC files and NO_PROXY/bypass rules, so a null proxy here
  * means "go direct".
+ *
+ * The proxy decision is memoized in `cache` (DSK-012): this used to call
+ * `env.resolveProxy()` - a PAC-file evaluation / OS lookup, not a free call -
+ * on every single HTTP request the client made, including the thousands fired
+ * during a large sync. See proxy-cache.ts.
+ *
+ * The key is origin + PATHNAME, not origin alone. `resolveProxy` is handed
+ * the whole URL because a PAC's `FindProxyForURL(url, host)` may branch on
+ * the path - an `shExpMatch` against a path glob is an ordinary thing to find
+ * in a corporate PAC - and keying by origin would let the first request to a host
+ * decide the proxy for every path on it. That is a misroute, not a slower
+ * route: traffic a PAC meant to send through a proxy could go direct, or the
+ * reverse.
+ *
+ * Keyed this way the cache still collapses the repeated control-plane calls
+ * (status, listings) that fire constantly, and mostly misses on per-file
+ * paths, which is the correct trade: the measured cost of a lookup is small
+ * (0.0392 ms mean in the main process - the engine's cross-process call is
+ * dearer but was never measured) and a wrong proxy is not.
+ *
+ * Residual limitation, stated rather than hidden: a PAC that branches on the
+ * QUERY STRING is still flattened, because including the query would mean a
+ * key per request and no cache at all.
  */
-async function resolveAgent(url: string | URL, env: EnvProvider): Promise<http.Agent | https.Agent> {
-  const urlStr = typeof url === "string" ? url : url.toString();
-  const proxyUrl = await env.resolveProxy(urlStr);
-  if (!proxyUrl) return agentFor(url);
-  debugLog("[sync] Routing via proxy:", proxyUrl, "for", urlStr);
-  return getProxyAgent(url, proxyUrl);
+async function resolveAgent(url: string | URL, env: EnvProvider, cache: ProxyCache): Promise<http.Agent | https.Agent> {
+  const u = typeof url === "string" ? new URL(url) : url;
+  const proxyUrl = await cache.get(`${u.origin}${u.pathname}`, () => env.resolveProxy(u.toString()));
+  if (!proxyUrl) return agentFor(u);
+  debugLog("[sync] Routing via proxy:", proxyUrl, "for", u.toString());
+  return getProxyAgent(u, proxyUrl);
 }
 
 let isDev = false;
@@ -253,6 +277,15 @@ export class RemoteClient {
   private cookieCachedAt = 0;
   private static readonly COOKIE_CACHE_TTL = 60_000; // 60s
 
+  /**
+   * Resolved system/corporate proxy per origin (DSK-012). An instance field,
+   * not a module-level singleton, so it dies with this client; cleared via
+   * clearProxyCache() on reconnect-after-outage and wake-from-sleep (see its
+   * doc comment - that is narrower than "every network change"). TTL
+   * matches COOKIE_CACHE_TTL.
+   */
+  private proxyCache: ProxyCache = createProxyCache(RemoteClient.COOKIE_CACHE_TTL);
+
   /** Latest D1 bookmark. In-memory only - request state, not a credential. */
   private d1Bookmark: string | null = null;
 
@@ -293,6 +326,19 @@ export class RemoteClient {
   clearCookieCache(): void {
     this.cachedCookie = null;
     this.cookieCachedAt = 0;
+  }
+
+  /**
+   * Invalidate every cached proxy decision (DSK-012). Called from
+   * SyncEngine.notifyNetworkOnline, whose only two triggers are
+   * powerMonitor's "resume" and the renderer's "online" event - reconnect
+   * after an outage and wake-from-sleep. A network change that never drops
+   * connectivity (e.g. moving between an on-prem network and a VPN) does
+   * not reach this and rides out the cache's own TTL instead; that is
+   * accepted, not a bug - see notifyNetworkOnline's comment.
+   */
+  clearProxyCache(): void {
+    this.proxyCache.clear();
   }
 
   /**
@@ -422,7 +468,7 @@ export class RemoteClient {
     // Resolve system proxy (supports corporate proxies, PAC files, etc.) and
     // build the actual agent for the request - on proxy-mandatory networks a
     // direct agent silently fails, so the resolved proxy MUST be applied.
-    const agent = await resolveAgent(fullUrl, this.env);
+    const agent = await resolveAgent(fullUrl, this.env, this.proxyCache);
 
     let bodyBuf: Buffer | undefined;
     if (opts.body != null) {
@@ -475,7 +521,7 @@ export class RemoteClient {
 
             // Redirect target may be a different host (e.g. R2) - resolve its
             // proxy independently rather than reusing the origin's agent.
-            resolveAgent(redirectUrl, this.env).then((rAgent) => {
+            resolveAgent(redirectUrl, this.env, this.proxyCache).then((rAgent) => {
               const rReq = rLib.request(redirectUrl, { method: redirectMethod, headers: rHeaders, timeout, agent: rAgent }, (rRes) => {
                 const chunks: Buffer[] = [];
                 rRes.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -778,7 +824,7 @@ export class RemoteClient {
 
           // Resolve a proxy agent per-URL (redirects can cross hosts); falls
           // back to the shared DIRECT agent when no proxy is configured.
-          resolveAgent(url, this.env).then((agent) => {
+          resolveAgent(url, this.env, this.proxyCache).then((agent) => {
           const req = reqLib.get(url, { headers, timeout: 300_000, agent }, (res) => {
             const status = res.statusCode ?? 500;
             if (status === 401) { res.resume(); reject(new Error("SESSION_EXPIRED")); return; }
@@ -1152,7 +1198,7 @@ export class RemoteClient {
       const lib = parsed.protocol === "https:" ? https : http;
 
       // Route through the resolved system/corporate proxy when present.
-      resolveAgent(fullUrl, this.env).then((agent) => {
+      resolveAgent(fullUrl, this.env, this.proxyCache).then((agent) => {
       const req = lib.request(fullUrl, {
         method: "PUT",
         headers: {
@@ -1237,7 +1283,7 @@ export class RemoteClient {
       const lib = urlParsed.protocol === "https:" ? https : http;
 
       // Route through the resolved system/corporate proxy when present.
-      resolveAgent(fullUrl, this.env).then((agent) => {
+      resolveAgent(fullUrl, this.env, this.proxyCache).then((agent) => {
       const req = lib.request(fullUrl, {
         method: "PUT",
         headers: {
@@ -1545,7 +1591,7 @@ export class RemoteClient {
 
       // Route through the resolved system/corporate proxy when present (R2 is a
       // different host, so its proxy is resolved independently).
-      resolveAgent(presignedUrl, this.env).then((agent) => {
+      resolveAgent(presignedUrl, this.env, this.proxyCache).then((agent) => {
       const req = lib.request(presignedUrl, {
         method: "PUT",
         headers: {
@@ -1727,7 +1773,7 @@ export class RemoteClient {
     return new Promise((resolve, reject) => {
       const parsed = new URL(presignedUrl);
       const lib = parsed.protocol === "https:" ? https : http;
-      resolveAgent(presignedUrl, this.env).then((agent) => {
+      resolveAgent(presignedUrl, this.env, this.proxyCache).then((agent) => {
         const req = lib.request(presignedUrl, {
           method: "PUT",
           headers: { "Content-Type": "application/octet-stream", "Content-Length": String(size) },

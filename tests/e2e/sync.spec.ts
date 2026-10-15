@@ -1,4 +1,4 @@
-import { test, expect, navigateTo, guestTest } from "../fixtures";
+import { test, expect, navigateTo, guestTest, electronAppFor } from "../fixtures";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -37,6 +37,48 @@ test.describe("Sync Page", () => {
     await expect(
       appPage.getByText(/conflict|issue|no issue|no conflict/i).first(),
     ).toBeVisible();
+  });
+
+  // A long path used to blow the row wide: the path box is `flex-1` and the
+  // span inside it is a flex item too, so both defaulted to `min-width: auto`
+  // and refused to shrink below the unbreakable string. The row grew instead
+  // of ellipsizing and pushed Browse out through the side of the modal, which
+  // has no overflow clipping of its own. Measured here rather than asserted as
+  // a class because only real layout can tell the two apart.
+  test("a long local path keeps the Browse button inside the modal", async ({
+    appPage,
+  }) => {
+    await navigateTo(appPage, "/sync");
+
+    const longPath =
+      "/Users/firatkaya/Desktop/Projects/dosya.dev/apps/desktop/store-shots/mac-app-store";
+    // The picker is a native dialog, so the stub goes in the main process:
+    // electronAPI is a frozen contextBridge object and cannot be patched from
+    // the page.
+    await electronAppFor(appPage).evaluate(async ({ ipcMain }, path) => {
+      ipcMain.removeHandler("sync:pick-local-folder");
+      ipcMain.handle("sync:pick-local-folder", async () => ({ path }));
+    }, longPath);
+
+    await appPage
+      .getByRole("button", { name: /add sync folder/i })
+      .first()
+      .click();
+
+    const heading = appPage.getByRole("heading", { name: "Add sync folder" });
+    await expect(heading).toBeVisible();
+    // h3 -> header row -> the modal card itself.
+    const card = heading.locator("xpath=../..");
+
+    const browse = appPage.getByRole("button", { name: "Browse" });
+    await browse.click();
+    await expect(appPage.getByText(longPath)).toBeVisible();
+
+    const cardBox = await card.boundingBox();
+    const browseBox = await browse.boundingBox();
+    if (!cardBox || !browseBox) throw new Error("modal or Browse button not laid out");
+
+    expect(browseBox.x + browseBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
   });
 
   test("Settings tab is clickable", async ({ appPage }) => {

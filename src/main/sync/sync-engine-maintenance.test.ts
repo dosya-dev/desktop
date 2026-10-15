@@ -166,3 +166,72 @@ describe("SyncEngine maintenance plumbing", () => {
     expect(rt.errorMessage).toBe("Paused for maintenance: back in 5");
   });
 });
+
+/**
+ * Fix round 1 on Task 5 (desktop audit, 2026-10-04): the op-count cache
+ * (DSK-005) and proxy cache (DSK-012) each had their own unit tests, but
+ * nothing asserted the engine actually CALLS them at the right call sites -
+ * the real risk the earlier Review Focus #3 was about. A separate describe
+ * block (not nested in the one above) so these run under REAL timers:
+ * stopPair's internal `await new Promise(r => setTimeout(r, 100))` would
+ * hang under the fake timers the block above installs in beforeEach, since
+ * nothing here drives them forward.
+ */
+describe("SyncEngine wiring: op-count cache and proxy cache call sites", () => {
+  it("getStatus() reads the queued-op count through this.opCounts, only while syncing", () => {
+    const { engine, rt } = withEngine();
+    // getStatus()'s try block calls this.index.countErrors() BEFORE it ever
+    // reaches the opCounts branch, and the real `index` getter throws
+    // outside Electron (see the file header comment) - which getStatus()
+    // swallows, but that would also swallow the opCounts call this test is
+    // checking for. Shadow the prototype's `index` accessor with a working
+    // fake so the try block gets past countErrors() and actually reaches it.
+    Object.defineProperty(engine, "index", {
+      configurable: true,
+      get: () => ({ countErrors: () => 0, countOpsByState: () => 0 }),
+    });
+    const opCounts = (engine as unknown as {
+      opCounts: { get: (pairId: string, compute: () => number) => number };
+    }).opCounts;
+    const getSpy = vi.spyOn(opCounts, "get");
+
+    rt.syncing = false;
+    engine.getStatus();
+    expect(getSpy).not.toHaveBeenCalled();
+
+    rt.syncing = true;
+    engine.getStatus();
+    engine.getStatus();
+    expect(getSpy).toHaveBeenCalledTimes(2);
+    expect(getSpy.mock.calls[0][0]).toBe(rt.pair.id);
+    expect(getSpy.mock.calls[1][0]).toBe(rt.pair.id);
+  });
+
+  it("stopPair() drops the pair's op-count cache entry", async () => {
+    const { engine, rt } = withEngine();
+    const internals = engine as unknown as {
+      opCounts: { drop: (pairId: string) => void };
+      stopPair: (pairId: string) => Promise<void>;
+    };
+    const dropSpy = vi.spyOn(internals.opCounts, "drop");
+
+    await internals.stopPair(rt.pair.id);
+
+    expect(dropSpy).toHaveBeenCalledWith(rt.pair.id);
+    expect(engine.getStatus().pairs.find((p) => p.pairId === rt.pair.id)).toBeUndefined();
+  });
+
+  it("notifyNetworkOnline() clears the client's proxy cache", () => {
+    const { engine } = withEngine();
+    // stopped so the recovery probe this also triggers (void
+    // this.checkRecovery()) never runs - irrelevant to what's under test
+    // here and this harness never did the real start() that sets it up.
+    engine.started = false;
+    const client = (engine as unknown as { client: { clearProxyCache: () => void } }).client;
+    const clearSpy = vi.spyOn(client, "clearProxyCache");
+
+    engine.notifyNetworkOnline();
+
+    expect(clearSpy).toHaveBeenCalledTimes(1);
+  });
+});

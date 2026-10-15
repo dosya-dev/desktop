@@ -7,19 +7,25 @@ import {
   Notification,
 } from "electron";
 import { app } from "electron";
+import { release as osRelease, arch as osArch } from "os";
 import { HIDDEN_LAUNCH_ARG } from "./window-show";
+import { currentDistribution } from "./distribution";
+import { loginItemMode } from "./login-item";
 import { join, resolve, sep, basename } from "path";
-import { createWriteStream } from "fs";
-import { mkdtemp, readdir, rm, writeFile } from "fs/promises";
+import { createWriteStream, readFileSync } from "fs";
+import { mkdtemp, readdir, rm } from "fs/promises";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import QRCode from "qrcode";
 import { longPath } from "./sync/paths";
+import { makeIpcGate, rendererOrigin } from "./ipc-sender";
+import { describePlatform, tailOfFile, LOG_TAIL_LINES } from "./bug-report";
+import { detectDistribution } from "./distribution";
 import { clearSessionCookie } from "./session";
 import { isSessionCookieName, sessionCookieHeader } from "./session-cookie";
 import { buildDownloadUrl } from "./download-url";
 import { openSink, writeSink, closeSink, abortSink } from "./lan-receive";
-import { saveVaultBytes } from "./vault-save";
+import { openVaultSink, writeVaultSink, closeVaultSink, abortVaultSink } from "./vault-save";
 import {
   linkFileProvider,
   relinkFileProvider,
@@ -35,7 +41,44 @@ import {
   writePreference,
 } from "./file-provider-host";
 
+/**
+ * The app's version. Packaged, app.getVersion() reads the bundle; unpackaged
+ * (dev, the test harness) it is Electron's own version, so the About window
+ * would announce "43.4.0". package.json is the truth there.
+ */
+export function appVersion(): string {
+  if (app.isPackaged) return app.getVersion();
+  // `electron-vite dev` sets the app path to the project; the test harness
+  // launches out/main/index.js directly, so the path is the bundle's own
+  // directory and package.json sits two levels up. Walk up until found.
+  let dir = app.getAppPath();
+  for (let i = 0; i < 4; i++) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: unknown; version?: unknown };
+      if (pkg.name === "@dosya-dev/desktop" && typeof pkg.version === "string") return pkg.version;
+    } catch {}
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return app.getVersion();
+}
+
 export function registerIpcHandlers(apiBase: string): void {
+  // ── Sender validation (S-1) ──────────────────────────────────────
+  // Every channel below goes through `handle`/`on` from the gate rather than
+  // ipcMain directly, so each one refuses a message that did not come from the
+  // app's own top-level renderer. Defense in depth: nothing can reach these
+  // channels today (one renderer, one origin, a sandboxed preload that does
+  // not reach sub-frames), but the handlers assumed that instead of asserting
+  // it. See ipc-sender.ts. `rendererOrigin` mirrors createWindow's loadURL
+  // branch: only `electron-vite dev` gets the Vite dev server; packaged builds
+  // AND the built-but-unpackaged test harness both load app://bundle.
+  const { handle, on } = makeIpcGate(
+    ipcMain,
+    rendererOrigin({ isPackaged: app.isPackaged, devServerUrl: process.env.ELECTRON_RENDERER_URL }),
+  );
+
   // "Open in system app" writes here. A single fixed name (the old approach)
   // lets another local user preclaim it on a shared /tmp before we start -
   // Linux's sticky bit on /tmp then stops us from ever removing or verifying
@@ -71,24 +114,24 @@ export function registerIpcHandlers(apiBase: string): void {
 
   // ── Window Controls ──────────────────────────────────────────────
 
-  ipcMain.on("app:minimize", (event) => {
+  on("app:minimize", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
   });
 
-  ipcMain.on("app:maximize", (event) => {
+  on("app:maximize", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win) {
       win.isMaximized() ? win.unmaximize() : win.maximize();
     }
   });
 
-  ipcMain.on("app:close", (event) => {
+  on("app:close", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close();
   });
 
   // DOSYA_E2E_PLATFORM lets Playwright exercise the win32/linux titlebar
   // layouts from a single OS; honored only under the test runner's env.
-  ipcMain.handle(
+  handle(
     "app:get-platform",
     () => (process.env.NODE_ENV === "test" && process.env.DOSYA_E2E_PLATFORM) || process.platform,
   );
@@ -101,22 +144,34 @@ export function registerIpcHandlers(apiBase: string): void {
   // the same args are passed to both calls; executableWillLaunchAtLogin covers
   // an entry registered before the argument existed.
   const loginItemArgs = process.platform === "win32" ? [HIDDEN_LAUNCH_ARG] : [];
+  // The Mac App Store build is sandboxed and Electron's login helper cannot
+  // register from inside the sandbox; SMAppService can, on macOS 13+. See
+  // login-item.ts for the decision and its test.
+  const loginMode = loginItemMode({
+    distribution: currentDistribution(),
+    platform: process.platform,
+    osVersion: process.getSystemVersion(),
+  });
+  const loginType = loginMode === "mainAppService" ? ({ type: "mainAppService" } as const) : {};
   const launchAtLogin = (): boolean => {
+    if (loginMode === "unsupported") return false;
     try {
-      const s = app.getLoginItemSettings({ args: loginItemArgs });
+      const s = app.getLoginItemSettings({ args: loginItemArgs, ...loginType });
       return s.openAtLogin || (process.platform === "win32" && s.executableWillLaunchAtLogin === true);
     } catch {
       return false;
     }
   };
-  ipcMain.handle("app:get-launch-at-login", () => launchAtLogin());
-  ipcMain.handle("app:set-launch-at-login", (_e, enabled: boolean) => {
-    app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true, args: loginItemArgs });
+  handle("app:get-launch-at-login-supported", () => loginMode !== "unsupported");
+  handle("app:get-launch-at-login", () => launchAtLogin());
+  handle("app:set-launch-at-login", (_e, enabled: boolean) => {
+    if (loginMode === "unsupported") return false;
+    app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true, args: loginItemArgs, ...loginType });
     return launchAtLogin();
   });
 
   // ── Standard OS folders (for known-folder backup presets) ────────
-  ipcMain.handle("app:get-standard-paths", () => {
+  handle("app:get-standard-paths", () => {
     const get = (name: Parameters<typeof app.getPath>[0]) => {
       try { return app.getPath(name); } catch { return null; }
     };
@@ -129,9 +184,57 @@ export function registerIpcHandlers(apiBase: string): void {
     };
   });
 
+  // ── Bug reports (spec: docs/superpowers/specs/2026-10-03-bug-report-design.md) ──
+  // What the renderer cannot know about the machine. Nothing here is a path.
+  handle("app:get-diagnostics-info", () => ({
+    version: app.getVersion(),
+    // Same formula updater.ts uses for `app:get-distribution`, read through the
+    // same pure helper rather than importing updater.ts's module-level constant.
+    distribution: detectDistribution({
+      windowsStore: process.windowsStore,
+      mas: process.mas,
+      env: process.env,
+    }),
+    arch: osArch(),
+    platform: describePlatform({ platform: process.platform, release: osRelease() }),
+    locale: app.getLocale(),
+  }));
+
+  // The About window's facts. Separate from the bug report's diagnostics so
+  // adding a field here never changes what a report sends to the server.
+  handle("app:get-about-info", () => ({
+    version: appVersion(),
+    distribution: detectDistribution({
+      windowsStore: process.windowsStore,
+      mas: process.mas,
+      env: process.env,
+    }),
+    platform: describePlatform({ platform: process.platform, release: osRelease() }),
+    arch: osArch(),
+    electron: process.versions.electron ?? "",
+    chrome: process.versions.chrome ?? "",
+  }));
+
+  // The last lines of main.log (file-logger.ts). Opt-in on the renderer side:
+  // the log names files from the user's synced folders.
+  handle("app:read-log-tail", () =>
+    tailOfFile(join(app.getPath("userData"), "logs", "main.log"), LOG_TAIL_LINES),
+  );
+
+  // A picture of the window that asked, as JPEG bytes. Throws when there is no
+  // window to capture; the renderer treats that as "no screenshot", not as a
+  // failed report.
+  handle("app:capture-window", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) throw new Error("No window to capture");
+    const image = await win.webContents.capturePage();
+    if (image.isEmpty()) throw new Error("Window capture is empty");
+    return new Uint8Array(image.toJPEG(85));
+  });
+
   // ── Auth ─────────────────────────────────────────────────────────
 
-  ipcMain.handle("auth:clear-session", async () => {
+  handle("auth:clear-session", async () => {
     await clearSessionCookie(apiBase);
     // The extension holds a session of its own, and the files macOS downloaded
     // for it sit on disk. The server revokes the session with its parent, but
@@ -141,14 +244,14 @@ export function registerIpcHandlers(apiBase: string): void {
     await unlinkFileProvider(null, fileProviderDeps()).catch(() => {});
   });
 
-  ipcMain.handle("auth:get-api-base", () => apiBase);
+  handle("auth:get-api-base", () => apiBase);
 
   // Wait for the dosya_session cookie to be ready (SameSite fixed).
   // After login, the server sets SameSite=Lax which doesn't work for
   // cross-origin fetch. session.ts fixes it to SameSite=None async.
   // This handler polls until the fix is applied, and applies it directly
   // if the cookies.on("changed") listener hasn't done so yet.
-  ipcMain.handle("auth:wait-for-session", async () => {
+  handle("auth:wait-for-session", async () => {
     const WAIT_TIMEOUT_MS = 10_000;
 
     /** Returns true when the cookie is present and usable (fixing it if not). */
@@ -210,7 +313,7 @@ export function registerIpcHandlers(apiBase: string): void {
 
   // ── File System ──────────────────────────────────────────────────
 
-  ipcMain.handle("fs:open-file-dialog", async (_event, options) => {
+  handle("fs:open-file-dialog", async (_event, options) => {
     // Whitelist specific fields instead of spreading untrusted renderer options
     const safeOpts: Electron.OpenDialogOptions = {
       properties: ["openFile", "multiSelections"],
@@ -223,7 +326,7 @@ export function registerIpcHandlers(apiBase: string): void {
     return dialog.showOpenDialog(safeOpts);
   });
 
-  ipcMain.handle("fs:save-file-dialog", async (_event, options) => {
+  handle("fs:save-file-dialog", async (_event, options) => {
     const safeOpts: Electron.SaveDialogOptions = {};
     if (options && typeof options === "object") {
       if (typeof options.title === "string") safeOpts.title = options.title.slice(0, 200);
@@ -240,16 +343,16 @@ export function registerIpcHandlers(apiBase: string): void {
   // never leaves this process - so a peer on the network cannot aim its bytes
   // anywhere. See src/main/lan-receive.ts.
 
-  ipcMain.handle("lan:recv-open", (_event, { name, size }: { name: unknown; size: unknown }) =>
+  handle("lan:recv-open", (_event, { name, size }: { name: unknown; size: unknown }) =>
     openSink(name, size));
-  ipcMain.handle("lan:recv-chunk", (_event, { id, bytes }: { id: unknown; bytes: unknown }) =>
+  handle("lan:recv-chunk", (_event, { id, bytes }: { id: unknown; bytes: unknown }) =>
     writeSink(id, bytes));
-  ipcMain.handle("lan:recv-close", (_event, { id }: { id: unknown }) => closeSink(id));
-  ipcMain.handle("lan:recv-abort", (_event, { id }: { id: unknown }) => abortSink(id));
+  handle("lan:recv-close", (_event, { id }: { id: unknown }) => closeSink(id));
+  handle("lan:recv-abort", (_event, { id }: { id: unknown }) => abortSink(id));
 
   // ── File Open ─────────────────────────────────────────────────────
 
-  ipcMain.handle(
+  handle(
     "file:open",
     async (_event, { fileId, fileName }: { fileId: string; fileName: string }) => {
       // Validate inputs
@@ -314,7 +417,7 @@ export function registerIpcHandlers(apiBase: string): void {
 
   // ── File Download (to a user-chosen location) ─────────────────────
 
-  ipcMain.handle(
+  handle(
     "file:download",
     async (
       _event,
@@ -373,7 +476,7 @@ export function registerIpcHandlers(apiBase: string): void {
     },
   );
 
-  ipcMain.handle(
+  handle(
     "archive:download",
     async (_event, { fileIds, folderIds }: { fileIds: string[]; folderIds: string[] }) => {
       if (!Array.isArray(fileIds) || !Array.isArray(folderIds) || (fileIds.length === 0 && folderIds.length === 0)) {
@@ -402,7 +505,12 @@ export function registerIpcHandlers(apiBase: string): void {
     },
   );
 
-  ipcMain.handle("file:show-in-folder", async (_event, path: string) => {
+  // S-3: the path is one the renderer itself produced (a download it just
+  // wrote, a sync folder it already knows) and showItemInFolder only reveals
+  // it in the file manager - it does not read or hand back contents. The shape
+  // check below is all the handler needs; who may supply a path at all is now
+  // bounded by the gate above, which is the part that was missing.
+  handle("file:show-in-folder", async (_event, path: string) => {
     if (typeof path !== "string" || path.length === 0 || path.length > 2000) {
       throw new Error("Invalid path");
     }
@@ -410,22 +518,24 @@ export function registerIpcHandlers(apiBase: string): void {
   });
 
   // ── Vault: where a decrypted file is written ──────────────────────
-  // The renderer decrypted the bytes and asks by NAME; the dialog and the
-  // path stay here. See src/main/vault-save.ts.
-  ipcMain.handle("vault:save-bytes", (_event, { name, bytes }: { name: unknown; bytes: unknown }) =>
-    saveVaultBytes(name, bytes, {
-      showSaveDialog: (opts) => dialog.showSaveDialog(opts),
-      downloadsDir: () => app.getPath("downloads"),
-      // Owner-only like file:open's temp copy: this is plaintext the user
-      // chose to keep encrypted everywhere else.
-      write: (path, buf) => writeFile(longPath(path), buf, { mode: 0o600 }),
-    }));
+  //
+  // The renderer decrypts and asks by NAME; the dialog, the path and the file
+  // handle stay here. It streams: one decrypted chunk per `vault:save-chunk`,
+  // so neither process ever holds the whole plaintext and nothing is held
+  // while the dialog is on screen (DSK-010). There is deliberately no
+  // whole-buffer channel any more - it would put the 2x-the-file-across-two
+  // -processes cost straight back. See src/main/vault-save.ts.
+  handle("vault:save-open", (_event, { name }: { name: unknown }) => openVaultSink(name));
+  handle("vault:save-chunk", (_event, { id, bytes, index }: { id: unknown; bytes: unknown; index: unknown }) =>
+    writeVaultSink(id, bytes, index));
+  handle("vault:save-close", (_event, { id }: { id: unknown }) => closeVaultSink(id));
+  handle("vault:save-abort", (_event, { id }: { id: unknown }) => abortVaultSink(id));
 
   // ── 2FA QR generation ────────────────────────────────────────────
   // Render the authenticator QR entirely on-device. The otpauth:// URI embeds
   // the raw TOTP shared secret, so it must NEVER be sent to a third-party image
   // service (it previously went to api.qrserver.com). Generated locally here.
-  ipcMain.handle("totp:generate-qr", async (_event, uri: string) => {
+  handle("totp:generate-qr", async (_event, uri: string) => {
     if (typeof uri !== "string" || !uri.startsWith("otpauth://") || uri.length > 1000) {
       throw new Error("Invalid TOTP URI");
     }
@@ -434,7 +544,7 @@ export function registerIpcHandlers(apiBase: string): void {
 
   // ── Notifications ────────────────────────────────────────────────
 
-  ipcMain.on(
+  on(
     "notification:show",
     (_event, opts: { title: string; body: string }) => {
       // Validate notification fields
@@ -492,7 +602,7 @@ export function registerIpcHandlers(apiBase: string): void {
     }
   };
 
-  ipcMain.handle("fileProvider:status", async () => {
+  handle("fileProvider:status", async () => {
     const native = nativeAddon();
     return {
       available: Boolean(native?.isSupported()),
@@ -501,13 +611,13 @@ export function registerIpcHandlers(apiBase: string): void {
     };
   });
 
-  ipcMain.handle("fileProvider:open-settings", async () => {
+  handle("fileProvider:open-settings", async () => {
     // The Extensions pane. macOS has no deep link to the File Providers section
     // itself, so the user lands one click away from it.
     await shell.openExternal("x-apple.systempreferences:com.apple.ExtensionsPreferences");
   });
 
-  ipcMain.handle("fileProvider:link", async (_event, opts: { userId: unknown; fresh?: unknown }) => {
+  handle("fileProvider:link", async (_event, opts: { userId: unknown; fresh?: unknown }) => {
     const userId = opts?.userId;
     if (typeof userId !== "string" || userId.length === 0 || userId.length > 200) {
       throw new Error("Invalid userId");
@@ -517,7 +627,7 @@ export function registerIpcHandlers(apiBase: string): void {
     return { ok: await link(userId, fileProviderDeps()) };
   });
 
-  ipcMain.handle(
+  handle(
     "fileProvider:set-enabled",
     async (_event, opts: { enabled: unknown; userId?: unknown }) => {
       const enabled = opts?.enabled;

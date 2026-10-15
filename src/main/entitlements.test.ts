@@ -159,3 +159,76 @@ test("no entitlements file that codesign reads carries an XML comment", () => {
   // materialised, so it may keep them.
   assert.doesNotMatch(read("build/entitlements.mac.plist"), /<!--/);
 });
+
+test("the extension is sandboxed", () => {
+  // extensionKit refuses to spawn an unsandboxed app extension: fileproviderd
+  // logs `Error Domain=com.apple.extensionKit.errorDomain Code=16 "Extension
+  // must have com.apple.security.app-sandbox entitlement."`, Finder shows
+  // "dosya encountered an error", and nothing on screen names the cause. Seen
+  // on the first approved build, 2026-10-02. The sandbox is not a restricted
+  // entitlement, so the profile needs no change.
+  const plist = read("build/entitlements.fileprovider.plist").replace(/<!--[\s\S]*?-->/g, "");
+  assert.match(
+    plist,
+    /<key>com\.apple\.security\.app-sandbox<\/key>\s*<true\/>/,
+    "the extension must claim com.apple.security.app-sandbox or macOS will not launch it",
+  );
+});
+
+import { STORE_APP_BUNDLE_ID, STORE_EXTENSION_BUNDLE_ID } from "../../scripts/afterPack.mjs";
+
+function entitlementKeys(plist: string): string[] {
+  return [...plist.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+}
+
+test("the store app is sandboxed and shares the extension's keychain and app groups", () => {
+  const plist = read("build/entitlements.mas.plist");
+  assert.ok(!plist.includes("<!--"), "codesign hands entitlements to AMFI, whose parser rejects XML comments");
+  assert.match(plist, /<key>com\.apple\.security\.app-sandbox<\/key>\s*<true\/>/);
+  assert.match(plist, /<key>com\.apple\.security\.files\.bookmarks\.app-scope<\/key>\s*<true\/>/);
+  assert.match(plist, /<key>com\.apple\.security\.network\.server<\/key>\s*<true\/>/);
+  assert.deepEqual(entitlementArray(plist, "keychain-access-groups"), [`53HFF44WQ8.${accessGroupSuffix()}`]);
+  const extensionPlist = read("native/macos/DosyaFileProvider/AppExtension/Info.plist");
+  const group = extensionPlist.match(/<key>NSExtensionFileProviderDocumentGroup<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+  assert.ok(group, "the extension plist no longer names its document group");
+  assert.deepEqual(entitlementArray(plist, "com.apple.security.application-groups"), [group]);
+});
+
+test("the store helpers inherit the sandbox and claim nothing else", () => {
+  const plist = read("build/entitlements.mas.inherit.plist");
+  assert.ok(!plist.includes("<!--"));
+  assert.deepEqual(entitlementKeys(plist).sort(), ["com.apple.security.app-sandbox", "com.apple.security.inherit"]);
+});
+
+test("electron-builder's mas target carries the store identifier the extension nests under", () => {
+  const yml = read("electron-builder.yml");
+  const block = yml.match(/^mas:\n((?:  .*\n|\n)*)/m)?.[1] ?? "";
+  assert.match(block, new RegExp(`^  appId: ${STORE_APP_BUNDLE_ID.replace(/\./g, "\\.")}$`, "m"));
+  assert.ok(STORE_EXTENSION_BUNDLE_ID.startsWith(`${STORE_APP_BUNDLE_ID}.`));
+  assert.match(block, /^  hardenedRuntime: false$/m);
+  assert.match(block, /^  entitlements: build\/entitlements\.mas\.plist$/m);
+  assert.match(block, /^  entitlementsInherit: build\/entitlements\.mas\.inherit\.plist$/m);
+  // NOT afterSign: electron-builder signs the mas target through signMas(),
+  // which never emits that hook, so the check would never run for the store.
+  assert.match(yml, /^afterAllArtifactBuild: scripts\/afterAllArtifactBuild\.mjs$/m);
+});
+
+test("the extension is signed with the identifier entitlements TestFlight requires (ITMS-90886)", () => {
+  // Xcode adds these to every provisioned bundle; our script signs the
+  // extension, so the template must carry them or App Store Connect refuses
+  // the build for TestFlight after accepting the upload.
+  const plist = read("build/entitlements.fileprovider.plist");
+  assert.match(plist, /<key>com\.apple\.application-identifier<\/key>\s*<string>__TEAM_ID__\.__BUNDLE_ID__<\/string>/);
+  assert.match(plist, /<key>com\.apple\.developer\.team-identifier<\/key>\s*<string>__TEAM_ID__<\/string>/);
+});
+
+test("the export-compliance key is declared where electron-builder actually reads it", () => {
+  // extendInfo under `mas` is silently ignored (macPackager reads the mac
+  // block's options); build 2 shipped without the key and App Store Connect
+  // held it at "Missing Compliance".
+  const yml = read("electron-builder.yml");
+  const macBlock = yml.match(/^mac:\n((?:  .*\n|\n)*)/m)?.[1] ?? "";
+  assert.match(macBlock, /^  extendInfo:\n(?:    .*\n)*?    ITSAppUsesNonExemptEncryption: false$/m);
+  const masBlock = yml.match(/^mas:\n((?:  .*\n|\n)*)/m)?.[1] ?? "";
+  assert.doesNotMatch(masBlock, /^  extendInfo:/m, "a mas-level extendInfo never reaches Info.plist");
+});

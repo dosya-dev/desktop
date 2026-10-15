@@ -7,6 +7,7 @@ import {
   type NotificationItem,
 } from "@dosya-dev/shared";
 import { fetchInbox, fetchSummary, markRead, markAllRead, dismiss } from "@/lib/notifications-api";
+import { NotificationIcon } from "./NotificationIcon";
 
 /** Two digits fit the dot; past that the exact number stops being the point. */
 export function badgeLabel(unread: number): string {
@@ -133,18 +134,29 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
                     <div
                       key={item.id}
                       data-testid={`notification-${item.id}`}
-                      className="flex gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-black/5"
+                      className="flex gap-2.5 border-b px-3 py-2 last:border-b-0 hover:bg-black/5"
                       style={{ borderColor: "var(--color-border)" }}
                     >
-                      {/* Unread is a dot, not a tinted row: colouring every
-                          unread row turns the whole list into an alert. */}
-                      <span
-                        data-testid={isUnread(item) ? `unread-dot-${item.id}` : undefined}
-                        className="mt-1.5 size-1.5 shrink-0 rounded-full"
-                        style={{ background: isUnread(item) ? "var(--color-primary)" : "transparent" }}
+                      <NotificationIcon
+                        icon={item.icon}
+                        category={item.category}
+                        priority={item.priority}
+                        unread={isUnread(item)}
+                        size={28}
                       />
                       <button onClick={() => openItem(item)} className="min-w-0 flex-1 text-left">
-                        <p className={`truncate text-xs ${isUnread(item) ? "font-semibold" : ""}`}>{item.title}</p>
+                        <p className={`flex items-center gap-1.5 text-xs ${isUnread(item) ? "font-semibold" : ""}`}>
+                          <span className="truncate">{item.title}</span>
+                          {/* Unread is a dot, not a tinted row: colouring every
+                              unread row turns the whole list into an alert. */}
+                          {isUnread(item) && (
+                            <span
+                              data-testid={`unread-dot-${item.id}`}
+                              className="size-1.5 shrink-0 rounded-full"
+                              style={{ background: "var(--color-primary)" }}
+                            />
+                          )}
+                        </p>
                         {item.body && (
                           <p className="mt-0.5 line-clamp-2 text-[11px] text-[var(--color-text-secondary)]">{item.body}</p>
                         )}

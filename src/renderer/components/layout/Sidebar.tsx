@@ -36,10 +36,12 @@ import {
 import type { Workspace } from "@dosya-dev/shared";
 import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
-import { useSyncPaused, useSyncPairs } from "@/lib/sync-store";
+import { useSyncPaused, useSyncStore, useWorkspaceSyncSummaryKey } from "@/lib/sync-store";
+import { workspaceSyncSummary } from "@/lib/sync-summary";
 import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { api, ApiError } from "@/lib/api-client";
 import { useNarrowWindow } from "@/lib/use-narrow-window";
+import { useUiStore } from "@/lib/ui-store";
 import { usePermissions } from "@/lib/use-permissions";
 import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
@@ -118,6 +120,19 @@ const NAV_WORKSPACE: NavEntry[] = [
 
 const FILES_OPEN_KEY = "dosya_sidebar_files_open";
 
+// The rail animates its width over 200ms (the <aside> below). Rows centre their
+// icon in the collapsed rail with explicit horizontal padding rather than
+// `justify-center`: padding animates and justify-content does not, so each icon
+// glides the few pixels from its expanded position to the rail's centre in step
+// with the width. With `justify-center` the icon leapt to the middle of the
+// still-260px rail the instant `collapsed` flipped and slid back as the rail
+// shrank around it - "the icons centre first, then the menu closes". The
+// collapsed padding is (36 - icon)/2: the rail is 60px and every row sits inside
+// 12px of wrapper padding, so a row is 36px wide once the animation settles.
+const RAIL_GLIDE = "transition-[padding] duration-200 motion-reduce:transition-none";
+const RAIL_GLIDE_COLORS =
+  "transition-[padding,color,background-color] duration-200 motion-reduce:transition-none";
+
 /** Tallest the collapsed-mode Files flyout is allowed to get, in px. */
 const FLYOUT_MAX_H = 380;
 
@@ -142,7 +157,10 @@ export function Sidebar() {
   // would have had well under half its width left for actual content, so the
   // sidebar gives way first and the toggle is withdrawn rather than left as a
   // control that immediately undoes itself.
-  const [userCollapsed, setUserCollapsed] = useState(false);
+  // In the shared ui store, not local state: View › Show Sidebar flips it
+  // from the application menu.
+  const userCollapsed = useUiStore((s) => s.sidebarCollapsed);
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const narrow = useNarrowWindow();
   const collapsed = userCollapsed || narrow;
   const [platform, setPlatform] = useState<string>("darwin");
@@ -275,23 +293,24 @@ export function Sidebar() {
 
   // Sync state now comes from the single shared store (see AppShell.init).
   const syncPaused = useSyncPaused();
-  const syncPairs = useSyncPairs();
+  // Subscribes to a primitive key, not the pairs array: `status.pairs`
+  // arrives over IPC, so it is a new array identity on every tick, and a
+  // selector returning it (or an object rebuilt from it) re-rendered this
+  // component on every tick regardless of whether anything displayed
+  // actually changed (DSK-002). This key only changes when some workspace's
+  // syncing/error/paused flags actually flip.
+  const syncSummaryKey = useWorkspaceSyncSummaryKey();
 
-  /** Per-workspace sync summary: workspaceId → { syncing, error, paused, count } */
-  const wsSyncMap = useMemo(() => {
-    const map: Record<string, { syncing: boolean; error: boolean; paused: boolean; count: number }> = {};
-    for (const p of syncPairs) {
-      const wsId = p.workspaceId;
-      if (!wsId) continue;
-      if (!map[wsId]) map[wsId] = { syncing: false, error: false, paused: false, count: 0 };
-      map[wsId].count++;
-      if (p.status === "syncing") map[wsId].syncing = true;
-      // A held deletion needs the user as much as an error does.
-      if (p.status === "error" || p.status === "needs-confirmation") map[wsId].error = true;
-      if (p.status === "paused") map[wsId].paused = true;
-    }
-    return map;
-  }, [syncPairs]);
+  /** Per-workspace sync summary: workspaceId → { syncing, error, paused, count }.
+   *  Recomputed only when syncSummaryKey changes - reads the pairs directly
+   *  off the store (not via a subscribing hook) because by the time this
+   *  render runs, triggered by that key, the store's state is already the
+   *  current one; subscribing to the array itself here would reintroduce
+   *  the every-tick re-render this key exists to avoid. */
+  const wsSyncMap = useMemo(
+    () => workspaceSyncSummary(useSyncStore.getState().status?.pairs ?? []),
+    [syncSummaryKey],
+  );
 
   useEffect(() => {
     ipc.getPlatform().then(setPlatform);
@@ -303,6 +322,24 @@ export function Sidebar() {
   }, []);
 
   const avatarVersion = useAvatarVersion((s) => s.version);
+
+  /**
+   * The avatar's URL, or null while there is no URL worth requesting.
+   *
+   * `apiBase` is primed over IPC, so it is "" on the first render - and the
+   * user is usually already known by then, because /api/me resolved during
+   * the redirect to the dashboard. Building the URL from an empty base
+   * yields the RELATIVE "/api/me/avatar?...", which resolves against
+   * app://bundle, and the app: protocol handler answers any unknown path
+   * with index.html so client-side routing works. An <img> handed an HTML
+   * body fails to decode, SidebarAvatar latches `failed`, and the avatar is
+   * initials for the rest of the session.
+   *
+   * ActivityPage already guards its own avatar exactly this way; this is
+   * the same guard, and the reason it is not optional.
+   */
+  const avatarSrc =
+    user?.avatar_url && apiBase ? avatarUrl(apiBase, user.id, avatarVersion) : null;
 
   const { data: dashData } = useQuery({
     queryKey: ["dashboard-storage", active?.id],
@@ -385,7 +422,7 @@ export function Sidebar() {
                 if (!filesOpen) toggleFiles(true);
                 if (can("access_files")) navigate(filesHref(searchParams, onFilesPage, "all"));
               }}
-              className={`flex flex-1 items-center ${collapsed ? "justify-center" : "gap-3"} rounded-lg px-3 py-2`}
+              className={`flex flex-1 items-center gap-3 rounded-lg py-2 ${collapsed ? "px-[9px]" : "px-3"} ${RAIL_GLIDE}`}
             >
               <FolderOpen size={18} className="shrink-0" />
               {!collapsed && (
@@ -441,7 +478,7 @@ export function Sidebar() {
         title={collapsed ? label : undefined}
         data-testid={`nav-${to.slice(1)}`}
         data-active={linkActive ? "" : undefined}
-        className={`relative z-10 flex items-center ${collapsed ? "justify-center" : "gap-3"} rounded-lg px-3 py-2 text-sm transition-colors ${
+        className={`relative z-10 flex items-center gap-3 rounded-lg py-2 text-sm ${collapsed ? "px-[9px]" : "px-3"} ${RAIL_GLIDE_COLORS} ${
           linkActive ? ROW_ACTIVE : ROW_IDLE
         }`}
       >
@@ -508,7 +545,7 @@ export function Sidebar() {
       {!narrow && (
         <button
           data-testid="sidebar-collapse-toggle"
-          onClick={() => setUserCollapsed((v) => !v)}
+          onClick={toggleSidebar}
           className="absolute z-30 flex h-6 w-6 items-center justify-center rounded-full border bg-[var(--color-bg)] text-[var(--color-text-muted)] shadow-sm hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
           style={{
             borderColor: "var(--color-border)",
@@ -529,6 +566,7 @@ export function Sidebar() {
       <div className="relative p-3 pb-0">
         <button
           ref={wsBtnRef}
+          data-testid="workspace-switcher"
           onClick={() => {
             if (wsOpen) {
               setWsOpen(false);
@@ -546,7 +584,7 @@ export function Sidebar() {
             }
             setWsOpen(true);
           }}
-          className={`flex w-full items-center ${collapsed ? "justify-center" : "gap-2.5"} rounded-lg px-3 py-2 text-sm hover:bg-black/5 transition-colors`}
+          className={`flex w-full items-center gap-2.5 rounded-lg py-2 text-sm hover:bg-black/5 ${collapsed ? "px-1" : "px-3"} ${RAIL_GLIDE_COLORS}`}
           title={collapsed ? active?.name || "Select workspace" : undefined}
         >
           <div
@@ -677,7 +715,8 @@ export function Sidebar() {
       {/* Search */}
       <div className="p-3">
         <button
-          className={`flex w-full items-center ${collapsed ? "justify-center" : "gap-2"} rounded-lg px-3 py-2 text-sm text-[var(--color-text-muted)] hover:bg-black/5`}
+          data-testid="sidebar-search"
+          className={`flex w-full items-center gap-2 rounded-lg py-2 text-sm text-[var(--color-text-muted)] hover:bg-black/5 ${collapsed ? "px-2.5" : "px-3"} ${RAIL_GLIDE}`}
           title={collapsed ? "Search" : undefined}
           onClick={() => {
             navigate("/search");
@@ -696,8 +735,13 @@ export function Sidebar() {
       </div>
 
       {/* Navigation. Scrolls on its own: the Files tree can outgrow a short
-          window, and the storage widget and profile below must stay put. */}
-      <nav ref={navRef} className="relative flex-1 space-y-1 overflow-y-auto px-3">
+          window, and the storage widget and profile below must stay put.
+          Sideways it is clipped, never scrolled: while the rail is closing the
+          pill eases toward a row that is shrinking faster than it follows and
+          overhangs the nav by up to ~110px for a moment. With overflow-x left
+          to resolve from overflow-y-auto that made the nav scrollable and
+          flashed a horizontal scrollbar under the icons on every collapse. */}
+      <nav ref={navRef} className="relative flex-1 space-y-1 overflow-y-auto overflow-x-hidden px-3">
         {/* The pill itself. Rows sit above it (z-10) and paint no background of
             their own, so this is the only active surface on screen and it
             travels rather than blinking between rows. `motion-reduce` drops the
@@ -755,7 +799,7 @@ export function Sidebar() {
       {/* Storage info */}
       <div className="px-3 pb-2">
         {collapsed ? (
-          <div className="flex justify-center" title={`${formatBytes(storageUsed)} / ${formatBytes(storageCap)} (${storagePercent}%)`}>
+          <div className="flex px-2.5" title={`${formatBytes(storageUsed)} / ${formatBytes(storageCap)} (${storagePercent}%)`}>
             <HardDrive size={16} className="text-[var(--color-text-muted)]" />
           </div>
         ) : (
@@ -785,18 +829,19 @@ export function Sidebar() {
 
       {/* User profile */}
       <div className="border-t p-3" style={{ borderColor: "var(--color-border)" }}>
-        <div className={`flex items-center ${collapsed ? "justify-center" : "gap-3 rounded-lg px-3 py-2"}`}>
+        <div className={`flex items-center gap-3 rounded-lg py-2 ${collapsed ? "px-0.5" : "px-3"} ${RAIL_GLIDE}`}>
           <button
+            data-testid="sidebar-profile"
             onClick={() => navigate("/profile")}
-            className={`flex items-center ${collapsed ? "" : "flex-1 gap-3 truncate"} hover:opacity-80 transition-opacity`}
+            className="flex flex-1 items-center gap-3 truncate hover:opacity-80 transition-opacity"
             title={collapsed ? user?.name || "Profile" : "View profile"}
           >
-            {user?.avatar_url ? (
-              <SidebarAvatar
-                key={`${user.id}-${avatarVersion}`}
-                src={avatarUrl(apiBase, user.id, avatarVersion)}
-                name={user.name}
-              />
+            {avatarSrc ? (
+              /* Keyed on the URL itself, not on id+version: the component
+                 latches a failed load, and that latch must not outlive the
+                 src that caused it - otherwise one transient error leaves
+                 initials in place until the app restarts. */
+              <SidebarAvatar key={avatarSrc} src={avatarSrc} name={user?.name} />
             ) : (
               <div
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-medium text-[var(--color-primary-fg)]"
@@ -889,7 +934,9 @@ export function Sidebar() {
 }
 
 // A failed avatar fetch must degrade to initials, not to the browser's
-// broken-image glyph; keyed by user+version so a new upload retries the image.
+// broken-image glyph. The caller keys this on the URL, so the `failed` latch
+// below cannot outlive the src that set it: a new upload, a new account, or a
+// retry after a transient 500 all mount a fresh component that tries again.
 function SidebarAvatar({ src, name }: { src: string; name: string | undefined }) {
   const [failed, setFailed] = useState(false);
   if (failed) {

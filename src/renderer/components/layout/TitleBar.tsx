@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Minus, Square, X, Pause, Play, RefreshCw, ArrowUpDown } from "lucide-react";
+import { Minus, Square, X, Pause, Play, RefreshCw, ArrowUpDown, Menu as MenuIcon } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import { useSyncPaused, useSyncSyncing, useSyncHasPairs } from "@/lib/sync-store";
 import { Logo } from "@/components/Logo";
@@ -40,6 +40,23 @@ export function TitleBar() {
   );
 
   const navigate = useNavigate();
+
+  // Windows and Linux hide the native menu bar (the title bar is ours), so
+  // the application menu is popped from here, under the button.
+  const MenuButton = (
+    <button
+      onClick={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        void window.electronAPI.popupAppMenu(r.left, r.bottom);
+      }}
+      className="titlebar-no-drag flex items-center rounded-lg px-2 py-1 text-[var(--color-text-secondary)] hover:bg-black/5 transition-colors"
+      title="Menu"
+      aria-label="Menu"
+      data-testid="app-menu-button"
+    >
+      <MenuIcon size={15} />
+    </button>
+  );
 
   const LanButton = (
     <button
@@ -103,7 +120,7 @@ export function TitleBar() {
         className="titlebar-drag flex h-[var(--titlebar-height)] items-center px-4"
         style={{ background: "var(--color-bg-secondary)", borderBottom: "1px solid var(--color-border)" }}
       >
-        <div className="flex flex-1 items-center gap-1"><ThemeMenu align="left" />{LanButton}{SyncButton}<NotificationBell align="left" /></div>
+        <div className="flex flex-1 items-center gap-1">{MenuButton}<ThemeMenu align="left" />{LanButton}{SyncButton}<NotificationBell align="left" /></div>
         <div className="flex-1 flex justify-center">{lockup}</div>
         <div className="flex-1" />
       </div>
@@ -116,7 +133,7 @@ export function TitleBar() {
       className="titlebar-drag flex h-[var(--titlebar-height)] items-center px-4"
       style={{ background: "var(--color-bg-secondary)" }}
     >
-      <div className="flex flex-1 items-center gap-1">{LanButton}{SyncButton}<NotificationBell align="left" /></div>
+      <div className="flex flex-1 items-center gap-1">{MenuButton}{LanButton}{SyncButton}<NotificationBell align="left" /></div>
       <div className="flex-1 flex justify-center">{lockup}</div>
       <div className="titlebar-no-drag flex flex-1 items-center justify-end gap-1">
         <button

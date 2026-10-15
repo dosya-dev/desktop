@@ -28,6 +28,7 @@ import {
   ArrowDownCircle,
   XCircle,
   Palette,
+  Users,
   Check,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
@@ -45,8 +46,12 @@ import { toast } from "sonner";
 import { THEMES, type Mode } from "@/lib/themes";
 import { useThemePref } from "@/lib/use-theme-pref";
 import { webAppUrl } from "../lib/web-app-url";
+import { useDistribution } from "../lib/use-distribution";
+import { FAMILY_KEY, getFamily, showsFamilyEntry } from "@/lib/family-api";
+import { FamilySection } from "@/components/family/FamilySection";
+import { showsBillingTab, showsUpdateControls } from "../lib/store-surfaces";
 
-type Tab = "identity" | "appearance" | "password" | "api-keys" | "sessions" | "notifications" | "billing" | "about" | "help" | "delete";
+type Tab = "identity" | "appearance" | "password" | "api-keys" | "sessions" | "notifications" | "billing" | "family" | "about" | "help" | "delete";
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode; danger?: boolean }[] = [
   { id: "identity", label: "Identity", icon: <User size={16} /> },
@@ -56,6 +61,7 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode; danger?: boolean }[
   { id: "sessions", label: "Sessions", icon: <Monitor size={16} /> },
   { id: "notifications", label: "Notifications", icon: <Bell size={16} /> },
   { id: "billing", label: "Billing", icon: <CreditCard size={16} /> },
+  { id: "family", label: "Family", icon: <Users size={16} /> },
   { id: "about", label: "About", icon: <Info size={16} /> },
   { id: "help", label: "Help & Contact", icon: <HelpCircle size={16} /> },
   { id: "delete", label: "Delete account", icon: <AlertTriangle size={16} />, danger: true },
@@ -66,6 +72,13 @@ export function ProfilePage() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("identity");
   const [apiBase, setApiBase] = useState("");
+  const distribution = useDistribution();
+  // Prefetched so the rail knows whether to offer the tab; a free user with
+  // nobody to manage gets no Family tab (nothing to do but buy, which the
+  // store builds may not offer).
+  const family = useQuery({ queryKey: FAMILY_KEY, queryFn: getFamily, staleTime: 30_000 });
+  const showFamily = showsFamilyEntry(family.data);
+  const activeTab: Tab = tab === "family" && !showFamily ? "identity" : tab;
 
   useEffect(() => {
     window.electronAPI.getApiBase().then(setApiBase);
@@ -75,38 +88,47 @@ export function ProfilePage() {
     <div className="flex h-full gap-6">
       {/* Sidebar */}
       <div className="w-48 space-y-1">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-              tab === t.id
-                ? t.danger
-                  ? "bg-red-50 font-medium text-[var(--color-danger)]"
-                  : "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
-                : t.danger
-                  ? "text-[var(--color-danger)] hover:bg-red-50"
-                  : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
-            }`}
-          >
-            {t.icon}
-            {t.label}
-          </button>
-        ))}
+        {/* No Billing tab on the Mac App Store build: Guideline 3.1.1, see
+            store-surfaces.ts. The whole strip waits for the channel to arrive
+            over IPC rather than rendering with the default: distribution is
+            null for the first frame, showsBillingTab() is true for null, and a
+            Billing tab that flashes once on a store build is exactly the
+            surface the guideline is about. The empty rail holds its own width,
+            so nothing jumps when the tabs appear. */}
+        {distribution !== null &&
+          TABS.filter((t) => (t.id !== "billing" || showsBillingTab(distribution)) && (t.id !== "family" || showFamily)).map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
+                activeTab === t.id
+                  ? t.danger
+                    ? "bg-red-50 font-medium text-[var(--color-danger)]"
+                    : "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
+                  : t.danger
+                    ? "text-[var(--color-danger)] hover:bg-red-50"
+                    : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+              }`}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {tab === "identity" && <IdentitySection apiBase={apiBase} />}
-        {tab === "appearance" && <AppearanceSection />}
-        {tab === "password" && <PasswordSection />}
-        {tab === "api-keys" && <ApiKeysSection />}
-        {tab === "sessions" && <SessionsSection />}
-        {tab === "notifications" && <NotificationsSection />}
-        {tab === "billing" && <BillingSection />}
-        {tab === "about" && <AboutSection />}
-        {tab === "help" && <HelpSection />}
-        {tab === "delete" && <DeleteSection />}
+        {activeTab === "identity" && <IdentitySection apiBase={apiBase} />}
+        {activeTab === "appearance" && <AppearanceSection />}
+        {activeTab === "password" && <PasswordSection />}
+        {activeTab === "api-keys" && <ApiKeysSection />}
+        {activeTab === "sessions" && <SessionsSection />}
+        {activeTab === "notifications" && <NotificationsSection />}
+        {activeTab === "billing" && showsBillingTab(distribution) && <BillingSection />}
+        {activeTab === "family" && showFamily && <FamilySection showWebLink={distribution !== null && showsBillingTab(distribution)} />}
+        {activeTab === "about" && <AboutSection />}
+        {activeTab === "help" && <HelpSection />}
+        {activeTab === "delete" && <DeleteSection />}
       </div>
     </div>
   );
@@ -265,7 +287,12 @@ function IdentitySection({ apiBase }: { apiBase: string }) {
       {/* Avatar */}
       <div className="flex items-center gap-5">
         <div className="relative group">
-          {user?.avatar_url ? (
+          {/* `apiBase` is primed over IPC and is "" on the first render. An
+              avatar URL built from it is relative, resolves against
+              app://bundle, and the protocol handler answers unknown paths
+              with index.html - so the <img> would request the whole app
+              bundle and fail to decode it. Same guard as ActivityPage. */}
+          {user?.avatar_url && apiBase ? (
             <img
               src={avatarUrl(apiBase, user.id, avatarVersion)}
               alt={user.name}
@@ -1138,6 +1165,7 @@ type UpdateStatus =
   | { state: "available"; version: string }
   | { state: "downloading"; percent: number }
   | { state: "ready"; version: string }
+  | { state: "installing"; version: string }
   | { state: "error"; message: string }
   | { state: "not-available" };
 
@@ -1145,6 +1173,7 @@ function AboutSection() {
   const [version, setVersion] = useState("");
   const [platform, setPlatform] = useState<string>("");
   const [status, setStatus] = useState<UpdateStatus>({ state: "idle" });
+  const distribution = useDistribution();
 
   useEffect(() => {
     window.electronAPI.getAppVersion().then(setVersion);
@@ -1169,7 +1198,8 @@ function AboutSection() {
             </p>
           </div>
 
-          {status.state === "ready" ? (
+          {/* Store builds are updated by their store; the version line stays, the controls go. */}
+          {showsUpdateControls(distribution) && (status.state === "ready" ? (
             isLinux ? (
               <button
                 onClick={() => window.electronAPI.showUpdateFile()}
@@ -1189,6 +1219,11 @@ function AboutSection() {
                 Install & Restart
               </button>
             )
+          ) : status.state === "installing" ? (
+            <button disabled className="flex items-center gap-2 rounded-lg border px-4 py-2 text-sm text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
+              <Loader2 size={14} className="animate-spin" />
+              Installing...
+            </button>
           ) : status.state === "checking" ? (
             <button disabled className="flex items-center gap-2 rounded-lg border px-4 py-2 text-sm text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
               <Loader2 size={14} className="animate-spin" />
@@ -1208,7 +1243,7 @@ function AboutSection() {
               <RefreshCw size={14} />
               Check for updates
             </button>
-          )}
+          ))}
         </div>
 
         {/* Status message */}
@@ -1218,6 +1253,12 @@ function AboutSection() {
             {isLinux
               ? `Version ${status.version} downloaded - open the file to install manually`
               : `Version ${status.version} is ready to install`}
+          </div>
+        )}
+        {status.state === "installing" && (
+          <div className="mt-3 flex items-center gap-2 rounded-lg bg-[var(--color-primary)]/10 px-3 py-2 text-sm text-[var(--color-primary)]">
+            <Loader2 size={14} className="animate-spin" />
+            Installing version {status.version}, dosya will reopen in a moment
           </div>
         )}
         {status.state === "not-available" && (

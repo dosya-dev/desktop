@@ -1,4 +1,7 @@
 import type {
+  ConflictPage,
+  ConflictPageQuery,
+  SyncConflict,
   SyncFileError,
   SyncFileErrorStatus,
   SyncPairRuntimeStatus,
@@ -64,4 +67,23 @@ export function assembleSyncStatus(input: Omit<SyncStatus, "fileErrorCount"> & {
     ...input,
     fileErrorCount: input.pairs.reduce((n, p) => n + (p.fileErrorCount || 0), 0),
   };
+}
+
+/** Largest page listConflicts hands out, whatever the caller asks for. */
+export const CONFLICT_PAGE_MAX = 200;
+
+/** Per-pair conflict counts for the status tick (the list is paged separately). */
+export function countConflictsByPair(conflicts: readonly SyncConflict[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const c of conflicts) counts[c.pairId] = (counts[c.pairId] ?? 0) + 1;
+  return counts;
+}
+
+/** One page of conflicts, filtered to the given pairs, with the filtered total. */
+export function pageConflicts(conflicts: readonly SyncConflict[], query: ConflictPageQuery): ConflictPage {
+  const wanted = query.pairIds ? new Set(query.pairIds) : null;
+  const matching = wanted ? conflicts.filter((c) => wanted.has(c.pairId)) : conflicts;
+  const offset = Math.max(0, Math.floor(query.offset) || 0);
+  const limit = Math.min(CONFLICT_PAGE_MAX, Math.max(1, Math.floor(query.limit) || 1));
+  return { conflicts: matching.slice(offset, offset + limit), total: matching.length };
 }

@@ -1,5 +1,5 @@
 import { api } from "@/lib/api-client";
-import type { ReceiveSink } from "./lan-protocol";
+import { createWriteBatcher, IPC_WRITE_BYTES, type ReceiveSink } from "./lan-protocol";
 import type { Role, SignalTransport, SignalType } from "./lan-peer";
 
 /**
@@ -39,10 +39,47 @@ export const signalTransport: SignalTransport = {
   },
 };
 
+/**
+ * One IPC round-trip per 16 KiB wire chunk (CHUNK_BYTES in lan-protocol.ts)
+ * costs almost as much as one per 256 KiB - the round-trip, not the bytes,
+ * dominates at that size (desktop-audit/evidence/09-ipc-throughput.md). Each
+ * open sink gets its own batcher so writes for a file are buffered to
+ * IPC_WRITE_BYTES before `lanRecvChunk` is actually called; `close`/`abort`
+ * below settle it.
+ */
+const writeBatchers = new Map<string, ReturnType<typeof createWriteBatcher>>();
+
+function batcherFor(sinkId: string): ReturnType<typeof createWriteBatcher> {
+  let batcher = writeBatchers.get(sinkId);
+  if (!batcher) {
+    batcher = createWriteBatcher(IPC_WRITE_BYTES, (bytes) => window.electronAPI.lanRecvChunk(sinkId, bytes));
+    writeBatchers.set(sinkId, batcher);
+  }
+  return batcher;
+}
+
 /** Writes an incoming file through the main process (which owns the dialog). */
 export const ipcSink: ReceiveSink = {
   open: (name, size) => window.electronAPI.lanRecvOpen(name, size),
-  write: (sinkId, bytes) => window.electronAPI.lanRecvChunk(sinkId, bytes),
-  close: (sinkId) => window.electronAPI.lanRecvClose(sinkId),
-  abort: (sinkId) => window.electronAPI.lanRecvAbort(sinkId),
+  write: (sinkId, bytes) => batcherFor(sinkId).push(bytes),
+  close: async (sinkId) => {
+    const batcher = writeBatchers.get(sinkId);
+    writeBatchers.delete(sinkId);
+    // Flush whatever is under the threshold BEFORE closing the sink: the
+    // main process closes the file handle on `lanRecvClose`, so a flush
+    // after that would write to an already-closed sink and lose the tail
+    // of every file whose size is not a multiple of IPC_WRITE_BYTES.
+    if (batcher) await batcher.close();
+    return window.electronAPI.lanRecvClose(sinkId);
+  },
+  abort: async (sinkId) => {
+    const batcher = writeBatchers.get(sinkId);
+    writeBatchers.delete(sinkId);
+    // The transfer is being thrown away and the main process deletes the
+    // partial file on abort, so the buffered bytes are discarded rather
+    // than flushed - flushing here would write to a sink that is about to
+    // be (or already is) destroyed.
+    batcher?.discard();
+    return window.electronAPI.lanRecvAbort(sinkId);
+  },
 };

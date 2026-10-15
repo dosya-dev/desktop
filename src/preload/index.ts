@@ -3,6 +3,7 @@
 // and so cannot inject its own preload script; sandbox-safe by design.
 import "@sentry/electron/preload";
 import { contextBridge, ipcRenderer } from "electron";
+import type { MenuAction, MenuState } from "../main/menu-template";
 
 /** Typed API exposed to the renderer via window.electronAPI */
 const electronAPI = {
@@ -12,6 +13,7 @@ const electronAPI = {
 
   // Desktop preferences
   getLaunchAtLogin: (): Promise<boolean> => ipcRenderer.invoke("app:get-launch-at-login"),
+  getLaunchAtLoginSupported: (): Promise<boolean> => ipcRenderer.invoke("app:get-launch-at-login-supported"),
   setLaunchAtLogin: (enabled: boolean): Promise<boolean> =>
     ipcRenderer.invoke("app:set-launch-at-login", enabled),
   getStandardPaths: (): Promise<{ desktop: string | null; documents: string | null; pictures: string | null; downloads: string | null; home: string | null }> =>
@@ -21,6 +23,15 @@ const electronAPI = {
   minimize: (): void => ipcRenderer.send("app:minimize"),
   maximize: (): void => ipcRenderer.send("app:maximize"),
   close: (): void => ipcRenderer.send("app:close"),
+  // Main emits this from win.on("show") and win.on("restore") (DSK-003): the
+  // main process stops broadcasting sync:status-changed to a window that is
+  // hidden or minimized, so a window reopened from the tray would otherwise
+  // paint status frozen at the moment it was hidden without this.
+  onWindowShown: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("window:shown", handler);
+    return () => ipcRenderer.removeListener("window:shown", handler);
+  },
 
   // Troubleshooting (Settings)
   clearAppCache: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("app:clear-cache"),
@@ -98,13 +109,20 @@ const electronAPI = {
   showInFolder: (path: string): Promise<void> =>
     ipcRenderer.invoke("file:show-in-folder", path),
 
-  // Vault: hand decrypted bytes to main, which owns the save dialog and the
-  // path. The renderer passes a NAME, never a path - see src/main/vault-save.ts.
-  vaultSaveBytes: (
-    name: string,
-    bytes: Uint8Array,
-  ): Promise<{ ok: boolean; canceled?: boolean; path?: string }> =>
-    ipcRenderer.invoke("vault:save-bytes", { name, bytes }),
+  // Vault: a decrypted file is STREAMED to main, which owns the save dialog
+  // and the path. The renderer passes a NAME, never a path, and one decrypted
+  // chunk at a time rather than the whole plaintext - so neither process ever
+  // holds the file (DSK-010). Same shape as lanRecv* above; see
+  // src/main/vault-save.ts.
+  vaultSaveOpen: (name: string): Promise<{ ok: boolean; id?: string }> =>
+    ipcRenderer.invoke("vault:save-open", { name }),
+  /** `index` is the chunk's manifest index; main refuses one that is out of order. */
+  vaultSaveChunk: (id: string, bytes: Uint8Array, index: number): Promise<void> =>
+    ipcRenderer.invoke("vault:save-chunk", { id, bytes, index }),
+  vaultSaveClose: (id: string): Promise<{ path: string }> =>
+    ipcRenderer.invoke("vault:save-close", { id }),
+  vaultSaveAbort: (id: string): Promise<void> =>
+    ipcRenderer.invoke("vault:save-abort", { id }),
 
   // 2FA - generate the authenticator QR locally so the secret never leaves the device
   generateTotpQr: (uri: string): Promise<string> =>
@@ -132,6 +150,35 @@ const electronAPI = {
     ipcRenderer.on("updater:status-changed", handler);
     return () => ipcRenderer.removeListener("updater:status-changed", handler);
   },
+
+  // Bug reports: device facts, the log tail (opt-in), a picture of this window,
+  // and the Help menu's "Report a problem…" event.
+  getDiagnosticsInfo: (): Promise<{ version: string; distribution: string; arch: string; platform: string; locale: string }> =>
+    ipcRenderer.invoke("app:get-diagnostics-info"),
+  readLogTail: (): Promise<string> => ipcRenderer.invoke("app:read-log-tail"),
+  captureWindow: (): Promise<Uint8Array> => ipcRenderer.invoke("app:capture-window"),
+  onOpenReportProblem: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("report-problem:open", handler);
+    return () => ipcRenderer.removeListener("report-problem:open", handler);
+  },
+
+  // ── Application menu ─────────────────────────────────────────
+  // Menu items that act inside the renderer (new folder, list/grid, find,
+  // sign out…) arrive as one typed event; see src/main/menu-template.ts.
+  onMenuAction: (callback: (action: MenuAction) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, action: MenuAction) => callback(action);
+    ipcRenderer.on("menu:action", handler);
+    return () => ipcRenderer.removeListener("menu:action", handler);
+  },
+  // What the menu needs to know to enable and check its items.
+  reportMenuState: (state: MenuState): void => ipcRenderer.send("menu:state", state),
+  // Windows and Linux: the ☰ title-bar button pops the application menu, since
+  // the hidden title bar hides the native menu bar there.
+  popupAppMenu: (x: number, y: number): Promise<void> => ipcRenderer.invoke("menu:popup", { x, y }),
+  // About window facts (version, channel, platform, engine).
+  getAboutInfo: (): Promise<{ version: string; distribution: string; platform: string; arch: string; electron: string; chrome: string }> =>
+    ipcRenderer.invoke("app:get-about-info"),
 
   // Navigation events from main process (e.g., tray menu -> navigate)
   onNavigate: (callback: (path: string) => void): (() => void) => {
@@ -162,7 +209,8 @@ const electronAPI = {
   addSyncPair: (opts: any) => ipcRenderer.invoke("sync:add-pair", opts),
   removeSyncPair: (pairId: string) => ipcRenderer.invoke("sync:remove-pair", { pairId }),
   updateSyncPair: (pairId: string, updates: any) => ipcRenderer.invoke("sync:update-pair", { pairId, updates }),
-  pickLocalFolder: (): Promise<string | null> => ipcRenderer.invoke("sync:pick-local-folder"),
+  pickLocalFolder: (opts?: { defaultPath?: string }): Promise<{ path: string; bookmark?: string } | null> =>
+    ipcRenderer.invoke("sync:pick-local-folder", opts ?? {}),
   estimateLocalFolder: (path: string): Promise<{ files: number; folders: number; truncated: boolean }> =>
     ipcRenderer.invoke("sync:estimate-local-folder", { path }),
   getSyncFolderTree: (workspaceId: string) => ipcRenderer.invoke("sync:get-folder-tree", { workspaceId }),
@@ -174,7 +222,11 @@ const electronAPI = {
   syncNow: (pairId: string) => ipcRenderer.invoke("sync:sync-now", { pairId }),
   resolveConflict: (conflictId: string, resolution: string) => ipcRenderer.invoke("sync:resolve-conflict", { conflictId, resolution }),
   openSyncFolder: (pairId: string) => ipcRenderer.invoke("sync:open-sync-folder", { pairId }),
-  getSyncConflicts: () => ipcRenderer.invoke("sync:get-conflicts"),
+  listSyncConflicts: (query: { pairIds?: string[]; offset: number; limit: number }) =>
+    ipcRenderer.invoke("sync:list-conflicts", query),
+  /** Resolves in the background; returns how many were taken on. */
+  resolveSyncConflicts: (pairIds: string[], resolution: string): Promise<{ queued: number }> =>
+    ipcRenderer.invoke("sync:resolve-conflicts", { pairIds, resolution }),
   retryFileErrors: (pairId: string): Promise<void> => ipcRenderer.invoke("sync:retry-file-errors", { pairId }),
   clearFileErrors: (pairId: string): Promise<void> => ipcRenderer.invoke("sync:clear-file-errors", { pairId }),
   confirmPendingDeletion: (pairId: string): Promise<void> => ipcRenderer.invoke("sync:confirm-pending-deletion", { pairId }),

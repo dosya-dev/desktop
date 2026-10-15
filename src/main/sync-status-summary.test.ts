@@ -131,6 +131,29 @@ test("a folder waiting on a deletion decision reads as needing attention", () =>
   );
 });
 
+// ── Sandbox grant denial (Mac App Store builds) reads as needing attention ──
+// macOS revoking a security-scoped bookmark is not an error (retrying won't
+// help) and not caught up (nothing is syncing) - it is the same "waiting on
+// the user" bucket as a held deletion decision, and the fix is a reselect.
+
+test("a folder with no sandbox grant reads as needing attention, same as a held deletion", () => {
+  assert.equal(
+    summarizeSyncStatus(status({ pairs: [{ status: "needs-permission" }, { status: "idle" }] })),
+    "1 folder needs attention",
+  );
+  assert.equal(
+    summarizeSyncStatus(status({ pairs: [{ status: "needs-permission" }, { status: "needs-permission" }] })),
+    "2 folders need attention",
+  );
+});
+
+test("needs-permission and needs-confirmation pairs are counted in the same bucket", () => {
+  assert.equal(
+    summarizeSyncStatus(status({ pairs: [{ status: "needs-permission" }, { status: "needs-confirmation" }] })),
+    "2 folders need attention",
+  );
+});
+
 test("a missing fileErrorCount (older status shape) still reads All synced", () => {
   assert.equal(summarizeSyncStatus({ pairs: [{ status: "idle" }], activeTransfers: [], globalPaused: false }), "All synced");
 });

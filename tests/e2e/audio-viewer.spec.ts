@@ -73,19 +73,30 @@ test.describe("Audio viewer", () => {
     await expect(appPage.locator("canvas")).toBeVisible({ timeout: 20000 });
 
     await appPage.getByRole("button", { name: "Play", exact: true }).click();
-    await appPage.waitForTimeout(1500);
     await expect(appPage.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
 
-    const playing = await appPage.locator("audio").evaluate((a: HTMLAudioElement) => a.currentTime);
-    expect(playing).toBeGreaterThan(0.4);
+    // Polled, not slept. A fixed 1 500 ms wait was enough on an idle machine
+    // and not enough inside a full-suite run, where this file's earlier specs
+    // are still releasing their own decode and WebGL work: the observed
+    // failure was `currentTime` exactly 0 with the Pause button already
+    // showing, i.e. the element had not begun advancing YET - not that it
+    // never would. `currentTime` only increases while playing, so a poll
+    // cannot pass for the wrong reason here.
+    await expect
+      .poll(() => appPage.locator("audio").evaluate((a: HTMLAudioElement) => a.currentTime), {
+        timeout: 20_000,
+      })
+      .toBeGreaterThan(0.4);
 
     // Click three quarters along the waveform.
     const box = (await appPage.locator("canvas").boundingBox())!;
     await appPage.mouse.click(box.x + box.width * 0.75, box.y + box.height / 2);
-    await appPage.waitForTimeout(400);
 
-    const seeked = await appPage.locator("audio").evaluate((a: HTMLAudioElement) => a.currentTime);
-    expect(seeked).toBeGreaterThan(7);
+    await expect
+      .poll(() => appPage.locator("audio").evaluate((a: HTMLAudioElement) => a.currentTime), {
+        timeout: 10_000,
+      })
+      .toBeGreaterThan(7);
     await expect(appPage.locator("[role='slider'][aria-label='Seek']")).toHaveAttribute(
       "aria-valuetext",
       /0:0[789]|0:1[012] of 0:12/,

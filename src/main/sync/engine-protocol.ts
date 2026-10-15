@@ -39,6 +39,8 @@ export const ENGINE_RPC_METHODS = [
   "resumeAllTransient",
   "syncNow",
   "resolveConflict",
+  "listConflicts",
+  "resolveConflicts",
   "setAppVisible",
   "notifyNetworkOnline",
   "notifySessionRefreshed",

@@ -1,6 +1,8 @@
 import { app, session, shell } from "electron";
 import type { EnvProvider } from "./env-provider";
 import { HOST_SESSION_COOKIE, LEGACY_SESSION_COOKIE } from "../session-cookie";
+import { acquireFolderAccess } from "./bookmarks";
+import { currentDistribution } from "../distribution";
 
 /**
  * The Electron-backed EnvProvider - the only place the transport's host
@@ -44,6 +46,20 @@ export function createElectronEnv(): EnvProvider {
 
     async trashItem(absPath: string): Promise<void> {
       await shell.trashItem(absPath);
+    },
+
+    folderAccess(bookmark, path) {
+      // Electron types startAccessingSecurityScopedResource's return as the
+      // bare `Function`, not `() => void` - narrow it at the one call site
+      // rather than widening AppSeam for every (fake) implementation.
+      return acquireFolderAccess(bookmark, {
+        distribution: currentDistribution(),
+        path,
+        app: {
+          startAccessingSecurityScopedResource: (b) =>
+            app.startAccessingSecurityScopedResource(b) as unknown as () => void,
+        },
+      });
     },
 
     get isDev(): boolean {

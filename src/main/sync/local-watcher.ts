@@ -67,23 +67,7 @@ export class LocalWatcher extends EventEmitter {
       ...userPatternsToGlobs(this.userExcludedPatterns),
     ];
 
-    this.watcher = chokidar.watch(this.localPath, {
-      ignoreInitial: true,
-      ignored,
-      persistent: true,
-      followSymlinks: false,
-      // NOTE: chokidar v4 REMOVED fsevents (its only dep is readdirp), so on
-      // every platform it opens one fd per directory. A big tree (a Gradle
-      // cache can be ~15k dirs) exhausts the process fd limit → EMFILE.
-      // We do NOT fall back to chokidar polling: that stat()s every watched
-      // path each tick (~27k paths / 2s = thousands of syscalls per second),
-      // which is far worse than the problem. See the EMFILE handler below.
-      // awaitWriteFinish DISABLED - it allocates a stat-polling interval for
-      // every file event (100K files = 100K timers + cached Stats = GBs of RAM).
-      // Instead we rely on our debounce + maxWait batching in scheduleBatch().
-      // The stabilityThreshold was 2s anyway which our 1-2s debounce already covers.
-      depth: 50,
-    });
+    this.watcher = this.openWatcher(ignored);
 
     const handle = (type: WatchEvent["type"], path: string) => {
       this.pendingEvents.set(path, { type, path });
@@ -118,7 +102,17 @@ export class LocalWatcher extends EventEmitter {
             `[sync] EMFILE: "${this.localPath}" has too many directories to watch live. ` +
             `Switching to periodic rescans for this folder (no files are skipped).`,
           );
-          this.stop();
+          // Not awaited: this handler stays synchronous on purpose. Chokidar
+          // never awaits its "error" listeners, so making this one `async`
+          // would just hand back a promise nothing ever looks at.
+          //
+          // `stop()` swallows a failed close itself (see its contract), so
+          // this `.catch` is belt and braces, kept because an
+          // unhandledRejection out of here would be fatal: the engine host
+          // treats any of them as `process.exit(1)`.
+          this.stop().catch((err) => {
+            console.error(`[sync] LocalWatcher: stop() rejected after EMFILE for "${this.localPath}":`, err);
+          });
           this.emit("degraded", "emfile");
         }
         return; // suppress repeated EMFILE noise
@@ -127,13 +121,76 @@ export class LocalWatcher extends EventEmitter {
     });
   }
 
-  stop(): void {
+  /**
+   * Opens the chokidar watcher. This is the one seam the class has:
+   * `local-watcher.test.ts` subclasses and overrides it to hand back a
+   * watcher whose `close()` rejects, which is the case `stop()`'s contract
+   * below is about and which a real watcher will not reproduce on demand.
+   */
+  protected openWatcher(ignored: string[]): FSWatcher {
+    return chokidar.watch(this.localPath, {
+      ignoreInitial: true,
+      ignored,
+      persistent: true,
+      followSymlinks: false,
+      // NOTE: chokidar v4 REMOVED fsevents (its only dep is readdirp), so on
+      // every platform it opens one fd per directory. A big tree (a Gradle
+      // cache can be ~15k dirs) exhausts the process fd limit → EMFILE.
+      // We do NOT fall back to chokidar polling: that stat()s every watched
+      // path each tick (~27k paths / 2s = thousands of syscalls per second),
+      // which is far worse than the problem. See the EMFILE handler below.
+      // awaitWriteFinish DISABLED - it allocates a stat-polling interval for
+      // every file event (100K files = 100K timers + cached Stats = GBs of RAM).
+      // Instead we rely on our debounce + maxWait batching in scheduleBatch().
+      // The stabilityThreshold was 2s anyway which our 1-2s debounce already covers.
+      depth: 50,
+    });
+  }
+
+  /**
+   * Closes the underlying chokidar watcher and waits for it (OBS-2):
+   * chokidar v4 opens one fd per watched directory, and close() releasing
+   * them is itself async. start() refuses to re-arm while `this.watcher` is
+   * set, so a caller that doesn't await this before calling start() again
+   * can end up holding two live fd sets for the same tree - the exact
+   * condition the EMFILE handling above exists for.
+   *
+   * **This never rejects, and callers depend on that.** The close CAN fail -
+   * the EMFILE path above is precisely where another fs call is most likely
+   * to hit a resource limit too - and it used to propagate, which was worse
+   * than the failure it reported in three separate ways:
+   *
+   *  - `this.watcher` was left set, so `start()` early-returned for the rest
+   *    of the session: live watching for that pair was silently off, and
+   *    `emfileWarned` stayed true so further EMFILE errors were suppressed.
+   *  - every awaiting caller abandoned the rest of its own state transition.
+   *    `pauseForRateLimit` never armed its resume timer (the folder never
+   *    synced again); `stopPair` skipped `releaseFolderAccess()`, leaking a
+   *    macOS security-scoped bookmark, and left the runtime and poller alive;
+   *    `holdPendingDeletion` skipped the `emitStatus()` that puts the
+   *    mass-deletion prompt on screen.
+   *  - in `runInitialScan` the await sits inside a try whose catch handles
+   *    only SESSION_EXPIRED and rate limits, so a rejection fell THROUGH to
+   *    `rt.syncing = true` and ran a full scan-and-upload against a folder
+   *    the server had just said was no longer synced.
+   *
+   * None of those is an acceptable price for reporting a failed close, so the
+   * error is logged whole (its `code`/`syscall` are the diagnostic) and the
+   * state is reset either way. If the fds really did not come back, they were
+   * not coming back whichever way this returned.
+   */
+  async stop(): Promise<void> {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.maxWaitTimer) clearTimeout(this.maxWaitTimer);
-    this.watcher?.close();
-    this.watcher = null;
-    this.pendingEvents.clear();
-    this.emfileWarned = false;
+    try {
+      await this.watcher?.close();
+    } catch (err) {
+      console.error(`[sync] LocalWatcher: close failed for "${this.localPath}":`, err);
+    } finally {
+      this.watcher = null;
+      this.pendingEvents.clear();
+      this.emfileWarned = false;
+    }
   }
 
   private flush(): void {

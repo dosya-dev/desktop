@@ -38,25 +38,25 @@ test("the button is off until something would change", () => {
 });
 
 test("a password lock needs a password of the minimum length, even as a change", () => {
-  assert.equal(MIN_LOCK_PASSWORD_LENGTH, 4);
+  assert.equal(MIN_LOCK_PASSWORD_LENGTH, 8);
   assert.equal(canApplyLock({ selected: "full_lock", current: "none", password: "abc" }), false);
-  assert.equal(canApplyLock({ selected: "full_lock", current: "none", password: "   abc " }), false);
-  assert.equal(canApplyLock({ selected: "full_lock", current: "none", password: "abcd" }), true);
+  assert.equal(canApplyLock({ selected: "full_lock", current: "none", password: "   abcdefg " }), false);
+  assert.equal(canApplyLock({ selected: "full_lock", current: "none", password: "abcdefgh" }), true);
   assert.equal(canApplyLock({ selected: "full_lock", current: "full_lock", password: "" }), false);
-  assert.equal(canApplyLock({ selected: "full_lock", current: "full_lock", password: "new-one" }), true);
+  assert.equal(canApplyLock({ selected: "full_lock", current: "full_lock", password: "new-one-long" }), true);
 });
 
 test("nothing can be applied while the current mode is loading", () => {
   assert.equal(canApplyLock({ selected: "none", current: "full_lock", password: "", loading: true }), false);
-  assert.equal(canApplyLock({ selected: "full_lock", current: "none", password: "abcd", loading: true }), false);
+  assert.equal(canApplyLock({ selected: "full_lock", current: "none", password: "abcdefgh", loading: true }), false);
 });
 
 test("the password field asks for a new password only when one already exists", () => {
   assert.equal(passwordFieldLabel("none"), "Password");
   assert.equal(passwordFieldLabel("view_only"), "Password");
   assert.equal(passwordFieldLabel("full_lock"), "New password");
-  assert.equal(passwordHint("none"), "At least 4 characters.");
-  assert.equal(passwordHint("full_lock"), "At least 4 characters. Replaces the current one.");
+  assert.equal(passwordHint("none"), "At least 8 characters.");
+  assert.equal(passwordHint("full_lock"), "At least 8 characters. Replaces the current one.");
 });
 
 test("the status line reports the lock's provenance and degrades gracefully", () => {

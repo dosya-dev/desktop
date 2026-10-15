@@ -1,5 +1,5 @@
 // Ported from apps/web/src/lib/heic.ts - keep in sync with the web copy.
-import { createHeicCache, type HeicRequest } from '@/lib/heic-cache';
+import { createHeicCache, registerHeicPool, type HeicRequest } from '@/lib/heic-cache';
 import { createHeicPool, type PoolWorker } from '@/lib/heic-pool';
 import { persistGet, persistPut } from '@/lib/heic-persist';
 
@@ -30,6 +30,11 @@ const pool = createHeicPool({
   size: poolSize,
 });
 
+// Let clearHeicCaches() (logout) terminate this pool's workers too - see the
+// registry comment in heic-cache.ts for why this is a registration call
+// rather than that module importing this one back.
+registerHeicPool(pool);
+
 // The cache's concurrency cap must match the pool size: if it admitted fewer
 // decodes than there are workers, some workers would always sit idle; if it
 // admitted more, the extra decodes would just queue inside the pool anyway.
@@ -59,5 +64,6 @@ export function releaseHeicPreviewUrl(req: HeicRequest): void {
 }
 
 // `clearHeicCaches()` (logout teardown) lives in heic-cache.ts, which tracks
-// every cache it creates - so it clears this singleton's LRU without an import
-// cycle back to this module.
+// every cache it creates and every pool registered via `registerHeicPool` -
+// so it clears this singleton's LRU and terminates this singleton's pool
+// workers, without an import cycle back to this module.

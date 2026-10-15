@@ -38,12 +38,29 @@ export type KnownWorkspace = {
   stub?: boolean;
 };
 
-/** Result of handing decrypted bytes to the main process (see src/main/vault-save.ts). */
-export type VaultSaveOutcome = { ok: boolean; canceled?: boolean; path?: string };
-export type VaultSaver = (name: string, bytes: Uint8Array) => Promise<VaultSaveOutcome>;
+/**
+ * Where a decrypted file is written, one chunk at a time (see
+ * src/main/vault-save.ts). The renderer passes a NAME and gets back an opaque
+ * id; the dialog, the path and the file handle stay in the main process, and
+ * neither process ever holds the whole plaintext (DSK-010).
+ */
+export type VaultSaveSink = {
+  /** `ok: false` means the user cancelled the save dialog. */
+  open(name: string): Promise<{ ok: boolean; id?: string }>;
+  /** `index` is the chunk's manifest index; main refuses one out of order. */
+  write(id: string, bytes: Uint8Array, index: number): Promise<void>;
+  close(id: string): Promise<{ path: string }>;
+  /** Removes the partial file. Safe to call on an id that is already gone. */
+  abort(id: string): Promise<void>;
+};
 
-/** Production saver: the main process owns the dialog and the path. */
-const ipcSaver: VaultSaver = (name, bytes) => window.electronAPI.vaultSaveBytes(name, bytes);
+/** Production sink: the main process owns the dialog, the path and the handle. */
+const ipcSink: VaultSaveSink = {
+  open: (name) => window.electronAPI.vaultSaveOpen(name),
+  write: (id, bytes, index) => window.electronAPI.vaultSaveChunk(id, bytes, index),
+  close: (id) => window.electronAPI.vaultSaveClose(id),
+  abort: (id) => window.electronAPI.vaultSaveAbort(id),
+};
 
 interface VaultState {
   status: E2eeStatus;
@@ -67,7 +84,7 @@ interface VaultState {
   /** The recovery key, shown ONCE right after setup. Never persisted. */
   recoveryKeyOnce: string | null;
   /** Where `downloadEntry` hands decrypted bytes off to trigger a save. Swappable in tests (no DOM). */
-  saver: VaultSaver;
+  sink: VaultSaveSink;
 
   checkIdentity(): Promise<void>;
   setup(passphrase: string): Promise<void>;
@@ -131,8 +148,8 @@ interface VaultState {
   dismissRecoveryKey(): void;
   /** Test seam: swap in a fake `E2eeEngine`. */
   __setEngine(engine: E2eeEngine): void;
-  /** Test seam: swap in a fake saver (production default is the real IPC-backed `ipcSaver`). */
-  __setSaver(saver: VaultSaver): void;
+  /** Test seam: swap in a fake save sink (production default is the real IPC-backed `ipcSink`). */
+  __setSink(sink: VaultSaveSink): void;
 }
 
 /**
@@ -174,7 +191,7 @@ export const useVault = create<VaultState>()(
       members: [],
       busy: false,
       recoveryKeyOnce: null,
-      saver: ipcSaver,
+      sink: ipcSink,
 
       async checkIdentity() {
         try {
@@ -456,6 +473,12 @@ export const useVault = create<VaultState>()(
         set({ busy: true, error: null });
         try {
           for (const file of Array.from(files)) {
+            // One buffer per file is the floor here, not an oversight: the
+            // content-defined chunker (chunkBoundaries, FastCDC) must see the
+            // whole file to pick boundaries, and those boundaries are a
+            // cross-client dedup contract. Streaming the upload needs a
+            // streaming CDC pass in packages/e2ee-core - tracked, not done
+            // here (DSK-010). The DOWNLOAD half streams; see downloadEntry.
             const bytes = new Uint8Array(await file.arrayBuffer());
             try {
               await get().engine.uploadFile(folderId, file.name, bytes);
@@ -489,16 +512,34 @@ export const useVault = create<VaultState>()(
       },
 
       async downloadEntry(entryId, name, folderId = "") {
-        set({ busy: true, error: null });
+        // The save dialog now comes BEFORE decryption, the opposite of the
+        // order this used to run in: the sink needs its destination before a
+        // chunk can be written, and that removes the window in which the whole
+        // plaintext sat in two heaps while the dialog was on screen. `busy`
+        // still goes up only for the decrypt, never for the dialog - the
+        // dialog is the user's time, so the grid stays interactive.
+        set({ error: null });
+        let sinkId: string | null = null;
         try {
-          const bytes = await get().engine.downloadFile(folderId, entryId);
-          // Decryption is the busy part. The save dialog that follows is the
-          // user's time, not ours: keep the grid on screen while it is open.
+          const opened = await get().sink.open(name);
+          // A cancelled dialog is neither a success nor an error: the user
+          // changed their mind.
+          if (!opened.ok || !opened.id) return;
+          sinkId = opened.id;
+          set({ busy: true });
+          // Each decrypted chunk goes straight to the file, in manifest order.
+          // Neither process ever holds the whole plaintext (DSK-010).
+          await get().engine.downloadFileToSink(folderId, entryId, async (bytes, index) => {
+            await get().sink.write(sinkId!, bytes, index);
+          });
+          const { path } = await get().sink.close(sinkId);
+          sinkId = null;
           set({ busy: false });
-          const outcome = await get().saver(name, bytes);
-          if (outcome.ok) toast.success("Saved", { description: outcome.path ? `Saved to ${outcome.path}` : name });
-          // A cancelled dialog is neither: the user changed their mind.
+          toast.success("Saved", { description: path ? `Saved to ${path}` : name });
         } catch (e) {
+          // Main removes the partial file on abort, so a failure part-way
+          // through never leaves a truncated plaintext that looks complete.
+          if (sinkId) await get().sink.abort(sinkId).catch(() => {});
           set({ busy: false, error: errorMessage(e, "Could not download file.") });
           toast.error("Download failed", { description: errorMessage(e, "Could not download file.") });
         }
@@ -555,8 +596,8 @@ export const useVault = create<VaultState>()(
         set({ engine });
       },
 
-      __setSaver(saver) {
-        set({ saver });
+      __setSink(sink) {
+        set({ sink });
       },
     }),
     {

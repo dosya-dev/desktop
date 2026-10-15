@@ -8,8 +8,14 @@
     <string>dosya.dev</string>
     <key>CFBundleExecutable</key>
     <string>DosyaFileProvider</string>
+    <!-- Stamped at build time. The Developer ID and Mac App Store builds use
+         different identifiers because their APPS do: the app identifier the
+         Developer ID build uses was uploaded to App Store Connect once and
+         that record was deleted, which spends it for the store forever, so the
+         store build's app carries a different one. An extension's identifier
+         must start with its app's, so it follows. See scripts/afterPack.mjs. -->
     <key>CFBundleIdentifier</key>
-    <string>dev.dosya.desktop.fileprovider</string>
+    <string>__BUNDLE_ID__</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -23,12 +29,16 @@
     <array>
         <string>MacOSX</string>
     </array>
-    <!-- Stamped from the app's version at build time; a nested bundle whose
-         version never moves is confusing in diagnostics and in pluginkit. -->
+    <!-- Both stamped from the app at build time; a nested bundle whose version
+         never moves is confusing in diagnostics and in pluginkit. They are two
+         different values on a store build: CFBundleVersion is the app's build
+         version (one monotonic integer per upload), and App Store Connect
+         rejects an app extension whose CFBundleVersion differs from its
+         containing app's. -->
     <key>CFBundleShortVersionString</key>
     <string>__VERSION__</string>
     <key>CFBundleVersion</key>
-    <string>__VERSION__</string>
+    <string>__BUILD_VERSION__</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>NSExtension</key>

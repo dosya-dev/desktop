@@ -319,6 +319,12 @@ function planThreeWay(inputs: PlanInputs): PlanOp[] {
     const key = remoteFile ? remoteFile.relPath : stored?.localPath;
     if (!key) continue;
     const localFile = local.files.get(key) ?? (stored ? local.files.get(keyOfBaseRecord(stored, local)) : undefined);
+    // A deleted id must not act on a path now owned by a different live id.
+    // That replacement is reconciled separately without shared history.
+    if (!remoteFile && stored) {
+      const replacement = remote.filesByPath.get(keyOfBaseRecord(stored, local));
+      if (replacement && replacement.remoteId !== remoteId) continue;
+    }
     if (localFile) handledKeys.add(key);
     if (stored) handledKeys.add(keyOfBaseRecord(stored, local));
 
@@ -336,7 +342,9 @@ function planThreeWay(inputs: PlanInputs): PlanOp[] {
     // the web, with sync reporting success. It happens whenever the same path
     // is created independently on both sides, and after any event that loses
     // the base tree (a failed state migration, a reinstall).
-    if (remoteFile && !stored && localFile) {
+    // Pre-populated rows contain server metadata, not a confirmed ancestor.
+    // Equal sizes alone cannot establish agreement with an independent file.
+    if (remoteFile && (!stored || isAdoptedNeverSeen(stored)) && localFile) {
       if (conflictStrategy === "last-write-wins") {
         if (remoteFile.updatedAt > localFile.mtimeMs / 1000) {
           ops.push({ kind: "download-update", relPath: remoteFile.relPath, remoteId, sizeBytes: remoteFile.sizeBytes });
@@ -382,7 +390,7 @@ function planThreeWay(inputs: PlanInputs): PlanOp[] {
 
     // 4. Deleted on the server, still local.
     if (!remoteFile && stored && localFile) {
-      if (isLocallyChanged(stored, localFile)) {
+      if (isAdoptedNeverSeen(stored) || isLocallyChanged(stored, localFile)) {
         const parentKey = parentOf(localFile.relPath);
         const parentGone = parentKey !== "" && !remote.foldersByPath.has(parentKey);
         if (parentGone) {

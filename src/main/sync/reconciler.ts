@@ -3,7 +3,6 @@ import { readdir, stat } from "fs/promises";
 import { shouldIgnoreEntry } from "./local-watcher";
 import { toRelPath, normalizeRel, longPath } from "./paths";
 import type {
-  SyncPairState,
   SyncFileRecord,
   SyncFolderRecord,
   SyncAction,
@@ -127,7 +126,8 @@ async function scanLocal(
       );
       for (let j = 0; j < batch.length; j++) {
         const s = stats[j];
-        if (!s || !s.isFile()) continue;
+        if (!s) { incomplete = true; continue; }
+        if (!s.isFile()) continue;
         if (s.size > MAX_SYNCABLE_BYTES) {
           skippedTooLarge.push(batch[j].relPath);
           continue;
@@ -155,15 +155,9 @@ async function scanLocal(
  */
 export async function reconcile(
   pair: SyncPair,
-  storedState: SyncPairState,
   remote: RemoteSnapshot,
-  /**
-   * The base tree, by remote id. REQUIRED: it used to be read off
-   * `storedState.files`, which `loadPairState` always returns empty (the base
-   * lives in SQLite), so every unknown-parent file looked "never synced" and
-   * went back to being planned as a deletion. The engine passes the index.
-   */
-  baseById: (remoteId: string) => SyncFileRecord | undefined,
+  /** Durable base tree from the sync index, including file/folder iteration. */
+  base: PlannerBaseView,
   onScanProgress?: ScanProgress,
   /** Relative paths left out because they exceed MAX_SYNCABLE_BYTES. Reported
    *  so the engine can tell the user, rather than skipping them in silence. */
@@ -175,6 +169,9 @@ export async function reconcile(
   /** Deletions withheld this cycle by the safety valve. Reported so the user
    *  can be told; this used to be a console.warn and nothing else. */
   onDeletionsSuppressed?: (count: number, reason: SuppressionReason) => void,
+  /** Records proven absent on both sides by a complete scan. The engine
+   *  removes these through its durable index before paths can be reused. */
+  onStaleRecords?: (remoteIds: string[]) => void,
 ): Promise<SyncAction[]> {
   const actions: SyncAction[] = [];
   const { files: localFiles, dirs: localDirs, incomplete: localScanIncomplete, skippedTooLarge } = await scanLocal(pair.localPath, pair.excludedPatterns, onScanProgress);
@@ -186,7 +183,7 @@ export async function reconcile(
     files: remote.files,
     folders: remote.folders,
     rootFolderId: pair.remoteFolderId,
-    baseById,
+    baseById: base.fileById,
     normalize: normalizeRel,
   });
   if (unresolved.length > 0) onUnknownParent?.(unresolved);
@@ -201,15 +198,8 @@ export async function reconcile(
     pathToRemoteFolder.set(path, id);
   }
 
-  // Reverse index for stored state: localPath → remoteId (avoids O(n) finds)
-  const storedPathToId = new Map<string, string>();
-  for (const [id, record] of Object.entries(storedState.files)) {
-    storedPathToId.set(record.localPath, id);
-  }
   const storedFolderPaths = new Set<string>();
-  for (const record of Object.values(storedState.folders)) {
-    storedFolderPaths.add(record.localPath);
-  }
+  for (const record of base.folders()) storedFolderPaths.add(normalizeRel(record.localPath));
 
   // ── Folder reconciliation ──────────────────────────────────────
 
@@ -217,7 +207,7 @@ export async function reconcile(
   for (const [folderId] of remote.folders) {
     const relPath = folderPathMap.get(folderId);
     if (!relPath) continue;
-    if (!localDirs.has(relPath) && !storedState.folders[folderId]) {
+    if (!localDirs.has(relPath) && base.folderByPath(relPath)?.remoteId !== folderId) {
       actions.push({
         type: "create-local-folder",
         remoteFolderId: folderId,
@@ -294,21 +284,22 @@ export async function reconcile(
     ),
   };
 
-  const baseFiles = Object.values(storedState.files);
-  const baseByPath = new Map(baseFiles.map((r) => [r.localPath, r]));
-  const baseFolders = Object.values(storedState.folders);
-  const plannerBase: PlannerBaseView = {
-    fileByPath: (key) => baseByPath.get(key),
-    fileById: (id) => storedState.files[id],
-    files: () => baseFiles,
-    folderByPath: (key) => storedState.folders[key],
-    folders: () => baseFolders,
-  };
+  if (!localScanIncomplete && onStaleRecords) {
+    const skipped = new Set(skippedTooLarge.map(normalizeRel));
+    const stale: string[] = [];
+    for (const record of base.files()) {
+      const key = normalizeRel(record.localPath);
+      if (!remote.files.has(record.remoteId) && !localFiles.has(key) && !skipped.has(key)) {
+        stale.push(record.remoteId);
+      }
+    }
+    if (stale.length > 0) onStaleRecords(stale);
+  }
 
   const ops = plan({
     local: plannerLocal,
     remote: plannerRemote,
-    base: plannerBase,
+    base,
     conflictStrategy: pair.conflictStrategy || "last-write-wins",
     localScanIncomplete,
   });
@@ -367,7 +358,7 @@ export async function reconcile(
 
       case "download-update": {
         const info = remote.files.get(op.remoteId);
-        const record = storedState.files[op.remoteId];
+        const record = base.fileById(op.remoteId);
         if (!info) break;
         if (!record) {
           // Both sides hold this path with no shared history, and the server
@@ -406,7 +397,7 @@ export async function reconcile(
       case "upload-update": {
         const stat = localFiles.get(op.relPath);
         if (!stat) break;
-        const record = storedState.files[op.baseRemoteId];
+        const record = base.fileById(op.baseRemoteId);
         if (!record) {
           // Same no-shared-history case as above, local side newer. Uploading
           // "new" here would create a duplicate name in the same folder, so
@@ -424,14 +415,14 @@ export async function reconcile(
       }
 
       case "delete-local": {
-        const record = storedState.files[op.baseRemoteId];
+        const record = base.fileById(op.baseRemoteId);
         if (!record) break;
         actions.push({ type: "delete-local", localPath: abs(op.relPath), record });
         break;
       }
 
       case "delete-remote": {
-        const record = storedState.files[op.remoteId];
+        const record = base.fileById(op.remoteId);
         if (!record) break;
         actions.push({ type: "delete-remote", remoteId: op.remoteId, record });
         break;
@@ -439,7 +430,7 @@ export async function reconcile(
 
       case "move-local": {
         const info = remote.files.get(op.remoteId);
-        const record = storedState.files[op.remoteId];
+        const record = base.fileById(op.remoteId);
         if (!info || !record) break;
         actions.push({
           type: "move-local",
@@ -462,23 +453,6 @@ export async function reconcile(
   }
 
 
-  // Clean up stale records: files that exist in stored state but are gone from both
-  // remote and local (Case 6). Skip when the local scan was incomplete - a file
-  // that only *looks* absent this pass must not have its tracking dropped.
-  if (!localScanIncomplete) {
-    for (const id of Object.keys(storedState.files)) {
-      // (The old loop tracked which ids it had visited and skipped the rest,
-      // but it always visited every stored id, so the check never excluded
-      // anything.)
-      const stored = storedState.files[id];
-      const remoteFile = remote.files.get(id);
-      const localStat = stored.localPath ? localFiles.get(stored.localPath) : undefined;
-      if (!remoteFile && !localStat) {
-        delete storedState.files[id];
-      }
-    }
-  }
-
   // ── Deletion safety valve ──────────────────────────────────────────
   // Deleting user data (local files or cloud files) is the one irreversible
   // thing this engine does. Guard it: if the local scan failed to read some
@@ -491,7 +465,8 @@ export async function reconcile(
     0,
   );
   if (deleteCount > 0) {
-    const storedCount = Object.keys(storedState.files).length;
+    let storedCount = 0;
+    for (const _record of base.files()) storedCount++;
     const massDelete = exceedsDeletionThreshold(deleteCount, storedCount);
     if (localScanIncomplete || massDelete) {
       const reason = localScanIncomplete
@@ -519,33 +494,42 @@ export async function reconcile(
  */
 export async function reconcileRemoteOnly(
   pair: SyncPair,
-  storedState: SyncPairState,
   remote: RemoteSnapshot,
-  /** The base tree, by remote id - see reconcile(). Required for the same reason. */
-  baseById: (remoteId: string) => SyncFileRecord | undefined,
+  /** Durable base tree; see reconcile(). */
+  base: PlannerBaseView,
   onUnknownParent?: (files: RemoteFileInfo[]) => void,
   onDeletionsSuppressed?: (count: number, reason: SuppressionReason) => void,
 ): Promise<SyncAction[]> {
   const actions: SyncAction[] = [];
   const { filePathMap, folderPathMap, unresolved: unplaceable } = resolveRemotePaths({
     files: remote.files, folders: remote.folders, rootFolderId: pair.remoteFolderId,
-    baseById, normalize: normalizeRel,
+    baseById: base.fileById, normalize: normalizeRel,
   });
   const unresolved: RemoteFileInfo[] = [];
   const unknownIds = new Set(unplaceable.map((f) => f.id));
+
+  // Reusing a tracked path with a new id is not a normal remote arrival.
+  // Compare the actual local version through the full planner before a
+  // download or an obsolete-id deletion can touch that path.
+  const livePaths = new Set(filePathMap.values());
+  for (const previous of base.files()) {
+    if (!remote.files.has(previous.remoteId) && livePaths.has(normalizeRel(previous.localPath))) {
+      return reconcile(pair, remote, base, undefined, undefined, onUnknownParent, onDeletionsSuppressed);
+    }
+  }
 
   // New remote folders → create locally
   for (const [folderId] of remote.folders) {
     const relPath = folderPathMap.get(folderId);
     if (!relPath) continue;
-    if (!storedState.folders[folderId]) {
+    if (base.folderByPath(relPath)?.remoteId !== folderId) {
       actions.push({ type: "create-local-folder", remoteFolderId: folderId, localDir: pair.localPath, name: relPath });
     }
   }
 
   // Check each remote file against stored state
   for (const [remoteId, remoteFile] of remote.files) {
-    const stored = storedState.files[remoteId];
+    const stored = base.fileById(remoteId);
     const relPath = filePathMap.get(remoteId);
 
     if (!stored) {
@@ -561,7 +545,7 @@ export async function reconcileRemoteOnly(
         type: "download-new", remoteFile,
         localDir: dir ? join(pair.localPath, dir) : pair.localPath,
       });
-    } else if (relPath && stored.localPath !== relPath) {
+    } else if (relPath && normalizeRel(stored.localPath) !== relPath) {
       // Remote file moved → move locally
       actions.push({
         type: "move-local",
@@ -601,8 +585,10 @@ export async function reconcileRemoteOnly(
   // file that still matches its record is safe to remove; one that does not
   // stays on disk and becomes a conflict for the user to resolve.
   const deleteCandidates: SyncFileRecord[] = [];
-  for (const [id, stored] of Object.entries(storedState.files)) {
-    if (!remote.files.has(id)) deleteCandidates.push(stored);
+  let storedCount = 0;
+  for (const stored of base.files()) {
+    storedCount++;
+    if (!remote.files.has(stored.remoteId)) deleteCandidates.push(stored);
   }
 
   let deleteCount = 0;
@@ -676,7 +662,6 @@ export async function reconcileRemoteOnly(
   // the same "missing from the snapshot" reading, which is the thing being
   // distrusted.
   if (deleteCandidates.length > 0) {
-    const storedCount = Object.keys(storedState.files).length;
     if (exceedsDeletionThreshold(deleteCandidates.length, storedCount)) {
       console.warn(`[sync] Suppressing ${deleteCount} local deletion(s) and ${guardConflictIds.size} withheld-file conflict(s) - ${deleteCandidates.length}/${storedCount} tracked files are missing from the snapshot, which exceeds the safety threshold (snapshot likely incomplete).`);
       onDeletionsSuppressed?.(deleteCandidates.length, "over-threshold");

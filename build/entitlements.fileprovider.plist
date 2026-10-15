@@ -10,6 +10,24 @@
          The value must match Session.swift's accessGroupSuffix with the team
          prefix, or resolvedAccessGroup() finds nothing and the extension reads
          a different keychain item than the app writes. -->
+    <!-- Required, not a hardening choice: extensionKit refuses to spawn an app
+         extension without it (errorDomain code 16, "Extension must have
+         com.apple.security.app-sandbox entitlement"), and Finder then shows
+         only "dosya encountered an error". The containing app is NOT sandboxed
+         and need not be. Everything the extension touches lives inside its
+         container: the provider's temporaryDirectoryURL, its own Application
+         Support, the group container, and the keychain group below. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- Xcode signs these two into every bundle it provisions. App Store Connect
+         refuses a TestFlight build whose bundle lacks them while its profile
+         names them (ITMS-90886), and the extension is signed by our script,
+         not Xcode, so nothing adds them for us. __BUNDLE_ID__ is the
+         extension's identifier for the target being built. -->
+    <key>com.apple.application-identifier</key>
+    <string>__TEAM_ID__.__BUNDLE_ID__</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>__TEAM_ID__</string>
     <key>keychain-access-groups</key>
     <array>
         <string>__TEAM_ID__.group.dev.dosya.desktop</string>

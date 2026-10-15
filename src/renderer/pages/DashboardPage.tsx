@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   FileText,
@@ -18,7 +18,8 @@ import { useNavigate } from "react-router-dom";
 import { actionLabel } from "@/lib/activity-labels";
 import { api } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
-import { useSyncPairs } from "@/lib/sync-store";
+import { useSyncPairCardsKey, useSyncStore } from "@/lib/sync-store";
+import { syncPairCards } from "@/lib/sync-summary";
 import { formatBytes, formatRelative, fileIcon } from "@/lib/format";
 
 interface DashboardData {
@@ -336,8 +337,23 @@ export function DashboardPage() {
 
 function SyncCard() {
   const navigate = useNavigate();
-  // Live, typed pairs from the shared store - updates in place as sync runs.
-  const pairs = useSyncPairs();
+  // Subscribes to a primitive key, NOT the pairs array. `status.pairs` is a
+  // new array identity on every 2 Hz status tick (it is structured-cloned
+  // over IPC), so `useSyncPairs()` re-rendered this card twice a second even
+  // though the four fields it shows - icon, folder name, workspace name,
+  // status word - carry nothing that advances per tick (DSK-002). The
+  // sidebar's fix did not reach here; a 64-minute soak did, with act 2 still
+  // at ~59 commits per 30 s sample.
+  //
+  // Read off the store inside the memo rather than through a subscribing
+  // hook: by the time a render triggered by this key runs, the store already
+  // holds the matching pairs, and subscribing to the array here would put
+  // back exactly the per-tick re-render the key exists to remove.
+  const pairCardsKey = useSyncPairCardsKey();
+  const pairs = useMemo(
+    () => syncPairCards(useSyncStore.getState().status?.pairs ?? []),
+    [pairCardsKey],
+  );
 
   return (
     <Card
@@ -368,6 +384,7 @@ function SyncCard() {
             const icon =
               p.status === "syncing" ? <Loader2 size={14} className="animate-spin text-blue-500" /> :
               p.status === "error" ? <AlertCircle size={14} className="text-[var(--color-danger)]" /> :
+              p.status === "needs-permission" ? <AlertCircle size={14} className="text-[var(--color-warning)]" /> :
               p.status === "paused" ? <Pause size={14} className="text-[var(--color-text-muted)]" /> :
               <CheckCircle2 size={14} className="text-[var(--color-primary)]" />;
 

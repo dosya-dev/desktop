@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { conflictCopyName, conflictStamp } from "./conflict-name.ts";
+import { conflictCopyName, conflictStamp, isConflictCopyName, mayAutoKeepBoth, AUTO_KEEP_BOTH_COOLDOWN_MS } from "./conflict-name.ts";
 
 const AT = new Date(2026, 7, 21, 14, 33, 5); // 2026-08-21 14:33:05 local
 const never = () => false;
@@ -92,4 +92,24 @@ test("the result is never a name that is already taken", () => {
     taken.add(name);
   }
   assert.equal(taken.size, 20);
+});
+
+test("conflict copies are recognised, with or without a tie-break number", () => {
+  const copy = conflictCopyName({ fileName: "p777.jpg", at: AT, device: "Frats-MacBook-Air.local", taken: never });
+  assert.equal(isConflictCopyName(copy), true);
+  assert.equal(isConflictCopyName("report (conflict copy 2026-08-21 14-33-05 from MacBook) #2.docx"), true);
+  assert.equal(isConflictCopyName("p777.jpg"), false);
+  assert.equal(isConflictCopyName("notes on (conflict copy) naming.txt"), false);
+});
+
+test("a conflict copy is never copied again automatically", () => {
+  const copy = conflictCopyName({ fileName: "p777.jpg", at: AT, device: "MacBook", taken: never });
+  assert.equal(mayAutoKeepBoth({ fileName: copy, lastAutoAt: undefined, now: 0 }), false);
+});
+
+test("a path kept-both within the cooldown waits for the user instead", () => {
+  const now = 10 * AUTO_KEEP_BOTH_COOLDOWN_MS;
+  assert.equal(mayAutoKeepBoth({ fileName: "p777.jpg", lastAutoAt: undefined, now }), true);
+  assert.equal(mayAutoKeepBoth({ fileName: "p777.jpg", lastAutoAt: now - 1000, now }), false);
+  assert.equal(mayAutoKeepBoth({ fileName: "p777.jpg", lastAutoAt: now - AUTO_KEEP_BOTH_COOLDOWN_MS, now }), true);
 });
