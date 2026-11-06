@@ -19,12 +19,17 @@ import { LIBRARY_QUERY_ROOT } from "@/lib/library-request";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatBytes } from "@/lib/format";
 import { toast } from "sonner";
+import { autoDir } from "@/lib/bidi-ui";
 import { FolderIcon } from "@/components/files/FileIcon";
-import { UploadQueueTree, type UploadQueueItem as QueueItem } from "@/components/upload/UploadQueueTree";
+import { CountsLine, UploadQueueTree, type UploadQueueItem as QueueItem } from "@/components/upload/UploadQueueTree";
 import {
   readDroppedEntries, entriesFromPickedFiles, orderedDirs, createFolderTree, resolveTargets,
   MAX_DROPPED_FILES, type DroppedTree, type FolderPlan,
 } from "@/lib/dropped-entries";
+import { intlLocale } from "@/lib/locale-state";
+import { useT, t as translate } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
+import type { MessageKey } from "../../i18n/keys";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -39,9 +44,15 @@ interface PickerFolder {
 
 const MAX_CONCURRENT = 3;
 
+/** The format chips under the drop zone. */
+const FORMAT_CHIPS: MessageKey[] = [
+  "common.label.videoTitleCase", "common.label.images", "common.label.documents", "upload.label.archives", "upload.label.anyFormat",
+];
+
 // ── Page ─────────────────────────────────────────────────────────────
 
 export function UploadPage() {
+  const t = useT();
   const { active } = useWorkspace();
   const queryClient = useQueryClient();
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -49,7 +60,7 @@ export function UploadPage() {
   const [selectedFolder, setSelectedFolder] = useState<{
     id: string | null;
     name: string;
-  }>({ id: null, name: "Root (top level)" });
+  }>({ id: null, name: "" });
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -88,9 +99,9 @@ export function UploadPage() {
         setSelectedFolder({ id: data.folder.id, name: data.folder.name });
         setPickerSelected(data.folder.id);
       }
-      toast.success("Folder created");
+      toast.success(t("common.label.folderCreated"));
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed")),
   });
 
   // ── Upload logic ───────────────────────────────────────────────────
@@ -131,8 +142,10 @@ export function UploadPage() {
       if (controller.signal.aborted) {
         updateItem(item.id, { status: "pending", progress: 0, bytesUploaded: 0 });
       } else {
-        const message = err instanceof Error ? err.message : "Upload failed";
-        updateItem(item.id, { status: "error", error: message });
+        // Module-level translate: this runs from a scheduler closure that may
+        // predate the last language switch.
+        const message = err instanceof Error ? err.message : translate("common.error.uploadFailed");
+        updateItem(item.id, { status: "error", error: message, errorRaw: err instanceof ApiError });
       }
     } finally {
       abortControllers.current.delete(item.id);
@@ -212,8 +225,8 @@ export function UploadPage() {
     // construction instead of by scheduling luck.
     queueRef.current = [];
     setQueue([]);
-    toast.info("Uploads canceled", {
-      description: "The upload queue was cleared because you switched workspace.",
+    toast.info(t("upload.label.uploadsCanceled"), {
+      description: t("upload.description.theUploadQueueWasClearedBecauseYouSwitchedWorkspace"),
     });
   }, [active?.id]);
 
@@ -244,9 +257,9 @@ export function UploadPage() {
     const res = await api.post<{ ok: boolean; folder?: { id: string }; error?: string }>("/api/folders", {
       workspace_id: workspaceId, parent_id: parentId, name,
     });
-    if (!res.ok || !res.folder?.id) throw new Error(res.error ?? "Could not create folder");
+    if (!res.ok || !res.folder?.id) throw new Error(res.error ?? t("common.error.couldNotCreateFolder"));
     return res.folder.id;
-  }, []);
+  }, [t]);
 
   /**
    * Queue a dropped or picked tree. Every file used to go into the selected
@@ -264,14 +277,14 @@ export function UploadPage() {
       const dirs = orderedDirs(tree);
       // Recreating a deep tree is a round trip per folder - say so up front,
       // or the upload looks dead until the queue appears.
-      toast.info("Uploading folder", {
-        description: `Recreating ${dirs.length} folder${dirs.length === 1 ? "" : "s"}, then uploading ${tree.entries.length} file${tree.entries.length === 1 ? "" : "s"}.`,
+      toast.info(t("common.label.uploadingFolder"), {
+        description: t("common.description.recreatingFolderThenUploadingFile", { dirCount: dirs.length, entryCount: tree.entries.length }),
       });
       plan = await createFolderTree(dirs, root, (name, parentId) => createFolder(workspaceId, name, parentId));
       if (!aliveRef.current) return;
       if (plan.failed.length > 0) {
-        toast.error("Some folders could not be created", {
-          description: `${plan.failed.length} folder${plan.failed.length === 1 ? "" : "s"} failed. ${plan.error ?? ""}`.trim(),
+        toast.error(t("common.error.someFoldersCouldNotBeCreated"), {
+          description: t("common.error.folderFailedError", { failedCount: plan.failed.length, error: plan.error ?? "" }).trim(),
         });
       }
       if (plan.ids.size > 0) {
@@ -285,36 +298,38 @@ export function UploadPage() {
 
     const { targets, skipped } = resolveTargets(tree.entries, plan, root);
     if (skipped > 0) {
-      toast.error("Some files were skipped", {
-        description: `${skipped} file${skipped === 1 ? "" : "s"} had no folder to go in.`,
+      toast.error(t("common.label.someFilesWereSkipped"), {
+        description: t("common.description.fileHadNoFolderToGoIn", { skipped }),
       });
     }
     if (tree.skipped > 0) {
-      toast.error("Too many files in one go", {
-        description: `Only the first ${MAX_DROPPED_FILES.toLocaleString()} files were queued - ${tree.skipped} left out.`,
+      toast.error(t("common.error.tooManyFilesInOneGo"), {
+        description: t("upload.description.onlyTheFirstMaxDroppedFilesFilesWereQueuedSkippedLeft", {
+          maxDroppedFiles: MAX_DROPPED_FILES.toLocaleString(intlLocale()), skipped: String(tree.skipped),
+        }),
       });
     }
     if (targets.length === 0) {
       if (tree.hadDirectory && plan.ids.size > 0) {
-        toast.success("Folder created", { description: "There were no files inside to upload." });
+        toast.success(t("common.label.folderCreated"), { description: t("common.description.thereWereNoFilesInsideToUpload") });
       }
       return;
     }
 
-    const items: QueueItem[] = targets.map((t) => ({
-      file: t.file,
+    const items: QueueItem[] = targets.map((target) => ({
+      file: target.file,
       id: crypto.randomUUID(),
       status: "pending" as const,
       progress: 0,
       bytesUploaded: 0,
       workspaceId,
-      folderId: t.folderId,
-      relativePath: t.path,
+      folderId: target.folderId,
+      relativePath: target.path,
     }));
     setQueue((prev) => [...prev, ...items]);
     // Start processing after state update
     setTimeout(() => processQueue(), 50);
-  }, [processQueue, active, selectedFolder.id, createFolder, queryClient]);
+  }, [processQueue, active, selectedFolder.id, createFolder, queryClient, t]);
 
   const onDragOver = (e: DragEvent) => { e.preventDefault(); setDragging(true); };
   const onDragLeave = (e: DragEvent) => {
@@ -399,6 +414,7 @@ export function UploadPage() {
   const uploadedBytes = queue.reduce((s, q) => s + (q.status === "done" ? q.file.size : q.bytesUploaded), 0);
   const overallPct = totalBytes > 0 ? Math.round((uploadedBytes / totalBytes) * 100) : 0;
   const isActive = uploading.length > 0;
+  const counts = { doneCount, totalFiles, uploadedBytes: formatBytes(uploadedBytes), totalBytes: formatBytes(totalBytes) };
 
   const folders = foldersData?.folders ?? [];
 
@@ -416,15 +432,20 @@ export function UploadPage() {
   }, [totalFiles, pendingCount, uploading.length, doneCount]);
 
   return (
-    <div className="flex h-full gap-6">
-      {/* Left Column */}
-      <div className="flex-1 space-y-4">
+    <div className="flex h-full gap-6" data-testid="upload-page">
+      {/* Left Column. `min-w-0` is load-bearing: a flex item's automatic
+          minimum width is its min-content width, which for a long file name
+          in the queue is the whole name on one line. Without it the column
+          grew past the window and the content area scrolled sideways. */}
+      <div className="min-w-0 flex-1 space-y-4">
         <div>
-          <h1 className="text-2xl font-semibold">Upload files</h1>
-          <p className="text-sm text-[var(--color-text-muted)]">
+          <h1 className="text-2xl font-semibold">{t("upload.heading.uploadFiles")}</h1>
+          <p className="break-words text-sm text-[var(--color-text-muted)]">
             {selectedFolder.id
-              ? <>Uploading to <strong className="text-[var(--color-text)]">{selectedFolder.name}</strong> · encrypted in transit</>
-              : "Files are encrypted in transit (TLS 1.3). They are stored in this workspace's location."}
+              ? richText(t, "upload.description.uploadingToSelectedFolderNameEncryptedInTransit", {}, {
+                  selectedFolderName: <strong className="text-[var(--color-text)]">{selectedFolder.name}</strong>,
+                })
+              : t("upload.description.filesAreEncryptedInTransitTLS13They")}
           </p>
         </div>
 
@@ -449,10 +470,10 @@ export function UploadPage() {
             className={`mb-4 ${dragging ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"}`}
           />
           <p className="text-sm font-medium">
-            {dragging ? "Drop files or folders here" : "Drop files or folders here to upload"}
+            {dragging ? t("upload.label.dropFilesOrFoldersHere") : t("upload.label.dropFilesOrFoldersHereToUpload")}
           </p>
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-            Folders keep their subfolders. Or browse your computer:
+            {t("upload.description.foldersKeepTheirSubfoldersOrBrowseYourComputer")}
           </p>
           <div className="mt-3 flex gap-2">
             <button
@@ -462,7 +483,7 @@ export function UploadPage() {
               style={{ borderColor: "var(--color-border)" }}
             >
               <FilePlus size={13} />
-              Select files
+              {t("upload.action.selectFiles")}
             </button>
             <button
               type="button"
@@ -471,13 +492,13 @@ export function UploadPage() {
               style={{ borderColor: "var(--color-border)" }}
             >
               <FolderUp size={13} />
-              Select folder
+              {t("upload.action.selectFolder")}
             </button>
           </div>
           <div className="mt-3 flex gap-2">
-            {["Video", "Images", "Documents", "Archives", "Any format"].map((t) => (
-              <span key={t} className="rounded-full bg-[var(--color-bg-tertiary)] px-2.5 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)]">
-                {t}
+            {FORMAT_CHIPS.map((key) => (
+              <span key={key} className="rounded-full bg-[var(--color-bg-tertiary)] px-2.5 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)]">
+                {t(key)}
               </span>
             ))}
           </div>
@@ -491,32 +512,36 @@ export function UploadPage() {
               <div className="flex items-center justify-between mb-1.5">
                 <div>
                   <h3 className="text-sm font-semibold">
-                    {isActive ? "Uploading" : doneCount === totalFiles ? "Complete" : "Upload queue"}
+                    {isActive ? t("upload.heading.uploading") : doneCount === totalFiles ? t("upload.heading.complete") : t("upload.heading.uploadQueue")}
                   </h3>
                   <p className="text-xs text-[var(--color-text-muted)]">
-                    {doneCount}/{totalFiles} files · {formatBytes(uploadedBytes)} of {formatBytes(totalBytes)}
-                    {errorCount > 0 && <span className="text-[var(--color-danger)]"> · {errorCount} failed</span>}
+                    <CountsLine
+                      base={t("upload.description.donecountTotalFilesFilesUploadedBytesOfTotalBytes", counts)}
+                      withFailed={errorCount > 0
+                        ? t("upload.error.donecountTotalFilesFilesUploadedBytesOfTotalBytesErrorCountFailed", { ...counts, errorCount })
+                        : null}
+                    />
                   </p>
                 </div>
                 <div className="flex items-center gap-1">
                   {(isActive || pendingCount > 0) && (
-                    <button onClick={togglePause} className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]" title={paused ? "Resume" : "Pause"}>
+                    <button onClick={togglePause} className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]" title={paused ? t("common.tooltip.resume") : t("common.accessibility.pause")}>
                       {paused ? <Play size={14} /> : <Pause size={14} />}
                     </button>
                   )}
                   {(isActive || pendingCount > 0) && (
-                    <button onClick={cancelAll} className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]" title="Cancel all">
+                    <button onClick={cancelAll} className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]" title={t("upload.tooltip.cancelAll")}>
                       <X size={14} />
                     </button>
                   )}
                   {errorCount > 0 && (
-                    <button onClick={retryAll} className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]" title="Retry all failed">
+                    <button onClick={retryAll} className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]" title={t("upload.tooltip.retryAllFailed")}>
                       <RefreshCw size={14} />
                     </button>
                   )}
                   {doneCount > 0 && (
                     <button onClick={clearDone} className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] px-2">
-                      Clear done
+                      {t("upload.action.clearDone")}
                     </button>
                   )}
                 </div>
@@ -530,7 +555,7 @@ export function UploadPage() {
                       style={{ width: `${Math.max(overallPct, 1)}%`, background: errorCount > 0 && !isActive ? "var(--color-danger)" : "var(--color-primary)" }}
                     />
                   </div>
-                  <span className="text-xs font-semibold text-[var(--color-text-secondary)] w-10 text-right">{overallPct}%</span>
+                  <span className="text-xs font-semibold text-[var(--color-text-secondary)] w-10 text-end">{overallPct}%</span>
                 </div>
               )}
             </div>
@@ -542,16 +567,16 @@ export function UploadPage() {
       </div>
 
       {/* Right Column: Options */}
-      <div className="w-72 space-y-4">
+      <div className="w-72 shrink-0 space-y-4">
         <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-          <p className="mb-3 text-xs font-semibold text-[var(--color-text-secondary)]">Upload options</p>
+          <p className="mb-3 text-xs font-semibold text-[var(--color-text-secondary)]">{t("upload.label.uploadOptions")}</p>
 
           {/* Folder - the only upload option left. Where the bytes land is a
               property of the workspace, chosen once when it was created. */}
           <div>
             <p className="mb-1.5 flex items-center gap-1 text-xs font-medium text-[var(--color-text-secondary)]">
               <FolderIcon fileCount={1} size={13} />
-              Folder
+              {t("common.label.folder")}
             </p>
             <button
               onClick={() => {
@@ -566,17 +591,17 @@ export function UploadPage() {
               ) : (
                 <svg viewBox="0 0 14 14" fill="none" width="14" height="14"><path d="M2 7.5V12a1 1 0 001 1h3V10h2v3h3a1 1 0 001-1V7.5M1 7l6-5 6 5" stroke="#706E69" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
               )}
-              <span className={`flex-1 truncate text-left ${!selectedFolder.id ? "text-[var(--color-text-muted)]" : ""}`}>
-                {selectedFolder.name}
+              <span className={`flex-1 truncate text-start ${!selectedFolder.id ? "text-[var(--color-text-muted)]" : ""}`}>
+                {selectedFolder.id ? selectedFolder.name : t("common.label.rootTopLevel")}
               </span>
-              <ChevronRight size={12} className="text-[var(--color-text-muted)]" />
+              <ChevronRight size={12} className="text-[var(--color-text-muted)] rtl:-scale-x-100" />
             </button>
             <button
               onClick={() => setShowCreateFolder(true)}
               className="mt-1.5 flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
             >
               <Plus size={11} />
-              Create new folder
+              {t("upload.action.createNewFolder")}
             </button>
           </div>
         </div>
@@ -585,10 +610,10 @@ export function UploadPage() {
         <div className="rounded-xl bg-[var(--color-bg-secondary)] p-4 text-xs text-[var(--color-text-secondary)]">
           <div className="flex items-center gap-2 mb-2">
             <Shield size={14} />
-            <span className="font-medium">Secure upload</span>
+            <span className="font-medium">{t("upload.label.secureUpload")}</span>
           </div>
-          <p>Encrypted in transit with TLS 1.3</p>
-          <p className="mt-1">No egress fees - ever</p>
+          <p>{t("upload.description.encryptedInTransitWithTLS13")}</p>
+          <p className="mt-1">{t("upload.label.noEgressFeesEver")}</p>
         </div>
       </div>
 
@@ -597,7 +622,7 @@ export function UploadPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] shadow-xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b px-5 py-4" style={{ borderColor: "var(--color-border)" }}>
-              <h3 className="text-base font-semibold">Select folder</h3>
+              <h3 className="text-base font-semibold">{t("upload.heading.selectFolder")}</h3>
               <button onClick={() => setShowFolderPicker(false)} className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]">
                 <X size={14} />
               </button>
@@ -612,7 +637,7 @@ export function UploadPage() {
                 }`}
               >
                 <svg viewBox="0 0 14 14" fill="none" width="14" height="14"><path d="M2 7.5V12a1 1 0 001 1h3V10h2v3h3a1 1 0 001-1V7.5M1 7l6-5 6 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                Root (top level)
+                {t("common.label.rootTopLevel")}
               </button>
               {folders
                 .filter((f) => f.parent_id === null)
@@ -633,20 +658,20 @@ export function UploadPage() {
                 className="rounded-lg border px-4 py-2 text-sm"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => {
                   const f = folders.find((f) => f.id === pickerSelected);
                   setSelectedFolder(
-                    f ? { id: f.id, name: f.name } : { id: null, name: "Root (top level)" },
+                    f ? { id: f.id, name: f.name } : { id: null, name: "" },
                   );
                   setShowFolderPicker(false);
                 }}
                 className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
-                Select folder
+                {t("upload.action.selectFolder")}
               </button>
             </div>
           </div>
@@ -658,20 +683,20 @@ export function UploadPage() {
       {showCreateFolder && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-4 text-lg font-semibold">New folder</h3>
+            <h3 className="mb-4 text-lg font-semibold">{t("upload.heading.newFolder")}</h3>
             <input
               type="text"
               value={newFolderName}
               onChange={(e) => setNewFolderName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && newFolderName.trim() && createFolderMut.mutate(newFolderName.trim())}
-              placeholder="Folder name"
+              placeholder={t("common.placeholder.folderName")}
               autoFocus
               className="mb-4 w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
               style={{ borderColor: "var(--color-border)" }}
             />
             <div className="flex justify-end gap-2">
               <button onClick={() => { setShowCreateFolder(false); setNewFolderName(""); }} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => newFolderName.trim() && createFolderMut.mutate(newFolderName.trim())}
@@ -679,7 +704,7 @@ export function UploadPage() {
                 className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
-                {createFolderMut.isPending ? "Creating..." : "Create"}
+                {createFolderMut.isPending ? t("common.status.creating") : t("common.action.create")}
               </button>
             </div>
           </div>
@@ -713,10 +738,10 @@ function PickerTreeItem({
             ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
             : "hover:bg-[var(--color-bg-secondary)]"
         }`}
-        style={{ paddingLeft: `${12 + depth * 20}px` }}
+        style={{ paddingInlineStart: `${12 + depth * 20}px` }}
       >
         <FolderIcon fileCount={folder.file_count} size={14} />
-        <span className="truncate">{folder.name}</span>
+        <span className="truncate" title={folder.name}>{folder.name}</span>
       </button>
       {children.map((c) => (
         <PickerTreeItem key={c.id} folder={c} all={all} selectedId={selectedId} onSelect={onSelect} depth={depth + 1} />

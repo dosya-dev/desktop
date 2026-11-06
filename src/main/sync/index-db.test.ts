@@ -310,3 +310,41 @@ test("error ledger: count, newest-first listing, reset for retry, clear", async 
     db.close();
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("the index is opened with synchronous=FULL so a power cut cannot leave a synced row for a file that never landed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dosya-index-sync-"));
+  try {
+    const index = SyncIndex.open(join(dir, "index.db"));
+    const row = (index as any).db.prepare("PRAGMA synchronous").get() as { synchronous: number };
+    index.close();
+    assert.equal(row.synchronous, 2); // 2 = FULL
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("1,000 upsertFile calls inside one transaction all land, and a throw rolls every one back", async () => {
+  // The engine batches its row writes this way so synchronous=FULL pays one
+  // fsync per batch instead of one per row.
+  const dir = await mkdtemp(join(tmpdir(), "dosya-idx-"));
+  try {
+    const db = SyncIndex.open(join(dir, "index.db"));
+    const many = (prefix: string) => Array.from({ length: 1000 }, (_, i) =>
+      rec({ remoteId: `${prefix}_${i}`, localPath: `${prefix}/f${i}.txt` }));
+    db.transaction(() => { for (const r of many("ok")) db.upsertFile("p1", r); });
+    assert.equal(db.countFiles("p1"), 1000);
+    assert.equal(db.getFileById("p1", "ok_999")?.localPath, "ok/f999.txt");
+
+    assert.throws(() => db.transaction(() => {
+      for (const r of many("bad")) db.upsertFile("p1", r);
+      throw new Error("mid-batch failure");
+    }), /mid-batch failure/);
+    assert.equal(db.countFiles("p1"), 1000);
+    assert.equal(db.getFileById("p1", "bad_0"), undefined);
+    db.close();
+    // And the committed batch survives a reopen.
+    const db2 = SyncIndex.open(join(dir, "index.db"));
+    assert.equal(db2.countFiles("p1"), 1000);
+    db2.close();
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

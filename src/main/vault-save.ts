@@ -3,6 +3,7 @@ import { basename, join } from "path";
 import { randomUUID } from "crypto";
 import { createRequire } from "node:module";
 import { longPath } from "./sync/paths";
+import { tMain as t } from "./i18n";
 
 /**
  * Where a file decrypted by the Vault is written.
@@ -123,7 +124,7 @@ export async function openVaultSink(
   deps: VaultSinkDeps = realVaultSinkDeps(),
 ): Promise<VaultSinkOpenResult> {
   if (typeof name !== "string" || name.length === 0 || name.length > 500) {
-    throw new Error("Invalid file name");
+    throw new Error(t("common.error.invalidFileName"));
   }
   // Counted together with the in-flight opens, and RESERVED before the
   // dialog is awaited. This check used to sit in front of `showSaveDialog`
@@ -133,13 +134,13 @@ export async function openVaultSink(
   // yet. The limit only engages if the window between the check and the set
   // is counted.
   if (sinks.size + pendingOpens >= MAX_OPEN_VAULT_SINKS) {
-    throw new Error("Too many downloads in progress");
+    throw new Error(t("vault.error.tooManyDownloadsInProgress"));
   }
   pendingOpens++;
   try {
     const safeName = safeVaultFileName(name);
     const { canceled, filePath } = await deps.showSaveDialog({
-      title: "Save decrypted file",
+      title: t("vault.window.saveDecryptedFile"),
       defaultPath: join(deps.downloadsDir(), safeName),
     });
     if (canceled || !filePath) return { ok: false };
@@ -167,13 +168,16 @@ export async function writeVaultSink(id: unknown, bytes: unknown, index: unknown
     bytes instanceof Uint8Array ? bytes
     : bytes instanceof ArrayBuffer ? new Uint8Array(bytes)
     : null;
-  if (!buf || buf.byteLength > MAX_VAULT_CHUNK_BYTES) throw new Error("Invalid chunk");
+  if (!buf || buf.byteLength > MAX_VAULT_CHUNK_BYTES) throw new Error(t("common.error.invalidChunk"));
   if (typeof index !== "number" || !Number.isInteger(index) || index < 0) {
-    throw new Error("Invalid chunk index");
+    throw new Error(t("vault.error.invalidChunkIndex"));
   }
   if (index !== sink.nextIndex) {
     await destroyVaultSink(id as string, true);
-    throw new Error(`Chunk ${index} arrived out of order (expected ${sink.nextIndex})`);
+    // Indexes go in as text: raw numbers, never locale-grouped.
+    throw new Error(
+      t("vault.error.chunkIndexArrivedOutOfOrderExpectedNextIndex", { index: String(index), nextIndex: String(sink.nextIndex) }),
+    );
   }
 
   // Advanced BEFORE the write is awaited, which is what makes the
@@ -229,9 +233,9 @@ export async function abortAllVaultSinks(): Promise<void> {
 }
 
 function requireVaultSink(id: unknown): VaultSink {
-  if (typeof id !== "string") throw new Error("Invalid save id");
+  if (typeof id !== "string") throw new Error(t("vault.error.invalidSaveId"));
   const sink = sinks.get(id);
-  if (!sink) throw new Error("No such save");
+  if (!sink) throw new Error(t("vault.error.noSuchSave"));
   return sink;
 }
 

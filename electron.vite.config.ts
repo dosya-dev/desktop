@@ -114,6 +114,17 @@ export default defineConfig({
             if (id.includes("maplibre") || id.includes("pmtiles") || id.includes("supercluster")) return "vendor-map";
             if (id.includes("shiki") || id.includes("oniguruma")) return "vendor-shiki";
             if (id.includes("@sentry")) return "vendor-sentry";
+            // The text editor (/text-editor): CodeMirror and its helpers, plus
+            // marked and DOMPurify for the preview. Lazy-only, so out of the
+            // catch-all chunk every window start loads.
+            if (
+              id.includes("@codemirror") || id.includes("@lezer") || id.includes("/codemirror/")
+              || id.includes("/style-mod/") || id.includes("/w3c-keyname/") || id.includes("/crelt/")
+              || id.includes("/marked/") || id.includes("/dompurify/")
+            ) return "vendor-editor";
+            // Video.js is ~270 kB minified and only the file viewer's video
+            // branch needs it, so it gets its own chunk.
+            if (id.includes("/video.js/") || id.includes("@videojs") || id.includes("/videojs-")) return "videojs";
             return "vendor";
           },
         },
@@ -122,9 +133,19 @@ export default defineConfig({
     resolve: {
       alias: {
         "@": resolve(__dirname, "src/renderer"),
+        // The iCalendar reader, straight at its source like tsconfig.web.json's
+        // path: the package export is the same file, but a worktree's
+        // node_modules can link another checkout's packages/shared.
+        "@dosya-dev/shared/files/ical": resolve(__dirname, "../../packages/shared/src/files/ical.ts"),
         // Vendored into apps/desktop (scripts/vendor-audio-player.mjs) rather
         // than aliased at ../../packages: CI syncs only apps/desktop/ to the
         // public repo, where that sibling does not exist.
+        // Video player (scripts/vendor-video-player.mjs), same reason. Longer
+        // keys first: Vite matches aliases in order and the bare key is a
+        // prefix of the subpaths.
+        "@dosya-dev/video-player/react": resolve(__dirname, "vendor/video-player/react.tsx"),
+        "@dosya-dev/video-player/skin.css": resolve(__dirname, "vendor/video-player/skin.css"),
+        "@dosya-dev/video-player": resolve(__dirname, "vendor/video-player/index.ts"),
         "@dosya-dev/audio-player": resolve(__dirname, "vendor/audio-player/index.ts"),
         // Vendored e2ee crypto bundles (scripts/vendor-e2ee.mjs). Same
         // public-repo reason as above, and both lines are load-bearing:
@@ -132,6 +153,13 @@ export default defineConfig({
         // core alias yields a second registry whose backend was never set.
         "@dosya-dev/e2ee-core": resolve(__dirname, "vendor/e2ee-core/index.js"),
         "@dosya-dev/e2ee-client": resolve(__dirname, "vendor/e2ee-client/index.js"),
+        // On-device Personas (scripts/vendor-e2ee.mjs): the engine bundle,
+        // which imports @dosya-dev/e2ee-core and so shares the alias above,
+        // and the face reader's wasm-bindgen glue (the wasm itself is fetched
+        // from the API's models route and checked before use).
+        "@dosya-dev/personas-engine": resolve(__dirname, "vendor/personas-engine/index.js"),
+        "@dosya-dev/face-reader": resolve(__dirname, "vendor/face-reader/face_reader.js"),
+        "@dosya-dev/onnxruntime-web": resolve(__dirname, "vendor/onnxruntime-web/ort.webgpu.bundle.min.mjs"),
       },
     },
   },

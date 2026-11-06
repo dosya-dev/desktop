@@ -13,6 +13,10 @@
  * shell.openExternal, which is the established pattern on ProfilePage.
  */
 
+import type { ReactNode } from "react";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "../../i18n/keys";
+
 const TERMS_URL = "https://dosya.dev/terms-of-service";
 const PRIVACY_URL = "https://dosya.dev/privacy-policy";
 
@@ -28,14 +32,55 @@ function LegalLink({ href, children }: { href: string; children: React.ReactNode
   );
 }
 
-/** Inline sentence naming both documents. Used inside the sign-up consent checkbox. */
-export function LegalLinks() {
-  return (
-    <>
-      <LegalLink href={TERMS_URL}>Terms of Service</LegalLink> and acknowledge the{" "}
-      <LegalLink href={PRIVACY_URL}>Privacy Policy</LegalLink>
-    </>
-  );
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * One translated sentence with each document's name turned into its link.
+ * The sentence is a single catalog message with no placeholders, so the
+ * names are found in it by their own catalog labels, ignoring case
+ * ("conditions d’utilisation" mid-sentence). A translation that words a name
+ * differently keeps its sentence whole and gets that link after it, so a
+ * document is never unreachable.
+ */
+function LinkedSentence({ messageKey }: { messageKey: MessageKey }) {
+  const t = useT();
+  const text = t(messageKey);
+  const docs = [
+    { name: t("profile.label.termsOfService"), href: TERMS_URL },
+    { name: t("profile.label.privacyPolicy"), href: PRIVACY_URL },
+  ];
+  const found: { start: number; end: number; href: string }[] = [];
+  const missing: { name: string; href: string }[] = [];
+  for (const doc of docs) {
+    const m = new RegExp(escapeRe(doc.name), "iu").exec(text);
+    const start = m?.index ?? -1;
+    if (m && !found.some((f) => start < f.end && f.start < start + m[0].length)) {
+      found.push({ start, end: start + m[0].length, href: doc.href });
+    } else {
+      missing.push(doc);
+    }
+  }
+  found.sort((a, b) => a.start - b.start);
+  const nodes: ReactNode[] = [];
+  let at = 0;
+  for (const f of found) {
+    nodes.push(text.slice(at, f.start));
+    nodes.push(<LegalLink key={f.href} href={f.href}>{text.slice(f.start, f.end)}</LegalLink>);
+    at = f.end;
+  }
+  nodes.push(text.slice(at));
+  for (const doc of missing) {
+    nodes.push(" ", <LegalLink key={doc.href} href={doc.href}>{doc.name}</LegalLink>);
+  }
+  return <>{nodes}</>;
+}
+
+/**
+ * The sign-up consent sentence ("I agree to the Terms of Service and
+ * acknowledge the Privacy Policy"), whole and in the chosen language.
+ */
+export function LegalConsent() {
+  return <LinkedSentence messageKey="sign-up.label.iAgreeToTheTermsOfServiceAndAcknowledge" />;
 }
 
 /**
@@ -45,8 +90,7 @@ export function LegalLinks() {
 export function LegalNotice({ className = "" }: { className?: string }) {
   return (
     <p className={`text-center text-xs text-[var(--color-text-muted)] ${className}`}>
-      By continuing, you agree to our <LegalLink href={TERMS_URL}>Terms of Service</LegalLink> and{" "}
-      <LegalLink href={PRIVACY_URL}>Privacy Policy</LegalLink>.
+      <LinkedSentence messageKey="common.description.byContinuingYouAgreeToOurTermsOfService" />
     </p>
   );
 }

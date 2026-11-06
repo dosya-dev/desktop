@@ -55,3 +55,19 @@ export function filesHref(current: URLSearchParams, onFilesPage: boolean, filter
   const qs = filterNavParams(base, filter).toString();
   return qs ? `/files?${qs}` : "/files";
 }
+
+/**
+ * The query string after committing `term` from the search box, or null when
+ * the URL already says exactly that (so a caller does not navigate for
+ * nothing). An empty term removes `q`, which is what restores the full
+ * listing. Pagination restarts: page 3 of one result set is nothing in
+ * another.
+ */
+export function searchCommitParams(current: URLSearchParams, term: string): URLSearchParams | null {
+  if ((current.get("q") ?? "") === term) return null;
+  const next = new URLSearchParams(current);
+  if (term) next.set("q", term);
+  else next.delete("q");
+  next.delete("page");
+  return next;
+}

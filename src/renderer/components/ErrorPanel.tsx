@@ -1,3 +1,5 @@
+import { useT } from "@/lib/i18n";
+
 /**
  * The one contract for a page-level load failure: say what failed, offer a
  * retry. Pages render this instead of inventing their own error prose, so
@@ -10,6 +12,7 @@ export function ErrorPanel({
   message: string;
   onRetry?: () => void;
 }) {
+  const t = useT();
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
       <p className="text-sm text-[var(--color-text-secondary)]">{message}</p>
@@ -20,7 +23,7 @@ export function ErrorPanel({
           className="rounded-lg border px-4 py-1.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)]"
           style={{ borderColor: "var(--color-border)" }}
         >
-          Try again
+          {t("common.action.tryAgain")}
         </button>
       )}
     </div>

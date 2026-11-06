@@ -1,8 +1,10 @@
 import { constants, createReadStream, readFileSync } from "fs";
+import { createHash } from "crypto";
 import { lstat, open, stat, readFile, rename as fsRename, unlink as fsUnlink } from "fs/promises";
 import { basename, extname } from "path";
 import { Transform, type Readable } from "stream";
 import { longPath } from "./paths";
+import { md5FromEtag } from "./etag";
 import { UnsafeSyncPathError } from "./filesystem-safety";
 import type { EnvProvider } from "./env-provider";
 import { HOST_SESSION_COOKIE } from "../session-cookie";
@@ -660,6 +662,9 @@ export class RemoteClient {
     expectedSize: number = -1,
     onProgress?: (bytesTransferred: number) => void,
     assertPathSafe?: () => Promise<void>,
+    /** Awaited right before the finished temp file replaces `localPath`.
+     *  Throw to abort: the temp file is removed and nothing is replaced. */
+    beforeReplace?: () => Promise<void>,
   ): Promise<number> {
     localPath = longPath(localPath);
     const tmpPath = `${localPath}.dosya-sync-tmp`;
@@ -678,12 +683,18 @@ export class RemoteClient {
           { cookie: sessionCookie, cookieHost: apiHostname },
           onProgress,
           assertPathSafe,
+          beforeReplace,
         );
         return total;
       } catch (err: any) {
         lastErr = err;
         // DON'T delete tmp file on retryable errors - we'll resume from it
         if (err instanceof RateLimitError) throw err;
+        if (err?.name === "LocalChangedDuringDownloadError") {
+          await fsUnlink(tmpPath).catch(() => {});
+          await fsUnlink(metaPath).catch(() => {});
+          throw err;
+        }
         if (NON_RETRYABLE.has(err.message)) {
           await assertPathSafe?.();
           await fsUnlink(tmpPath).catch(() => {});
@@ -775,6 +786,7 @@ export class RemoteClient {
     ctx: { cookie?: string; cookieHost?: string },
     onProgress?: (bytes: number) => void,
     assertPathSafe?: () => Promise<void>,
+    beforeReplace?: () => Promise<void>,
   ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const begin = async () => {
@@ -901,20 +913,49 @@ export class RemoteClient {
               }
 
               await assertSafe();
+              // End-to-end content check (etag.ts). The hash covers the whole
+              // object, so a resumed download first replays the prefix it
+              // already has on disk through the hasher.
+              const expectMd5 = md5FromEtag(res.headers.etag);
+              const hasher = expectMd5 ? createHash("md5") : null;
+              if (hasher && isResume) {
+                const prefix = createReadStream(tmpPath, { end: base - 1 });
+                for await (const chunk of prefix) hasher.update(chunk as Buffer);
+              }
               const flags = isResume
                 ? constants.O_WRONLY | constants.O_APPEND
                 : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
               const tmpHandle = await this.openDownloadSidecar(localPath, tmpPath, flags);
-              const ws = tmpHandle.createWriteStream({ autoClose: true });
+              const ws = tmpHandle.createWriteStream({ autoClose: false });
               let bytes = 0;
-              res.on("data", (chunk: Buffer) => { bytes += chunk.length; onProgress?.(base + bytes); });
+              res.on("data", (chunk: Buffer) => { bytes += chunk.length; hasher?.update(chunk); onProgress?.(base + bytes); });
               // Throttle applies backpressure that slows the socket read → real
               // download rate limit (no-op when the bucket is unlimited).
               this.throttle(res, this.downloadBucket).pipe(ws);
               let streamFinished = false;
-              ws.on("finish", () => { streamFinished = true; });
+              let failed = false;
+              ws.on("finish", () => {
+                // Durability: the rename below makes the file visible as
+                // complete. Flush its bytes first, or a power cut can leave a
+                // zero-length file whose index row says it is synced.
+                void (async () => {
+                  try {
+                    await tmpHandle.sync();
+                  } catch {
+                    // Some network volumes refuse fsync; the file is still
+                    // there, and this stays a best effort rather than a failure.
+                  }
+                  streamFinished = true;
+                  // A FileHandle cannot close while its stream still holds a
+                  // reference, and autoClose is off so the sync can run first.
+                  // destroy() releases the stream, closes the handle and emits
+                  // "close" once; the handler below awaits nothing more of it.
+                  // A failing close emits "error" first, which sets `failed`.
+                  ws.destroy();
+                })();
+              });
               ws.on("close", async () => {
-                if (!streamFinished) return;
+                if (failed || !streamFinished) return;
                 try {
                   const total = base + bytes;
                   if (!Number.isNaN(contentLength) && bytes !== contentLength) {
@@ -929,13 +970,38 @@ export class RemoteClient {
                     reject(new Error(`Download size mismatch: expected ${expectedSize}, got ${total}`));
                     return;
                   }
+                  if (hasher && expectMd5) {
+                    const got = hasher.digest("hex");
+                    if (got !== expectMd5) {
+                      await unlinkSidecar(tmpPath);
+                      await unlinkSidecar(metaPath);
+                      reject(new Error(`Download content mismatch: server ETag ${expectMd5}, received ${got}`));
+                      return;
+                    }
+                  }
                   await assertSafe();
+                  // The plan was made from a scan; the file may have been
+                  // saved since. The engine's hook refuses the replacement
+                  // then, and the download is discarded rather than renamed
+                  // over an edit nobody has a copy of.
+                  if (beforeReplace) {
+                    try {
+                      await beforeReplace();
+                    } catch (guardErr) {
+                      await unlinkSidecar(tmpPath);
+                      await unlinkSidecar(metaPath);
+                      reject(guardErr as Error);
+                      return;
+                    }
+                  }
                   await fsRename(tmpPath, localPath);
+                  // The parent directory is fsynced by the sync engine once
+                  // per directory per batch (dir-sync.ts), not here per file.
                   await unlinkSidecar(metaPath);
                   resolve(total);
                 } catch (err) { reject(err as Error); }
               });
-              ws.on("error", (err) => { res.destroy(); reject(err); });
+              ws.on("error", (err) => { failed = true; res.destroy(); tmpHandle.close().catch(() => {}); reject(err); });
               res.on("error", (err) => { ws.destroy(err); });
             })().catch((err) => { res.destroy(); reject(err); });
           });
@@ -1471,6 +1537,7 @@ export class RemoteClient {
         const next: string | null = data.nextCursor ?? null;
         if (!next || next === cursor) {
           debugLog("[sync] snapshot pagination halted: missing or repeated cursor at page", page);
+          truncated = true; // the server said there was more
           break;
         }
         cursor = next;
@@ -1478,6 +1545,7 @@ export class RemoteClient {
         // Backstop cap: even with a well-behaved cursor, never spin indefinitely.
         if (page > MAX_SNAPSHOT_PAGES) {
           debugLog("[sync] snapshot pagination hit page cap", MAX_SNAPSHOT_PAGES);
+          truncated = true;
           break;
         }
       }
@@ -1529,12 +1597,13 @@ export class RemoteClient {
     expectedSize: number,
     onProgress?: (bytes: number) => void,
     assertPathSafe?: () => Promise<void>,
+    beforeReplace?: () => Promise<void>,
   ): Promise<number> {
     localPath = longPath(localPath);
     const tmpPath = `${localPath}.dosya-sync-tmp`;
     const metaPath = `${tmpPath}.meta`;
     // No cookie for presigned R2 URLs - they carry their own signed auth.
-    return this.downloadToFile(presignedUrl, localPath, tmpPath, metaPath, expectedSize, {}, onProgress, assertPathSafe);
+    return this.downloadToFile(presignedUrl, localPath, tmpPath, metaPath, expectedSize, {}, onProgress, assertPathSafe, beforeReplace);
   }
 
   /** Fetch the current user's ID from /api/me. Returns null if not authenticated. */
@@ -1584,7 +1653,14 @@ export class RemoteClient {
     filePath: string,
     fileSize: number,
     contentType: string,
-  ): Promise<void> {
+    opts: {
+      /** The stat taken BEFORE the PUT. After a 2xx the file is stat'd again
+       *  and the upload fails if size or mtime moved: the server then holds
+       *  bytes that are neither the old nor the new file, and the caller
+       *  must not record either as synced. */
+      expect?: { size: number; mtimeMs: number };
+    } = {},
+  ): Promise<{ md5: string }> {
     return new Promise((resolve, reject) => {
       const parsed = new URL(presignedUrl);
       const lib = parsed.protocol === "https:" ? https : http;
@@ -1592,6 +1668,7 @@ export class RemoteClient {
       // Route through the resolved system/corporate proxy when present (R2 is a
       // different host, so its proxy is resolved independently).
       resolveAgent(presignedUrl, this.env, this.proxyCache).then((agent) => {
+      const hasher = createHash("md5");
       const req = lib.request(presignedUrl, {
         method: "PUT",
         headers: {
@@ -1603,7 +1680,17 @@ export class RemoteClient {
       }, (res) => {
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
           res.resume();
-          resolve();
+          // The body is fully written by now (counter's flush ran before
+          // req.end), so the digest is complete. Taken once, 2xx only.
+          const md5 = hasher.digest("hex");
+          const serverMd5 = md5FromEtag(res.headers.etag);
+          if (serverMd5 && serverMd5 !== md5) {
+            reject(new Error(`Upload content mismatch: sent ${md5}, server stored ${serverMd5}`));
+            return;
+          }
+          const expect = opts.expect;
+          if (!expect) { resolve({ md5 }); return; }
+          this.assertUnchanged(filePath, expect.size, expect.mtimeMs).then(() => resolve({ md5 }), reject);
           return;
         }
         // Capture R2's error body (S3 XML: <Code>/<Message>) so failures are
@@ -1635,6 +1722,7 @@ export class RemoteClient {
       const counter = new Transform({
         transform(chunk, _enc, cb) {
           sentBytes += chunk.length;
+          hasher.update(chunk);
           cb(null, chunk);
         },
         flush(cb) {

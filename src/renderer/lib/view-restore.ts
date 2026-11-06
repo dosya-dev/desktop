@@ -13,7 +13,9 @@
 //   - no id at all -> nothing to show, AND the memory must clear, so a later
 //     return to the same id (e.g. closing the viewer and reopening the same
 //     file by hand) is treated as new rather than silently swallowed
-export type RestoreAction = "view" | "detail";
+// "versions": the detail panel opened on its version list (`&versions=1`),
+// which is where the text editor's Version history button lands.
+export type RestoreAction = "view" | "detail" | "versions";
 
 export type RestoreDecision =
   | { type: "restore"; id: string; action: RestoreAction }
@@ -49,5 +51,5 @@ export function restoreTarget(params: URLSearchParams, lastRestoredId: string | 
     return { type: "noop" };
   }
 
-  return { type: "restore", id, action: viewId ? "view" : "detail" };
+  return { type: "restore", id, action: viewId ? "view" : params.get("versions") === "1" ? "versions" : "detail" };
 }

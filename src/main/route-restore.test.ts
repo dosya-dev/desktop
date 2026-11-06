@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  LAST_ROUTE_KEY, isRestorableRoute, saveLastRoute, readLastRoute,
+  LAST_ROUTE_KEY, isRestorableRoute, saveLastRoute, readLastRoute, stripTransientParams,
 } from "../renderer/lib/route-restore.ts";
 
 /**
@@ -55,4 +55,25 @@ test("a tampered stored value reads as null", () => {
 
 test("empty storage reads as null", () => {
   assert.equal(readLastRoute(memStorage()), null);
+});
+
+test("the file viewer (?view=) is never restored, the list under it is (QA TC-032/033/037)", () => {
+  const s = memStorage();
+  saveLastRoute("/files?folder=f1&view=abc", s);
+  assert.equal(readLastRoute(s), "/files?folder=f1");
+  saveLastRoute("/files?view=abc", s);
+  assert.equal(readLastRoute(s), "/files");
+  saveLastRoute("/files?panel=abc&folder=f1", s);
+  assert.equal(readLastRoute(s), "/files?panel=abc&folder=f1");
+});
+
+test("a viewer route saved by an older build is stripped on read", () => {
+  const s = memStorage();
+  s.setItem(LAST_ROUTE_KEY, "/files?view=abc&folder=f1");
+  assert.equal(readLastRoute(s), "/files?folder=f1");
+});
+
+test("stripTransientParams leaves param-free paths untouched", () => {
+  assert.equal(stripTransientParams("/files"), "/files");
+  assert.equal(stripTransientParams("/profile?section=appearance"), "/profile?section=appearance");
 });

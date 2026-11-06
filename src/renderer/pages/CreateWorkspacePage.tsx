@@ -8,9 +8,47 @@ import { useAuth } from "@/lib/auth-context";
 import { FolderOpen, Upload, RefreshCw, Shield, Users, Zap, LogOut, ArrowRight } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { toast } from "sonner";
+import { autoDir } from "@/lib/bidi-ui";
 import { SwatchPicker } from "../components/SwatchPicker";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "../../i18n/keys";
+
+// Catalog keys, translated at render so a language switch reaches them.
+const FEATURES: { icon: typeof FolderOpen; title: MessageKey; desc: MessageKey }[] = [
+  {
+    icon: FolderOpen,
+    title: "create-workspace.heading.organizeFiles",
+    desc: "create-workspace.description.createFoldersMoveFilesAndKeepEverythingStructured",
+  },
+  {
+    icon: Upload,
+    title: "create-workspace.heading.uploadAnything",
+    desc: "create-workspace.description.dragAndDropAnyFileNoSizeLimitsNo",
+  },
+  {
+    icon: RefreshCw,
+    title: "create-workspace.heading.syncFolders",
+    desc: "create-workspace.description.keepLocalFoldersInSyncWithTheCloudAutomatically",
+  },
+  {
+    icon: Shield,
+    title: "create-workspace.heading.encryptedStorage",
+    desc: "create-workspace.description.aes256EncryptionAtRestYourFilesAreAlways",
+  },
+  {
+    icon: Users,
+    title: "create-workspace.heading.inviteYourTeam",
+    desc: "create-workspace.description.shareYourWorkspaceWithOthersAndCollaborateOnFiles",
+  },
+  {
+    icon: Zap,
+    title: "create-workspace.heading.instantSharing",
+    desc: "create-workspace.description.createShareLinksWithPasswordsExpiryAndDownloadLimits",
+  },
+];
 
 export function CreateWorkspacePage() {
+  const t = useT();
   const { workspaces, setActive } = useWorkspace();
   const { logout } = useAuth();
   const navigate = useNavigate();
@@ -88,11 +126,11 @@ export function CreateWorkspacePage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
       setActive(data.workspace as any);
-      toast.success("Workspace created!");
+      toast.success(t("create-workspace.label.workspaceCreated"));
     },
     onError: (err) => {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to create workspace",
+        err instanceof ApiError ? autoDir(err.message) : t("common.error.failedToCreateWorkspace"),
       );
     },
   });
@@ -120,18 +158,17 @@ export function CreateWorkspacePage() {
           </div>
 
           <h1 className="mb-2 text-2xl font-bold tracking-tight text-[var(--color-text)]">
-            Create your workspace
+            {t("create-workspace.heading.createYourWorkspace")}
           </h1>
           <p className="mb-8 text-sm leading-relaxed text-[var(--color-text-secondary)]">
-            A workspace is where your files, folders, and team live. You need at
-            least one to get started.
+            {t("create-workspace.description.aWorkspaceIsWhereYourFilesFoldersAndTeam")}
           </p>
 
           <form onSubmit={handleSubmit} className="space-y-5">
             {/* Preview + Name */}
             <div>
               <label className="mb-1.5 block text-sm font-medium">
-                Workspace name
+                {t("create-workspace.label.workspaceName")}
               </label>
               <div className="flex items-center gap-3">
                 <div
@@ -144,7 +181,7 @@ export function CreateWorkspacePage() {
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. My Files, Work, School..."
+                  placeholder={t("create-workspace.placeholder.eGMyFilesWorkSchool")}
                   autoFocus
                   className="flex-1 rounded-lg border px-3 py-2.5 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                   style={{ borderColor: "var(--color-border)" }}
@@ -154,23 +191,21 @@ export function CreateWorkspacePage() {
 
             {/* Color picker */}
             <div>
-              <label className="mb-1.5 block text-sm font-medium">Color</label>
-              <SwatchPicker value={color} onChange={setColor} label="Workspace colour" />
+              <label className="mb-1.5 block text-sm font-medium">{t("common.label.color")}</label>
+              <SwatchPicker value={color} onChange={setColor} label={t("common.label.workspaceColour")} />
             </div>
 
             {/* Location */}
             <div>
               <label className="mb-1.5 block text-sm font-medium">
-                Location
+                {t("create-workspace.label.location")}
               </label>
               <p className="mb-2 text-xs text-[var(--color-text-secondary)]">
-                Where this workspace's files are stored. Chosen once - every
-                file in the workspace lives here.
+                {t("create-workspace.description.whereThisWorkspaceSFilesAreStoredChosenOnce")}
               </p>
               {locationsUnavailable ? (
                 <p className="text-xs text-[var(--color-text-muted)]">
-                  Locations could not be loaded. Your workspace will be created
-                  in the one closest to you.
+                  {t("create-workspace.error.locationsCouldNotBeLoadedYourWorkspaceWillBe")}
                 </p>
               ) : (
                 <>
@@ -178,14 +213,14 @@ export function CreateWorkspacePage() {
                     type="text"
                     value={locationQuery}
                     onChange={(e) => setLocationQuery(e.target.value)}
-                    placeholder="Search a city or country"
-                    aria-label="Search locations"
+                    placeholder={t("create-workspace.placeholder.searchACityOrCountry")}
+                    aria-label={t("create-workspace.accessibility.searchLocations")}
                     className="mb-2 w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                     style={{ borderColor: "var(--color-border)" }}
                   />
                   <div
                     role="listbox"
-                    aria-label="Location"
+                    aria-label={t("create-workspace.label.location")}
                     className="max-h-48 overflow-y-auto rounded-lg border"
                     style={{ borderColor: "var(--color-border)" }}
                   >
@@ -204,7 +239,7 @@ export function CreateWorkspacePage() {
                             role="option"
                             aria-selected={r.code === region}
                             onClick={() => setRegion(r.code)}
-                            className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors hover:bg-[var(--color-bg-secondary)] ${
+                            className={`flex w-full items-center justify-between px-3 py-2 text-start text-xs transition-colors hover:bg-[var(--color-bg-secondary)] ${
                               r.code === region
                                 ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
                                 : ""
@@ -223,12 +258,12 @@ export function CreateWorkspacePage() {
                     ))}
                     {regions.length === 0 && (
                       <div className="px-3 py-5 text-center text-xs text-[var(--color-text-muted)]">
-                        Loading locations...
+                        {t("create-workspace.status.loadingLocations")}
                       </div>
                     )}
                     {regions.length > 0 && locationGroups.length === 0 && (
                       <div className="px-3 py-5 text-center text-xs text-[var(--color-text-muted)]">
-                        No location matches.
+                        {t("create-workspace.label.noLocationMatches")}
                       </div>
                     )}
                   </div>
@@ -246,7 +281,7 @@ export function CreateWorkspacePage() {
               className="w-full rounded-lg px-4 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] transition-colors disabled:opacity-50"
               style={{ background: "var(--color-primary)" }}
             >
-              {createMut.isPending ? "Creating..." : "Create workspace"}
+              {createMut.isPending ? t("common.status.creating") : t("common.action.createWorkspace")}
             </button>
           </form>
 
@@ -256,8 +291,8 @@ export function CreateWorkspacePage() {
               className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium transition-colors hover:bg-[var(--color-bg-secondary)]"
               style={{ borderColor: "var(--color-border)" }}
             >
-              <ArrowRight size={14} />
-              Go to dashboard
+              <ArrowRight size={14} className="rtl:-scale-x-100" />
+              {t("create-workspace.action.goToDashboard")}
             </button>
           )}
 
@@ -266,8 +301,8 @@ export function CreateWorkspacePage() {
             className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-secondary)]"
             style={{ borderColor: "var(--color-border)" }}
           >
-            <LogOut size={14} />
-            Log out
+            <LogOut size={14} className="rtl:-scale-x-100" />
+            {t("create-workspace.action.logOut")}
           </button>
         </div>
       </div>
@@ -276,45 +311,14 @@ export function CreateWorkspacePage() {
       <div className="bg-grid flex w-[60%] flex-col items-center justify-center bg-[var(--color-bg-secondary)] p-12">
         <div className="max-w-md">
           <h2 className="mb-2 text-center text-xl font-bold text-[var(--color-text)]">
-            What you can do with a workspace
+            {t("create-workspace.heading.whatYouCanDoWithAWorkspace")}
           </h2>
           <p className="mb-8 text-center text-sm text-[var(--color-text-secondary)]">
-            Everything starts with a workspace. Here's what's included.
+            {t("create-workspace.description.everythingStartsWithAWorkspaceHereSWhatS")}
           </p>
 
           <div className="grid grid-cols-2 gap-4">
-            {[
-              {
-                icon: FolderOpen,
-                title: "Organize files",
-                desc: "Create folders, move files, and keep everything structured.",
-              },
-              {
-                icon: Upload,
-                title: "Upload anything",
-                desc: "Drag and drop any file. No size limits, no restrictions.",
-              },
-              {
-                icon: RefreshCw,
-                title: "Sync folders",
-                desc: "Keep local folders in sync with the cloud automatically.",
-              },
-              {
-                icon: Shield,
-                title: "Encrypted storage",
-                desc: "AES-256 encryption at rest. Your files are always protected.",
-              },
-              {
-                icon: Users,
-                title: "Invite your team",
-                desc: "Share your workspace with others and collaborate on files.",
-              },
-              {
-                icon: Zap,
-                title: "Instant sharing",
-                desc: "Create share links with passwords, expiry, and download limits.",
-              },
-            ].map(({ icon: Icon, title, desc }) => (
+            {FEATURES.map(({ icon: Icon, title, desc }) => (
               <div
                 key={title}
                 className="rounded-xl bg-[var(--color-bg)] p-4 shadow-sm"
@@ -327,10 +331,10 @@ export function CreateWorkspacePage() {
                   />
                 </div>
                 <h3 className="mb-0.5 text-sm font-semibold text-[var(--color-text)]">
-                  {title}
+                  {t(title)}
                 </h3>
                 <p className="text-xs leading-relaxed text-[var(--color-text-muted)]">
-                  {desc}
+                  {t(desc)}
                 </p>
               </div>
             ))}

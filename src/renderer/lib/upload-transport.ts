@@ -6,6 +6,7 @@
 // helper so the helper stays loadable under `node --test`.
 import { api, apiBase, ApiError } from "./api-client";
 import { isSessionLossResponse, sessionLoss } from "./session-loss";
+import { tl } from "./locale-state";
 import {
   cancelledError,
   type HttpResult,
@@ -42,8 +43,8 @@ function xhrPut(opts: PutOptions): Promise<HttpResult> {
       if (isSessionLossResponse(opts.path, xhr.status)) sessionLoss.report();
       resolve({ status: xhr.status, data });
     };
-    xhr.onerror = () => reject(new Error("Network error"));
-    xhr.ontimeout = () => reject(new Error("Upload timed out"));
+    xhr.onerror = () => reject(new Error(tl("common.error.networkError")));
+    xhr.ontimeout = () => reject(new Error(tl("common.error.uploadTimedOut")));
     // Aborting an XHR fires `abort` (not `error`), so settle the promise
     // here - otherwise it hangs forever.
     xhr.onabort = () => reject(cancelledError());

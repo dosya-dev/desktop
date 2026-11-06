@@ -72,3 +72,29 @@ export function parseSessionCookieHeaders(
   }
   return updates;
 }
+
+/**
+ * The 2FA challenge cookie the API sets after a password that needs a second
+ * factor (apps/api/src/lib/auth.ts CHALLENGE_COOKIE). Like the session cookie it
+ * is SameSite=Lax and set on a cross-site response, so Chromium drops it unless
+ * main stores it by hand; without it /api/auth/2fa/verify finds no challenge.
+ */
+export const CHALLENGE_COOKIE = "dosya_2fa_challenge";
+
+export type ChallengeCookieUpdate =
+  | { action: "store"; value: string; maxAgeSeconds: number | null }
+  | { action: "clear" };
+
+/** The challenge-cookie update a response carries, or null. Origin gating is the caller's, as above. */
+export function parseChallengeCookieHeader(headers: Record<string, string[]> | undefined): ChallengeCookieUpdate | null {
+  for (const raw of setCookieHeaders(headers)) {
+    if (!raw.startsWith(`${CHALLENGE_COOKIE}=`)) continue;
+    const [pair, ...attrs] = raw.split(";");
+    const value = pair.slice(CHALLENGE_COOKIE.length + 1);
+    const maxAgeAttr = attrs.map((a) => a.trim()).find((a) => a.toLowerCase().startsWith("max-age="));
+    const maxAge = maxAgeAttr ? Number(maxAgeAttr.slice("max-age=".length)) : null;
+    if (!value || maxAge === 0) return { action: "clear" };
+    return { action: "store", value, maxAgeSeconds: Number.isFinite(maxAge) ? maxAge : null };
+  }
+  return null;
+}

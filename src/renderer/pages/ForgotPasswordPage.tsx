@@ -1,14 +1,20 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, ApiError } from "@/lib/api-client";
-import { isValidEmail, validatePassword } from "@dosya-dev/shared";
+import { api } from "@/lib/api-client";
+import { authErrorMessage } from "@/lib/auth-error";
+import { useOnClosedToTray } from "@/lib/use-closed-to-tray";
+import { isValidEmail } from "@dosya-dev/shared";
 import { ArrowLeft, Mail, CheckCircle2, KeyRound } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { useAuthDirection } from "@/lib/auth-direction";
+import { useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
+import { passwordError } from "@/lib/password-error";
 
 type Step = "email" | "code" | "done";
 
 export function ForgotPasswordPage() {
+  const t = useT();
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>("email");
   const [email, setEmail] = useState("");
@@ -18,13 +24,21 @@ export function ForgotPasswordPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Closing to the tray keeps this page alive: never leave a typed new
+  // password, or a stale error, for whoever reopens the app (QA TC-004).
+  useOnClosedToTray(() => {
+    setNewPassword("");
+    setConfirmPassword("");
+    setError("");
+  });
+
   // Step 1: Send code
   async function handleSendCode(e: FormEvent) {
     e.preventDefault();
     setError("");
 
     if (!isValidEmail(email)) {
-      setError("Please enter a valid email address");
+      setError(t("common.error.pleaseEnterAValidEmailAddress"));
       return;
     }
 
@@ -33,7 +47,7 @@ export function ForgotPasswordPage() {
       await api.post("/api/auth/forgot-password-code", { email });
       setStep("code");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "An unexpected error occurred");
+      setError(authErrorMessage(err, t("common.error.anUnexpectedErrorOccurred")));
     } finally {
       setLoading(false);
     }
@@ -45,18 +59,18 @@ export function ForgotPasswordPage() {
     setError("");
 
     if (code.length !== 6) {
-      setError("Please enter the 6-digit code");
+      setError(t("common.error.pleaseEnterThe6DigitCode"));
       return;
     }
 
-    const pwError = validatePassword(newPassword);
+    const pwError = passwordError(newPassword);
     if (pwError) {
       setError(pwError);
       return;
     }
 
     if (newPassword !== confirmPassword) {
-      setError("Passwords don't match");
+      setError(t("common.error.passwordsDonTMatch"));
       return;
     }
 
@@ -69,7 +83,7 @@ export function ForgotPasswordPage() {
       });
       setStep("done");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "An unexpected error occurred");
+      setError(authErrorMessage(err, t("common.error.anUnexpectedErrorOccurred")));
     } finally {
       setLoading(false);
     }
@@ -95,9 +109,9 @@ export function ForgotPasswordPage() {
         {step === "email" && (
           <>
             <div className="mb-6 text-center">
-              <h1 className="text-2xl font-semibold">Forgot password?</h1>
+              <h1 className="text-2xl font-semibold">{t("forgot-password.heading.forgotPassword")}</h1>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                Enter your email and we'll send you a 6-digit reset code
+                {t("forgot-password.description.enterYourEmailAndWeLlSendYouA")}
               </p>
             </div>
 
@@ -107,18 +121,18 @@ export function ForgotPasswordPage() {
 
             <form onSubmit={handleSendCode} className="space-y-4">
               <div>
-                <label className="mb-1 block text-sm font-medium">Email</label>
+                <label className="mb-1 block text-sm font-medium">{t("common.label.email")}</label>
                 <div className="relative">
-                  <Mail size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
+                  <Mail size={16} className="absolute inset-s-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
                   <input
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     required
                     autoFocus
-                    className="w-full rounded-lg border py-2 pl-10 pr-3 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
+                    className="w-full rounded-lg border py-2 ps-10 pe-3 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                     style={{ borderColor: "var(--color-border)" }}
-                    placeholder="you@example.com"
+                    placeholder={t("common.placeholder.youExampleCom")}
                   />
                 </div>
               </div>
@@ -129,7 +143,7 @@ export function ForgotPasswordPage() {
                 className="w-full rounded-lg px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] transition-colors disabled:opacity-50"
                 style={{ background: loading ? "var(--color-primary-hover)" : "var(--color-primary)" }}
               >
-                {loading ? "Sending code..." : "Send reset code"}
+                {loading ? t("forgot-password.status.sendingCode") : t("forgot-password.action.sendResetCode")}
               </button>
             </form>
 
@@ -137,8 +151,8 @@ export function ForgotPasswordPage() {
               to="/login"
               className="mt-5 flex items-center justify-center gap-1.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
             >
-              <ArrowLeft size={14} />
-              Back to sign in
+              <ArrowLeft size={14} className="rtl:-scale-x-100" />
+              {t("common.action.backToSignIn")}
             </Link>
           </>
         )}
@@ -150,9 +164,11 @@ export function ForgotPasswordPage() {
               <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-primary)]/10">
                 <KeyRound size={20} className="text-[var(--color-primary)]" />
               </div>
-              <h1 className="text-2xl font-semibold">Enter reset code</h1>
+              <h1 className="text-2xl font-semibold">{t("forgot-password.heading.enterResetCode")}</h1>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                We sent a 6-digit code to <span className="font-medium text-[var(--color-text)]">{email}</span>
+                {richText(t, "common.description.weSentA6DigitCodeToEmail", {}, {
+                  email: <span className="font-medium text-[var(--color-text)]">{email}</span>,
+                })}
               </p>
             </div>
 
@@ -162,7 +178,7 @@ export function ForgotPasswordPage() {
 
             <form onSubmit={handleResetPassword} className="space-y-4">
               <div>
-                <label className="mb-1 block text-sm font-medium">6-digit code</label>
+                <label className="mb-1 block text-sm font-medium">{t("common.label.sixDigitCode")}</label>
                 <input
                   type="text"
                   value={code}
@@ -176,31 +192,31 @@ export function ForgotPasswordPage() {
               </div>
 
               <div>
-                <label className="mb-1 block text-sm font-medium">New password</label>
+                <label className="mb-1 block text-sm font-medium">{t("common.label.newPassword")}</label>
                 <input
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   required
-                  placeholder="Min. 8 characters"
+                  placeholder={t("common.placeholder.min8Characters")}
                   className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                   style={{ borderColor: "var(--color-border)" }}
                 />
               </div>
 
               <div>
-                <label className="mb-1 block text-sm font-medium">Confirm password</label>
+                <label className="mb-1 block text-sm font-medium">{t("forgot-password.label.confirmPassword")}</label>
                 <input
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
-                  placeholder="Repeat your password"
+                  placeholder={t("forgot-password.placeholder.repeatYourPassword")}
                   className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                   style={{ borderColor: "var(--color-border)" }}
                 />
                 <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                  At least 8 characters. A memorable passphrase works well.
+                  {t("common.description.atLeast8CharactersAMemorablePassphraseWorksWell")}
                 </p>
               </div>
 
@@ -210,7 +226,7 @@ export function ForgotPasswordPage() {
                 className="w-full rounded-lg px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] transition-colors disabled:opacity-50"
                 style={{ background: loading ? "var(--color-primary-hover)" : "var(--color-primary)" }}
               >
-                {loading ? "Resetting..." : "Reset password"}
+                {loading ? t("common.status.resetting") : t("forgot-password.action.resetPassword")}
               </button>
             </form>
 
@@ -218,8 +234,8 @@ export function ForgotPasswordPage() {
               onClick={() => { setStep("email"); setCode(""); setError(""); }}
               className="mt-5 flex w-full items-center justify-center gap-1.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
             >
-              <ArrowLeft size={14} />
-              Try a different email
+              <ArrowLeft size={14} className="rtl:-scale-x-100" />
+              {t("forgot-password.action.tryADifferentEmail")}
             </button>
           </>
         )}
@@ -230,16 +246,16 @@ export function ForgotPasswordPage() {
             <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-primary)]/10">
               <CheckCircle2 size={24} className="text-[var(--color-primary)]" />
             </div>
-            <h1 className="text-xl font-semibold">Password reset!</h1>
+            <h1 className="text-xl font-semibold">{t("forgot-password.heading.passwordReset")}</h1>
             <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
-              Your password has been changed successfully. Please sign in with your new password.
+              {t("forgot-password.description.yourPasswordHasBeenChangedSuccessfullyPleaseSignIn")}
             </p>
             <button
               onClick={() => navigate("/login")}
               className="mt-6 w-full rounded-lg px-4 py-2.5 text-sm font-medium text-[var(--color-primary-fg)] transition-colors"
               style={{ background: "var(--color-primary)" }}
             >
-              Sign in
+              {t("common.action.signIn")}
             </button>
           </div>
         )}

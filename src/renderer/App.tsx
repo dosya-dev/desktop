@@ -1,7 +1,6 @@
 import { lazy, Suspense, useEffect } from "react";
 import { HashRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { Toaster } from "sonner";
 import { queryClient } from "./lib/query-client";
 import { AuthProvider, useAuth } from "./lib/auth-context";
 import { WorkspaceProvider, useWorkspace } from "./lib/workspace-context";
@@ -16,8 +15,11 @@ import { OnboardingPage } from "./pages/OnboardingPage";
 
 // Layout (needed by every protected page - keep eager)
 import { AppShell } from "./components/layout/AppShell";
+import { AppToaster } from "./components/layout/AppToaster";
 import { MenuBridge } from "./components/MenuBridge";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { useT } from "./lib/i18n";
+import { usePinchZoom } from "./lib/pinch-zoom";
 
 // Everything else is code-split into its own chunk and loaded on demand.
 // This keeps the initial bundle small - the heavy pages (FileBrowser, Sync,
@@ -45,6 +47,7 @@ const DuplicatesPage = lazyPage(() => import("./pages/DuplicatesPage"), "Duplica
 const IntegrationsPage = lazyPage(() => import("./pages/IntegrationsPage"), "IntegrationsPage");
 const MapPage = lazyPage(() => import("./pages/MapPage"), "MapPage");
 const EditorPage = lazyPage(() => import("./pages/EditorPage"), "EditorPage");
+const TextEditorPage = lazyPage(() => import("./pages/TextEditorPage"), "TextEditorPage");
 const ForgotPasswordPage = lazyPage(() => import("./pages/ForgotPasswordPage"), "ForgotPasswordPage");
 const LanTransferPage = lazyPage(() => import("./pages/LanTransferPage"), "LanTransferPage");
 const VerifyPage = lazyPage(() => import("./pages/VerifyPage"), "VerifyPage");
@@ -54,6 +57,8 @@ const WorkspaceDashboardPage = lazyPage(() => import("./pages/WorkspaceDashboard
 const NotificationsPage = lazyPage(() => import("./pages/NotificationsPage"), "NotificationsPage");
 const VaultPage = lazyPage(() => import("./pages/VaultPage"), "VaultPage");
 const AboutPage = lazyPage(() => import("./pages/AboutPage"), "AboutPage");
+const PersonasPage = lazyPage(() => import("./pages/PersonasPage"), "PersonasPage");
+const PersonasSettingsPage = lazyPage(() => import("./pages/PersonasSettingsPage"), "PersonasSettingsPage");
 
 /**
  * Records the current page so a reclaimed window can boot straight back into
@@ -106,6 +111,7 @@ function PageFallback() {
 }
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const t = useT();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
   const { workspaces, isLoading: wsLoading, isError, refetch } = useWorkspace();
 
@@ -126,14 +132,14 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4">
         <p className="text-sm text-[var(--color-text-secondary)]">
-          Failed to load workspaces. Please try again.
+          {t("common.error.failedToLoadWorkspacesPleaseTryAgain")}
         </p>
         <button
           onClick={() => refetch()}
           className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
-          Retry
+          {t("common.retry")}
         </button>
       </div>
     );
@@ -203,7 +209,14 @@ function AppRoutes() {
       <Route path="/duplicates" element={<ProtectedPage><DuplicatesPage /></ProtectedPage>} />
       <Route path="/integrations" element={<ProtectedPage><IntegrationsPage /></ProtectedPage>} />
       <Route path="/map" element={<ProtectedPage><MapPage /></ProtectedPage>} />
+      {/* Personas (face grouping, on this device): the first run until it is ready, then the people. */}
+      <Route path="/personas" element={<ProtectedPage><PersonasPage /></ProtectedPage>} />
+      {/* This member's own Personas settings (not workspace Settings). */}
+      <Route path="/personas/settings" element={<ProtectedPage><PersonasSettingsPage /></ProtectedPage>} />
+      <Route path="/personas/:personaId" element={<ProtectedPage><PersonasPage /></ProtectedPage>} />
       <Route path="/editor/:fileId" element={<ProtectedBarePage><EditorPage /></ProtectedBarePage>} />
+      {/* Markdown and plain text. Office documents keep /editor (ONLYOFFICE). */}
+      <Route path="/text-editor/:fileId" element={<ProtectedBarePage><TextEditorPage /></ProtectedBarePage>} />
       <Route path="/lan-transfer" element={<ProtectedPage><LanTransferPage /></ProtectedPage>} />
       <Route path="/vault" element={<ProtectedPage><VaultPage /></ProtectedPage>} />
       <Route path="/workspaces" element={<ProtectedPage><WorkspaceDashboardPage /></ProtectedPage>} />
@@ -220,6 +233,9 @@ function AppRoutes() {
 }
 
 export function App() {
+  // Trackpad pinch zooms the interface, in every window and on every screen,
+  // signed in or not (lib/pinch-zoom.ts).
+  usePinchZoom();
   return (
     <QueryClientProvider client={queryClient}>
       <HashRouter>
@@ -236,21 +252,14 @@ export function App() {
           {/* Backstop for everything the per-page boundary cannot reach: the
               bare pages (editor, login, onboarding) and any throw from the
               shell itself. Without one, those still take the window white. */}
-          <ErrorBoundary where="the app">
+          <ErrorBoundary where="the app" surface="app">
             <Suspense fallback={<PageFallback />}>
               <AppRoutes />
             </Suspense>
           </ErrorBoundary>
           </WorkspaceProvider>
           </MaintenanceGate>
-          <Toaster
-            position="bottom-right"
-            toastOptions={{
-              style: {
-                fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-              },
-            }}
-          />
+          <AppToaster />
         </AuthProvider>
       </HashRouter>
     </QueryClientProvider>

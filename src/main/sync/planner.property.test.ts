@@ -188,3 +188,49 @@ test("P5 push-safe is genuinely append-only: the server never loses a file it ha
     }
   }
 });
+
+test("P7 no lost edits under concurrent saves: every content ever written locally survives somewhere", () => {
+  // The real engine executes a plan minutes after making it. The simulator
+  // now models a save landing between the two (Tasks D1/D2 in the spec) and
+  // the executors' last-moment re-checks. The property: at the fixed point,
+  // every content string that was ever on the local disk is on the local
+  // disk, on the server, or named in a conflict. Nothing is silently gone.
+  for (const seed of seeds()) {
+    for (const strategy of ["keep-both", "last-write-wins"] as Strategy[]) {
+      const world = build(seed, strategy);
+      const race = makeRng(seed * 7919);
+      let rounds = 0;
+      for (; rounds < 12; rounds++) {
+        const views = world.views();
+        const ops = filterOpsForMode(
+          plan({ local: views.local, remote: views.remote, base: views.base, conflictStrategy: strategy }),
+          "two-way",
+        );
+        if (ops.length === 0 || ops.every((o) => o.kind === "conflict")) break;
+        try {
+          world.executeOps(ops, race);
+        } catch (err: any) {
+          assert.fail(`seed ${seed} ${strategy}: ${err.message}`);
+        }
+      }
+      const survivors = new Set<string>([
+        ...world.localSnapshot().values(),
+        ...world.remoteSnapshot().values(),
+        ...world.conflictContents,
+        ...world.acknowledgedLossContents,
+      ]);
+      for (const content of world.racedContents) {
+        assert.ok(!world.acknowledgedLossContents.has(content),
+          `seed ${seed} ${strategy}: a raced save ${content} was overwritten as if the planner had seen it`);
+      }
+      for (const content of world.everWritten) {
+        if (strategy === "keep-both") {
+          assert.ok(survivors.has(content) && !world.acknowledgedLossContents.has(content),
+            `seed ${seed}: keep-both lost or overwrote local content ${content}`);
+        } else {
+          assert.ok(survivors.has(content), `seed ${seed}: last-write-wins lost ${content} without recording it`);
+        }
+      }
+    }
+  }
+});

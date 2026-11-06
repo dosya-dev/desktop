@@ -2,6 +2,10 @@ import { app, Tray, Menu, nativeImage, shell } from "electron";
 import { join } from "path";
 import { markQuitting } from "./quit-state";
 import { summarizeSyncStatus } from "./sync-status-summary";
+import { currentDir, onMainLocaleChange, tMain as t } from "./i18n";
+import { trayFolderName, trayPairLabel } from "./tray-labels";
+import { mayShowDefaultName, pairFolderLabel, rootPairIds } from "./sync-pair-label";
+import { loadConfig } from "./sync/config";
 import type { SyncEngineHandle } from "./sync/engine-host";
 import type { SyncStatus } from "./sync/types";
 
@@ -41,6 +45,32 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
   tray = new Tray(icon);
   tray.setToolTip("dosya");
 
+  // Pairs on a workspace root, from the pair config (the status does not say),
+  // so their stored default name "Root" shows in the chosen language. Read
+  // only when a pair carries that name, and again when the pair set changes.
+  let rootIds = new Set<string>();
+  let rootIdsFor = "";
+  const refreshRootIds = (status: SyncStatus): void => {
+    const candidates = status.pairs.filter(mayShowDefaultName).map((p) => p.pairId).sort().join("\n");
+    if (candidates === rootIdsFor) return;
+    rootIdsFor = candidates;
+    if (!candidates) {
+      rootIds = new Set();
+      return;
+    }
+    loadConfig()
+      .then((cfg) => {
+        if (rootIdsFor !== candidates) return;
+        rootIds = rootPairIds(cfg.pairs);
+        buildMenu(latestStatus);
+      })
+      .catch(() => {
+        // Unreadable config: the names stay as stored.
+      });
+  };
+  const folderLabel = (p: { pairId: string; remoteFolderName: string }): string =>
+    pairFolderLabel(p.remoteFolderName, rootIds.has(p.pairId), t);
+
   function buildMenu(syncStatus?: SyncStatus) {
     const syncItems: Electron.MenuItemConstructorOptions[] = [];
 
@@ -52,26 +82,26 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
       // stop, not a failure - it reads "Paused", never as an error.
       const stateLabel = (status: string): { icon: string; text: string } => {
         switch (status) {
-          case "idle": return { icon: "✓", text: "Synced" };
-          case "syncing": return { icon: "⟳", text: "Syncing…" };
-          case "paused": return { icon: "⏸", text: "Paused" };
-          case "error": return { icon: "⚠", text: "Error" };
-          case "rate-limited": return { icon: "⏳", text: "Waiting" };
-          case "offline": return { icon: "⚠", text: "Offline" };
-          case "needs-confirmation": return { icon: "⚠", text: "Needs attention" };
+          case "idle": return { icon: "✓", text: t("common.status.synced") };
+          case "syncing": return { icon: "⟳", text: t("common.status.syncing") };
+          case "paused": return { icon: "⏸", text: t("common.status.paused") };
+          case "error": return { icon: "⚠", text: t("common.status.error") };
+          case "rate-limited": return { icon: "⏳", text: t("common.status.waiting") };
+          case "offline": return { icon: "⚠", text: t("common.status.offline") };
+          case "needs-confirmation": return { icon: "⚠", text: t("common.status.needsAttention") };
           // Mac App Store builds only: macOS revoked the sandbox grant for
           // this folder. Same icon family as "needs attention" - it is
           // waiting on the user, not a transient error - but its own label
           // so "Reselect" (added with the rest of the reselect UI) reads as
           // the obvious next step rather than a vague "attention".
-          case "needs-permission": return { icon: "⚠", text: "Needs permission" };
+          case "needs-permission": return { icon: "⚠", text: t("common.status.needsPermission") };
           default: return { icon: "•", text: "" };
         }
       };
 
-      const summary = summarizeSyncStatus(syncStatus);
+      const summary = summarizeSyncStatus(syncStatus, t);
 
-      syncItems.push({ label: `Sync: ${summary}`, enabled: false });
+      syncItems.push({ label: t("tray.label.syncSummary", { summary }), enabled: false });
 
       // A platform switch paused this surface - show the team's message
       // (rt.errorMessage, set by SyncEngine.setMaintenance) if there is one,
@@ -92,7 +122,7 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
       for (const pair of pairs) {
         const { icon, text } = stateLabel(pair.status);
         syncItems.push({
-          label: `  ${icon} ${pair.workspaceName}/${pair.remoteFolderName}${text ? ` - ${text}` : ""}`,
+          label: trayPairLabel(icon, pair.workspaceName, folderLabel(pair), text, currentDir()),
           enabled: false,
         });
       }
@@ -102,19 +132,19 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
       // Pause / Resume
       if (syncStatus.globalPaused) {
         syncItems.push({
-          label: "Resume Sync",
+          label: t("common.action.resumeSync"),
           click: () => syncEngine?.resumeAll(),
         });
       } else {
         syncItems.push({
-          label: "Pause Sync",
+          label: t("common.action.pauseSync"),
           click: () => syncEngine?.pauseAll(),
         });
       }
 
       // Sync All Now
       syncItems.push({
-        label: "Sync All Now",
+        label: t("common.action.syncAllNow"),
         click: () => {
           for (const pair of syncStatus.pairs) {
             syncEngine?.syncNow(pair.pairId);
@@ -127,14 +157,14 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
       // Open sync folders
       if (syncStatus.pairs.length === 1) {
         syncItems.push({
-          label: "Open Sync Folder",
+          label: t("common.action.openSyncFolder"),
           click: () => shell.openPath(syncStatus.pairs[0].localPath),
         });
       } else {
         syncItems.push({
-          label: "Open Sync Folder",
+          label: t("common.action.openSyncFolder"),
           submenu: syncStatus.pairs.map((p) => ({
-            label: p.remoteFolderName,
+            label: trayFolderName(folderLabel(p), currentDir()),
             click: () => shell.openPath(p.localPath),
           })),
         });
@@ -145,13 +175,13 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
 
     const menu = Menu.buildFromTemplate([
       {
-        label: "Open dosya",
+        label: t("tray.action.openDosya"),
         click: () => win.showWindow(),
       },
       { type: "separator" },
       ...syncItems,
       {
-        label: "Upload File...",
+        label: t("tray.action.uploadFile"),
         click: () => {
           win.showWindow();
           win.sendToWindow("navigate", "/upload");
@@ -159,7 +189,7 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
       },
       { type: "separator" },
       {
-        label: "Quit dosya",
+        label: t("tray.action.quitDosya"),
         click: () => {
           markQuitting();
           app.quit();
@@ -173,12 +203,17 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
     // so a pair sitting in "error" can never be reported here as "All synced"
     // just because nothing is actively transferring.
     if (syncStatus) {
-      tray?.setToolTip(`dosya - ${summarizeSyncStatus(syncStatus)}`);
+      tray?.setToolTip(t("tray.label.dosyaSummary", { summary: summarizeSyncStatus(syncStatus, t) }));
     }
   }
 
+  // The last status the menu was built from, so a language change can
+  // rebuild the same menu in the new language.
+  let latestStatus: SyncStatus | undefined;
+
   // Initial menu
   buildMenu();
+  onMainLocaleChange(() => buildMenu(latestStatus));
 
   // Rebuild on sync status changes, throttled rather than debounced. A trailing
   // debounce reset its timer on every event, so during a large sync - exactly
@@ -189,10 +224,10 @@ export function createTray(win: TrayWindowHandles, syncEngine?: SyncEngineHandle
     const MENU_THROTTLE_MS = 1000;
     let lastBuild = 0;
     let trailingTimer: ReturnType<typeof setTimeout> | null = null;
-    let latestStatus: SyncStatus | undefined;
 
     syncEngine.on("status-changed", (status: SyncStatus) => {
       latestStatus = status;
+      refreshRootIds(status);
       const since = Date.now() - lastBuild;
       if (since >= MENU_THROTTLE_MS) {
         lastBuild = Date.now();

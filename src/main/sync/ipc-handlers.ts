@@ -7,6 +7,7 @@ import { hasPair } from "./status-assembly";
 import { currentDistribution } from "../distribution";
 import { shouldReceiveStatus } from "./broadcast-targets";
 import { makeIpcGate, rendererOrigin } from "../ipc-sender";
+import { tMain } from "../i18n";
 
 const VALID_SYNC_MODES: SyncMode[] = ["two-way", "push", "push-safe", "pull", "pull-safe"];
 const VALID_CONFLICT_STRATEGIES = ["last-write-wins", "keep-both"];
@@ -151,7 +152,7 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     }
     const result = await dialog.showOpenDialog(win, {
       properties: ["openDirectory", "createDirectory"],
-      title: "Select sync folder",
+      title: tMain("sync.heading.selectSyncFolder"),
       ...(defaultPath ? { defaultPath } : {}),
       // Sandboxed builds only. macOS hands back a token that reopens this exact
       // grant after a relaunch; a saved path alone is inert in the sandbox.

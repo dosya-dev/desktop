@@ -26,11 +26,16 @@ import type { SyncFileRecord } from "./types";
  * | upload-update        | remote row exists; path exists locally        | unchanged        | content := local, version++  | row := local + new remote  |
  * | check-content        | base row exists                              | unchanged        | if content differs: as above | differs? as above : mtime  |
  * | download-new         | remote row exists                            | content := remote| unchanged                    | row inserted               |
+ * |                      | - a file now at the path that base does not vouch for is kept, conflict recorded |  |                    |                            |
  * | download-update      | remote row exists AND (base row absent =      | content := remote| unchanged                    | row := remote              |
  * |                      | adoption, or local matches base exactly)      |                  |                              |                            |
  * |                      | - either exception needs last-write-wins      |                  |                              |                            |
+ * |                      | - a RACED edit (re-check at rename) is never overwritten: conflict recorded, file kept |  |                |                            |
+ * |                      | - the re-check baseline is the local state the plan saw (not the base row), so a  |  |                |                            |
+ * |                      |   planned last-write-wins overwrite lands; an empty path is filled, no conflict  |   |                |                            |
  * | delete-remote        | base row exists AND path absent locally (I1) | unchanged        | row removed                  | row removed                |
  * | delete-local         | base row exists AND local matches base (I1)  | file removed     | unchanged                    | row removed                |
+ * |                      | - a RACED edit (last-moment stat) keeps the file, op is skipped |   |                              |                            |
  * | move-local           | base row exists                              | renamed          | unchanged                    | row.localPath := new path  |
  * | move-remote          | base row exists; NO bytes may move           | unchanged        | row.relPath := new path      | row.localPath := new path  |
  * | conflict             | none                                         | unchanged        | unchanged                    | unchanged (recorded only)  |
@@ -83,6 +88,14 @@ export class SimWorld {
   /** Overwrites of locally-changed bytes - legal ONLY under last-write-wins. */
   readonly acknowledgedLosses: string[] = [];
   readonly conflicts: string[] = [];
+  /** Every local content string that ever existed, from history or a race. */
+  readonly everWritten = new Set<string>();
+  /** Local contents preserved by a conflict record (keep-both) rather than overwritten. */
+  readonly conflictContents = new Set<string>();
+  /** Local contents overwritten under last-write-wins, by content, for P6. */
+  readonly acknowledgedLossContents = new Set<string>();
+  /** Contents written by a race (a save the planner never saw). Never a legal overwrite. */
+  readonly racedContents = new Set<string>();
 
   // Declared explicitly: `node --test` strips types without transforming,
   // and constructor parameter properties are unsupported there.
@@ -126,6 +139,17 @@ export class SimWorld {
 
   // ── Random history generation ───────────────────────────────────
 
+  /**
+   * The user themselves overwrote or deleted this file during the history.
+   * That is their own choice, not a loss the engine could cause, so the old
+   * content stops counting as "written and owed a home" for P6. (Contents are
+   * unique per tick, so this never un-tracks anyone else's bytes.)
+   */
+  private discardedByUser(relPath: string): void {
+    const old = this.local.get(relPath);
+    if (old) this.everWritten.delete(old.content);
+  }
+
   applyRandomEvents(rng: () => number, count: number, pool = ["f0", "f1", "f2", "f3", "f4"]): void {
     const pick = () => pool[Math.floor(rng() * pool.length)];
     for (let i = 0; i < count; i++) {
@@ -133,12 +157,19 @@ export class SimWorld {
       const roll = Math.floor(rng() * 7);
       switch (roll) {
         case 0: // create or overwrite locally
+          this.discardedByUser(name);
           this.local.set(name, { content: `L${this.advance()}`, mtimeMs: this.tick * 1000 });
+          this.everWritten.add(this.local.get(name)!.content);
           break;
         case 1: // edit locally (only if present)
-          if (this.local.has(name)) this.local.set(name, { content: `L${this.advance()}`, mtimeMs: this.tick * 1000 });
+          if (this.local.has(name)) {
+            this.discardedByUser(name);
+            this.local.set(name, { content: `L${this.advance()}`, mtimeMs: this.tick * 1000 });
+            this.everWritten.add(this.local.get(name)!.content);
+          }
           break;
         case 2: // delete locally
+          this.discardedByUser(name);
           this.local.delete(name);
           break;
         case 3: { // create remotely
@@ -201,8 +232,28 @@ export class SimWorld {
     });
   }
 
-  executeOps(ops: PlanOp[]): void {
+  /** A save landing between planning and execution. */
+  private raceWrite(relPath: string): void {
+    const content = `X${this.advance()}`;
+    // The user's own save replaced the bytes the plan saw; the engine never
+    // held those, so they are not its to preserve (same rule as history).
+    this.discardedByUser(relPath);
+    this.local.set(relPath, { content, mtimeMs: this.tick * 1000 });
+    this.everWritten.add(content);
+    this.racedContents.add(content);
+  }
+
+  executeOps(ops: PlanOp[], race?: () => number): void {
     for (const op of ops) {
+      const raced = race !== undefined
+        && (
+          ((op.kind === "download-update" || op.kind === "upload-update" || op.kind === "check-content" || op.kind === "delete-local")
+            && this.local.has(op.relPath))
+          // The user creates a file where the plan expected none.
+          || (op.kind === "download-new" && !this.local.has(op.relPath))
+        )
+        && race() < 0.3;
+      if (raced) this.raceWrite(op.relPath);
       switch (op.kind) {
         case "create-remote-folder":
         case "create-local-folder":
@@ -261,6 +312,18 @@ export class SimWorld {
         case "download-new": {
           const r = this.remote.get(op.remoteId);
           if (!r) this.fail(op, "no remote file");
+          // The engine's download-new worker re-checks at rename time: a file
+          // now sitting where the plan expected none (the user created it
+          // since) is kept and surfaced as a conflict, never renamed over.
+          const there = this.local.get(r.relPath);
+          if (there) {
+            const rowHere = this.base.get(r.remoteId);
+            if (!(rowHere && this.localMatchesBase(r.relPath, rowHere))) {
+              this.conflicts.push(r.relPath);
+              this.conflictContents.add(there.content);
+              break;
+            }
+          }
           const mtime = this.advance() * 1000;
           this.local.set(r.relPath, { content: r.content, mtimeMs: mtime });
           const stale = this.baseRowFor(r.relPath);
@@ -278,11 +341,22 @@ export class SimWorld {
           // all (case 1b adoption) - is legal ONLY when the user chose
           // last-write-wins. Everything else must reach the user as a conflict.
           const vouchedFor = row !== undefined && this.localMatchesBase(op.relPath, row);
-          if (!vouchedFor && this.local.has(op.relPath)) {
-            if (this.strategy !== "last-write-wins") {
-              this.fail(op, "would overwrite local bytes the base tree does not vouch for (I1)");
+          const l = this.local.get(op.relPath);
+          if (!vouchedFor && l) {
+            if (raced || this.strategy !== "last-write-wins") {
+              // Task D1: the executor re-checks at the last moment and raises
+              // a conflict instead of renaming over the edit. Under
+              // last-write-wins a PLANNED overwrite is legal, but a race is
+              // still refused: the planner never saw those bytes.
+              if (!raced && this.strategy !== "last-write-wins") {
+                this.fail(op, "would overwrite local bytes the base tree does not vouch for (I1)");
+              }
+              this.conflicts.push(op.relPath);
+              this.conflictContents.add(l.content);
+              break;
             }
             this.acknowledgedLosses.push(op.relPath);
+            this.acknowledgedLossContents.add(l.content);
           }
           const mtime = this.advance() * 1000;
           this.local.set(r.relPath, { content: r.content, mtimeMs: mtime });
@@ -303,6 +377,7 @@ export class SimWorld {
           const row = this.base.get(op.baseRemoteId);
           if (!row) this.fail(op, "no base row");
           if (!this.localMatchesBase(op.relPath, row)) {
+            if (raced) break; // the engine's last-moment stat sees the edit and keeps the file
             this.fail(op, "would delete locally-changed bytes (I1)");
           }
           this.local.delete(op.relPath);

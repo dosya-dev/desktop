@@ -1,5 +1,7 @@
 import { formatBytes, formatRelative } from "./format";
 import { EXTENSION_FAMILY, FILE_FAMILY, SWATCH_BY_NAME } from "./palette";
+import { tl } from "./locale-state";
+import type { MessageKey } from "../../i18n/keys";
 
 // File-type detection + small formatting helpers used by the files surfaces.
 // The colours come from the shared palette, so this no longer has to be kept in sync
@@ -22,7 +24,7 @@ export function colorFor(name: string, scheme: "light" | "dark" = "light"): stri
 
 export function labelFor(name: string): string {
   const e = extOf(name);
-  return e ? e.toUpperCase() : "FILE";
+  return e ? e.toUpperCase() : tl("common.label.fileUppercase");
 }
 
 /**
@@ -33,15 +35,15 @@ export function labelFor(name: string): string {
  * nothing, and the raw MIME type it replaced was unreadable at any width.
  */
 export function kindLabel(name: string): string {
-  if (isPdf(name)) return "PDF";
-  if (isImage(name)) return "Image";
-  if (isVideo(name)) return "Video";
-  if (isAudio(name)) return "Audio";
-  if (isBook(name)) return "Book";
-  if (isVcard(name)) return "Contact";
-  if (isOfficeFile(name)) return "Document";
-  if (isText(name)) return "Text";
-  return "File";
+  if (isPdf(name)) return tl("common.label.pdf");
+  if (isImage(name)) return tl("common.label.image");
+  if (isVideo(name)) return tl("common.label.videoTitleCase");
+  if (isAudio(name)) return tl("common.label.audio");
+  if (isBook(name)) return tl("common.label.book");
+  if (isVcard(name)) return tl("common.label.contact");
+  if (isOfficeFile(name)) return tl("common.label.document");
+  if (isText(name)) return tl("common.label.text");
+  return tl("common.label.fileTitleCase");
 }
 
 // avif is Chromium-native. tiff/dng are NOT here on purpose: Chromium does
@@ -114,6 +116,17 @@ export function isVcard(name: string): boolean {
   return e === "vcf" || e === "vcard";
 }
 
+// Same list as packages/shared/src/files/preview-formats.ts CALENDAR_EXTS.
+// A text/calendar mime counts only for a name with no extension (an invite
+// saved as "invite"): a mime never overrides an extension, and the viewer
+// shows the text when the file holds no events.
+const CALENDAR_EXTS = new Set(["ics", "ical", "icalendar"]);
+export function isCalendar(name: string, mime?: string | null): boolean {
+  const ext = extOf(name);
+  if (ext) return CALENDAR_EXTS.has(ext);
+  return (mime ?? "").split(";")[0].trim().toLowerCase() === "text/calendar";
+}
+
 const OFFICE_EXTS = new Set([
   "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "odp", "rtf", "csv",
 ]);
@@ -141,13 +154,16 @@ export function initials(name: string | null | undefined): string {
   return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase() || "?";
 }
 
-const ORIGIN_LABELS: Record<string, string> = {
-  web: "Web", desktop: "Desktop", mobile: "Mobile", cli: "CLI",
-  webdav: "WebDAV", s3: "S3", ftp: "FTP", import: "Import",
+// Catalog keys for the words; product and protocol names stay as they are.
+const ORIGIN_LABELS: Record<string, MessageKey | { name: string }> = {
+  web: "common.label.web", desktop: "common.label.desktop", mobile: "common.label.mobileTitleCase", cli: { name: "CLI" },
+  webdav: { name: "WebDAV" }, s3: { name: "S3" }, ftp: { name: "FTP" }, import: "common.label.import",
 };
 
 export function originLabel(origin: string | null | undefined): string {
-  return (origin && ORIGIN_LABELS[origin]) || "-";
+  const label = origin ? ORIGIN_LABELS[origin] : undefined;
+  if (!label) return "-";
+  return typeof label === "string" ? tl(label) : label.name;
 }
 
 // "Hidden" is never binary from the viewer's own perspective - if they can
@@ -157,19 +173,20 @@ export function originLabel(origin: string | null | undefined): string {
 // apps/web/src/lib/helpers.ts's hiddenTitle.
 export function hiddenTitle(hiddenMode: string | null | undefined): string {
   return hiddenMode === "everyone"
-    ? "Hidden from everyone. Not included in share links."
-    : "Hidden from some people. Not included in share links.";
+    ? tl("common.label.hiddenFromEveryoneNotIncludedInShareLinks")
+    : tl("common.label.hiddenFromSomePeopleNotIncludedInShareLinks");
 }
 
-const REGION_LABELS: Record<string, string> = {
-  "us-east-1": "US East", "us-west-1": "US West", "us-west-2": "US West 2",
-  "eu-west-1": "EU West", "eu-central-1": "EU Central",
-  "ap-southeast-1": "Singapore", "ap-southeast-2": "Sydney", "ap-northeast-1": "Tokyo",
-  "sa-east-1": "Sao Paulo", "me-south-1": "Bahrain",
-  "af-south-1": "Cape Town", "auto": "Auto",
+const REGION_LABELS: Record<string, MessageKey> = {
+  "us-east-1": "common.label.usEast", "us-west-1": "common.label.usWest", "us-west-2": "common.label.usWest2",
+  "eu-west-1": "common.label.euWest", "eu-central-1": "common.label.euCentral",
+  "ap-southeast-1": "common.label.singapore", "ap-southeast-2": "common.label.sydney", "ap-northeast-1": "common.label.tokyo",
+  "sa-east-1": "common.label.saoPaulo", "me-south-1": "common.label.bahrain",
+  "af-south-1": "common.label.capeTown", "auto": "common.label.auto",
 };
 
 export function regionLabel(code: string): string {
-  if (code === "multi") return "Multiple regions";
-  return REGION_LABELS[code] ?? code;
+  if (code === "multi") return tl("common.label.multipleRegions");
+  const key = REGION_LABELS[code];
+  return key ? tl(key) : code;
 }

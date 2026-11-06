@@ -67,7 +67,13 @@ const callHost: HostCall = (method: HostMethod, args: unknown[]) =>
  */
 function buildHandlers(e: SyncEngine): Record<EngineRpcMethod, (args: unknown[]) => unknown> {
   return {
-    start: () => e.start(),
+    // Replies whether the engine actually started. start() returns quietly
+    // when there is no session yet (app launched signed out), and the host
+    // must not mistake that for running - see engineStartedFromReply().
+    start: async () => {
+      await e.start();
+      return e.isRunning();
+    },
     stop: () => e.stop(),
     getConfig: () => e.getConfig(),
     saveGlobalConfig: (a) => e.saveGlobalConfig(a[0] as Partial<SyncConfig>),

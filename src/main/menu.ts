@@ -10,6 +10,7 @@ import {
   type TemplateItem,
 } from "./menu-template";
 import type { Distribution } from "./distribution";
+import { currentDir, currentLocale, onMainLocaleChange, tMain } from "./i18n";
 
 /**
  * The live application menu. The shape comes from menu-template.ts (pure,
@@ -57,22 +58,27 @@ export function createMenu(env: MenuEnv, dispatch: (action: MenuAction) => void)
     updateState: env.getUpdateState(),
     sync: env.getSync(),
     state,
+    t: tMain,
+    dir: currentDir(),
   });
 
   const build = () => Menu.buildFromTemplate(buildMenuTemplate(context()).map((i) => toElectron(i, dispatch)));
 
   // Replacing the application menu while one of its menus is open closes it
   // under the pointer, and the sync engine ticks often. Only install a new
-  // menu when its inputs actually changed.
+  // menu when its inputs actually changed. The locale is one of them: `t`
+  // does not survive JSON, so it rides in the key by name.
   let installed = "";
   const rebuild = () => {
-    const key = JSON.stringify(context());
+    const key = JSON.stringify([currentLocale(), context()]);
     if (key === installed) return;
     installed = key;
     Menu.setApplicationMenu(build());
   };
 
   rebuild();
+  // A new language changes the key above, so this always installs a menu.
+  onMainLocaleChange(() => rebuild());
 
   return {
     rebuild,

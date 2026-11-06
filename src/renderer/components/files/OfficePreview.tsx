@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Download, Loader2 } from "lucide-react";
 import { apiBase } from "@/lib/api-client";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "../../../i18n/keys";
 
 /**
  * Office documents render as the PDF the server converts them to, in the same
@@ -32,9 +34,15 @@ type State =
   | { kind: "ready"; url: string }
   | { kind: "too-large" }
   | { kind: "unsupported" }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: MessageKey };
 
-export function OfficePreview({ file, version }: { file: { id: string; name: string }; version?: number }) {
+export function OfficePreview({ file, version, onDownload }: {
+  file: { id: string; name: string };
+  version?: number;
+  /** Offered on every failure state, whose copy tells the user to download. */
+  onDownload?: () => void;
+}) {
+  const t = useT();
   const [state, setState] = useState<State>({ kind: "preparing" });
   const objectUrl = useRef<string | null>(null);
 
@@ -52,7 +60,7 @@ export function OfficePreview({ file, version }: { file: { id: string; name: str
         try {
           res = await fetch(url, { credentials: "include" });
         } catch {
-          if (!cancelled) setState({ kind: "failed", message: "Could not reach the server." });
+          if (!cancelled) setState({ kind: "failed", message: "common.error.couldNotReachTheServer" });
           return;
         }
         if (cancelled) return;
@@ -73,7 +81,7 @@ export function OfficePreview({ file, version }: { file: { id: string; name: str
           setState(
             body.code === "too_large"
               ? { kind: "too-large" }
-              : { kind: "failed", message: "Could not prepare a preview." },
+              : { kind: "failed", message: "common.error.couldNotPrepareAPreview" },
           );
           return;
         }
@@ -81,13 +89,13 @@ export function OfficePreview({ file, version }: { file: { id: string; name: str
           setState({ kind: "unsupported" });
           return;
         }
-        setState({ kind: "failed", message: "Could not prepare a preview for this file." });
+        setState({ kind: "failed", message: "common.error.couldNotPrepareAPreviewForThisFile" });
         return;
       }
       if (!cancelled) {
         setState({
           kind: "failed",
-          message: "This preview is taking too long. Download the file instead.",
+          message: "common.error.thisPreviewIsTakingTooLongDownloadTheFile",
         });
       }
     })();
@@ -103,20 +111,22 @@ export function OfficePreview({ file, version }: { file: { id: string; name: str
 
   if (state.kind === "ready") {
     return (
-      <iframe
-        data-testid="office-frame"
-        src={`${state.url}#toolbar=1`}
-        className="h-full w-full rounded-md border-none bg-white"
-        title={`Preview: ${file.name}`}
-      />
+      <div dir="ltr" className="h-full w-full">
+        <iframe
+          data-testid="office-frame"
+          src={`${state.url}#toolbar=1`}
+          className="h-full w-full rounded-md border-none bg-white"
+          title={t("common.tooltip.previewFileName", { fileName: file.name })}
+        />
+      </div>
     );
   }
 
   const copy =
-    state.kind === "preparing" ? "Preparing preview…"
-    : state.kind === "too-large" ? "This file is too large to preview. Download it instead."
-    : state.kind === "unsupported" ? "This file type cannot be previewed. Download it instead."
-    : state.message;
+    state.kind === "preparing" ? t("common.status.preparingPreview")
+    : state.kind === "too-large" ? t("common.error.thisFileIsTooLargeToPreviewDownloadIt")
+    : state.kind === "unsupported" ? t("common.error.thisFileTypeCannotBePreviewedDownloadItInstead")
+    : t(state.message);
 
   return (
     <div
@@ -125,6 +135,17 @@ export function OfficePreview({ file, version }: { file: { id: string; name: str
     >
       {state.kind === "preparing" && <Loader2 size={18} className="animate-spin" />}
       <p className="max-w-xs text-center">{copy}</p>
+      {state.kind !== "preparing" && onDownload && (
+        <button
+          type="button"
+          data-testid="office-download"
+          onClick={onDownload}
+          className="flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs font-medium text-[var(--color-text)] hover:bg-[var(--color-bg-tertiary)]"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          <Download size={14} /> {t("common.action.download")}
+        </button>
+      )}
     </div>
   );
 }

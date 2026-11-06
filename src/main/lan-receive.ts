@@ -3,6 +3,7 @@ import { basename, join } from "path";
 import { randomUUID } from "crypto";
 import { createRequire } from "node:module";
 import { longPath } from "./sync/paths";
+import { tMain as t } from "./i18n";
 
 // No top-level `import { app, dialog } from "electron"` here on purpose:
 // outside the Electron runtime that named import throws ("electron" is a
@@ -71,17 +72,17 @@ export async function openSink(
   deps: LanOpenDeps = realLanOpenDeps(),
 ): Promise<LanOpenResult> {
   if (typeof name !== "string" || name.length === 0 || name.length > 500) {
-    throw new Error("Invalid file name");
+    throw new Error(t("common.error.invalidFileName"));
   }
   const declared = typeof size === "number" && Number.isFinite(size) && size >= 0 ? size : 0;
-  if (declared > MAX_FILE_BYTES) throw new Error("File too large");
-  if (sinks.size >= MAX_OPEN_SINKS) throw new Error("Too many transfers in progress");
+  if (declared > MAX_FILE_BYTES) throw new Error(t("lan-transfer.error.fileTooLarge"));
+  if (sinks.size >= MAX_OPEN_SINKS) throw new Error(t("lan-transfer.error.tooManyTransfersInProgress"));
 
   // Reduce to a leaf name, then strip anything that could still steer a path.
   const safeName = basename(name).replace(/[/\\]/g, "_").replace(/^\.+/, "") || "received-file";
 
   const { canceled, filePath } = await deps.showSaveDialog({
-    title: "Save file from the other device",
+    title: t("lan-transfer.window.saveFileFromTheOtherDevice"),
     defaultPath: join(deps.downloadsDir(), safeName),
   });
   if (canceled || !filePath) return { ok: false };
@@ -101,10 +102,10 @@ export async function writeSink(id: unknown, bytes: unknown): Promise<void> {
     bytes instanceof Uint8Array ? bytes
     : bytes instanceof ArrayBuffer ? new Uint8Array(bytes)
     : null;
-  if (!buf) throw new Error("Invalid chunk");
+  if (!buf) throw new Error(t("common.error.invalidChunk"));
   if (sink.written + buf.byteLength > sink.limit) {
     await destroySink(id as string, true);
-    throw new Error("Transfer exceeded the size the sender declared");
+    throw new Error(t("lan-transfer.error.transferExceededTheSizeTheSenderDeclared"));
   }
   // A failed write must END the transfer, not just report an error for this
   // one call. Without this, the sink stayed open and valid: the batch was
@@ -119,10 +120,12 @@ export async function writeSink(id: unknown, bytes: unknown): Promise<void> {
     await sink.handle.write(buf);
   } catch (err) {
     await destroySink(id as string, true);
+    // The byte count goes in as text: a raw number, never locale-grouped.
     throw new Error(
-      `Write failed after ${sink.written} bytes; the partial file was removed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      t("lan-transfer.error.writeFailedAfterWrittenBytesThePartialFileWas", {
+        written: String(sink.written),
+        message: err instanceof Error ? err.message : String(err),
+      }),
     );
   }
   sink.written += buf.byteLength;
@@ -153,9 +156,9 @@ export async function abortAllSinks(): Promise<void> {
 }
 
 function requireSink(id: unknown): Sink {
-  if (typeof id !== "string") throw new Error("Invalid transfer id");
+  if (typeof id !== "string") throw new Error(t("lan-transfer.error.invalidTransferId"));
   const sink = sinks.get(id);
-  if (!sink) throw new Error("No such transfer");
+  if (!sink) throw new Error(t("lan-transfer.error.noSuchTransfer"));
   return sink;
 }
 

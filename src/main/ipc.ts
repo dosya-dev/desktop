@@ -24,6 +24,9 @@ import { detectDistribution } from "./distribution";
 import { clearSessionCookie } from "./session";
 import { isSessionCookieName, sessionCookieHeader } from "./session-cookie";
 import { buildDownloadUrl } from "./download-url";
+import { tMain as t } from "./i18n";
+import { osDirection } from "./os-direction";
+import { clampZoom, createZoomSaver } from "./zoom";
 import { openSink, writeSink, closeSink, abortSink } from "./lan-receive";
 import { openVaultSink, writeVaultSink, closeVaultSink, abortVaultSink } from "./vault-save";
 import {
@@ -136,6 +139,14 @@ export function registerIpcHandlers(apiBase: string): void {
     () => (process.env.NODE_ENV === "test" && process.env.DOSYA_E2E_PLATFORM) || process.platform,
   );
 
+  // The direction of the OS UI (not the app's language): the side macOS draws
+  // the traffic lights on. See os-direction.ts for why app.getLocale().
+  // DOSYA_E2E_OS_DIR forces it under the test runner only.
+  handle(
+    "app:get-os-dir",
+    () => (process.env.NODE_ENV === "test" && process.env.DOSYA_E2E_OS_DIR === "rtl" ? "rtl" : osDirection(app.getLocale())),
+  );
+
   // ── Launch at login ──────────────────────────────────────────────
   // macOS honours openAsHidden and reports it back as wasOpenedAsHidden;
   // Windows has no hidden-launch flag, so the login item carries --hidden and
@@ -168,6 +179,19 @@ export function registerIpcHandlers(apiBase: string): void {
     if (loginMode === "unsupported") return false;
     app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true, args: loginItemArgs, ...loginType });
     return launchAtLogin();
+  });
+
+  // ── Interface zoom (trackpad pinch, Profile > Appearance) ─────────
+  // The window that asks is the one zoomed; the factor is clamped here, the
+  // one place that decides the range, and returned so the caller sees what
+  // was applied. Saved once the gesture settles (main/zoom.ts).
+  const saveZoomSoon = createZoomSaver(app.getPath("userData"));
+  handle("app:get-zoom", (e) => e.sender.getZoomFactor());
+  handle("app:set-zoom", (e, factor: unknown) => {
+    const applied = clampZoom(factor);
+    e.sender.setZoomFactor(applied);
+    saveZoomSoon(applied);
+    return applied;
   });
 
   // ── Standard OS folders (for known-folder backup presets) ────────
@@ -226,9 +250,9 @@ export function registerIpcHandlers(apiBase: string): void {
   // failed report.
   handle("app:capture-window", async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    if (!win || win.isDestroyed()) throw new Error("No window to capture");
+    if (!win || win.isDestroyed()) throw new Error(t("native.error.noWindowToCapture"));
     const image = await win.webContents.capturePage();
-    if (image.isEmpty()) throw new Error("Window capture is empty");
+    if (image.isEmpty()) throw new Error(t("native.error.windowCaptureIsEmpty"));
     return new Uint8Array(image.toJPEG(85));
   });
 
@@ -357,16 +381,16 @@ export function registerIpcHandlers(apiBase: string): void {
     async (_event, { fileId, fileName }: { fileId: string; fileName: string }) => {
       // Validate inputs
       if (typeof fileId !== "string" || fileId.length === 0 || fileId.length > 200) {
-        throw new Error("Invalid fileId");
+        throw new Error(t("native.error.invalidFileId"));
       }
       if (typeof fileName !== "string" || fileName.length === 0 || fileName.length > 500) {
-        throw new Error("Invalid fileName");
+        throw new Error(t("native.error.invalidFileName"));
       }
 
       // Sanitize fileName: strip directory separators to prevent path traversal
       const safeName = basename(fileName).replace(/[/\\]/g, "_");
       if (!safeName || safeName === "." || safeName === "..") {
-        throw new Error("Invalid file name");
+        throw new Error(t("common.error.invalidFileName"));
       }
 
       // Download the file to a temp directory and open it with the system default app
@@ -378,14 +402,14 @@ export function registerIpcHandlers(apiBase: string): void {
       const resolvedPath = resolve(filePath);
       const resolvedTempDir = resolve(tempDir);
       if (!resolvedPath.startsWith(resolvedTempDir + sep) && resolvedPath !== resolvedTempDir) {
-        throw new Error("Invalid file path");
+        throw new Error(t("native.error.invalidFilePath"));
       }
 
       // Get session cookie
       const cookies = await session.defaultSession.cookies.get({ url: apiBase });
       const cookieHeader = sessionCookieHeader(cookies);
       if (!cookieHeader) {
-        throw new Error("Not authenticated");
+        throw new Error(t("native.error.notAuthenticated"));
       }
 
       const res = await fetch(`${apiBase}/api/files/${encodeURIComponent(fileId)}/download`, {
@@ -395,7 +419,7 @@ export function registerIpcHandlers(apiBase: string): void {
       });
 
       if (!res.ok) {
-        throw new Error(`Download failed: ${res.status}`);
+        throw new Error(t("native.error.downloadFailedStatus", { status: String(res.status) }));
       }
 
       // Explicit mode is defense in depth: the containing dir is already 0700,
@@ -410,7 +434,7 @@ export function registerIpcHandlers(apiBase: string): void {
       // ShellExecute, which backs openPath - prefixing would turn a
       // path-too-long failure into an unconditional one.
       const openErr = await shell.openPath(filePath);
-      if (openErr) throw new Error(`Could not open the file: ${openErr}`);
+      if (openErr) throw new Error(t("native.error.couldNotOpenTheFileOpenErr", { openErr }));
       return { ok: true };
     },
   );
@@ -429,27 +453,34 @@ export function registerIpcHandlers(apiBase: string): void {
       }: { fileId: string; fileName: string; version?: number; archiveEntryIndex?: number },
     ) => {
       if (typeof fileId !== "string" || fileId.length === 0 || fileId.length > 200) {
-        throw new Error("Invalid fileId");
+        throw new Error(t("native.error.invalidFileId"));
       }
       if (typeof fileName !== "string" || fileName.length === 0 || fileName.length > 500) {
-        throw new Error("Invalid fileName");
+        throw new Error(t("native.error.invalidFileName"));
       }
       if (version !== undefined && (!Number.isInteger(version) || version < 1 || version > 100000)) {
-        throw new Error("Invalid version");
+        throw new Error(t("native.error.invalidVersion"));
       }
       // Validated (and the URL decided) before the save dialog even opens, the
       // same discipline the checks above already follow - a malformed entry
       // index fails fast instead of prompting for a save location it will
       // never use.
-      const url = buildDownloadUrl(apiBase, { fileId, version, archiveEntryIndex });
+      // download-url.ts stays Electron- and catalog-free for node --test, so
+      // its one refusal is put into the chosen language here.
+      let url: string;
+      try {
+        url = buildDownloadUrl(apiBase, { fileId, version, archiveEntryIndex });
+      } catch {
+        throw new Error(t("native.error.invalidArchiveEntryIndex"));
+      }
 
       const safeName = basename(fileName).replace(/[/\\]/g, "_");
       if (!safeName || safeName === "." || safeName === "..") {
-        throw new Error("Invalid file name");
+        throw new Error(t("common.error.invalidFileName"));
       }
 
       const { canceled, filePath } = await dialog.showSaveDialog({
-        title: "Save file",
+        title: t("native.window.saveFile"),
         defaultPath: join(app.getPath("downloads"), safeName),
       });
       if (canceled || !filePath) return { ok: false, canceled: true };
@@ -457,7 +488,7 @@ export function registerIpcHandlers(apiBase: string): void {
       const cookies = await session.defaultSession.cookies.get({ url: apiBase });
       const cookieHeader = sessionCookieHeader(cookies);
       if (!cookieHeader) {
-        throw new Error("Not authenticated");
+        throw new Error(t("native.error.notAuthenticated"));
       }
 
       const res = await fetch(url, {
@@ -467,7 +498,7 @@ export function registerIpcHandlers(apiBase: string): void {
       });
 
       if (!res.ok) {
-        throw new Error(`Download failed: ${res.status}`);
+        throw new Error(t("native.error.downloadFailedStatus", { status: String(res.status) }));
       }
 
       const fileStream = createWriteStream(longPath(filePath));
@@ -480,24 +511,24 @@ export function registerIpcHandlers(apiBase: string): void {
     "archive:download",
     async (_event, { fileIds, folderIds }: { fileIds: string[]; folderIds: string[] }) => {
       if (!Array.isArray(fileIds) || !Array.isArray(folderIds) || (fileIds.length === 0 && folderIds.length === 0)) {
-        throw new Error("Nothing to download");
+        throw new Error(t("native.error.nothingToDownload"));
       }
       const { canceled, filePath } = await dialog.showSaveDialog({
-        title: "Save archive",
+        title: t("native.window.saveArchive"),
         defaultPath: join(app.getPath("downloads"), "dosya-download.zip"),
       });
       if (canceled || !filePath) return { ok: false, canceled: true };
 
       const cookies = await session.defaultSession.cookies.get({ url: apiBase });
       const cookieHeader = sessionCookieHeader(cookies);
-      if (!cookieHeader) throw new Error("Not authenticated");
+      if (!cookieHeader) throw new Error(t("native.error.notAuthenticated"));
 
       const res = await fetch(`${apiBase}/api/files/download-archive`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: cookieHeader },
         body: JSON.stringify({ file_ids: fileIds, folder_ids: folderIds }),
       });
-      if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+      if (!res.ok) throw new Error(t("native.error.downloadFailedStatus", { status: String(res.status) }));
 
       const fileStream = createWriteStream(longPath(filePath));
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
@@ -512,7 +543,7 @@ export function registerIpcHandlers(apiBase: string): void {
   // bounded by the gate above, which is the part that was missing.
   handle("file:show-in-folder", async (_event, path: string) => {
     if (typeof path !== "string" || path.length === 0 || path.length > 2000) {
-      throw new Error("Invalid path");
+      throw new Error(t("native.error.invalidPath"));
     }
     shell.showItemInFolder(path);
   });
@@ -537,7 +568,7 @@ export function registerIpcHandlers(apiBase: string): void {
   // service (it previously went to api.qrserver.com). Generated locally here.
   handle("totp:generate-qr", async (_event, uri: string) => {
     if (typeof uri !== "string" || !uri.startsWith("otpauth://") || uri.length > 1000) {
-      throw new Error("Invalid TOTP URI");
+      throw new Error(t("native.error.invalidTOTPURI"));
     }
     return QRCode.toDataURL(uri, { width: 220, margin: 1, errorCorrectionLevel: "M" });
   });
@@ -551,6 +582,33 @@ export function registerIpcHandlers(apiBase: string): void {
       const title = typeof opts?.title === "string" ? opts.title.slice(0, 200) : "dosya";
       const body = typeof opts?.body === "string" ? opts.body.slice(0, 500) : "";
       new Notification({ title, body }).show();
+    },
+  );
+
+  // A live chat reply while the window is not focused. Clicking it brings the
+  // window forward and tells that renderer to open the chat. Held until clicked
+  // or closed: a collected Notification loses its click handler.
+  const chatNotes = new Set<Notification>();
+  on(
+    "support-chat:notify",
+    (event, opts: { title: string; body: string }) => {
+      if (!Notification.isSupported()) return;
+      const title = typeof opts?.title === "string" ? opts.title.slice(0, 200) : "dosya";
+      const body = typeof opts?.body === "string" ? opts.body.slice(0, 500) : "";
+      const note = new Notification({ title, body });
+      const sender = event.sender;
+      chatNotes.add(note);
+      note.on("click", () => {
+        chatNotes.delete(note);
+        const win = BrowserWindow.fromWebContents(sender);
+        if (!win || win.isDestroyed()) return;
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+        sender.send("support-chat:open");
+      });
+      note.on("close", () => chatNotes.delete(note));
+      note.show();
     },
   );
 
@@ -620,7 +678,7 @@ export function registerIpcHandlers(apiBase: string): void {
   handle("fileProvider:link", async (_event, opts: { userId: unknown; fresh?: unknown }) => {
     const userId = opts?.userId;
     if (typeof userId !== "string" || userId.length === 0 || userId.length > 200) {
-      throw new Error("Invalid userId");
+      throw new Error(t("native.error.invalidUserId"));
     }
     if (!(await readPreference(preferenceDir()))) return { ok: false };
     const link = opts?.fresh === true ? relinkFileProvider : linkFileProvider;
@@ -631,7 +689,7 @@ export function registerIpcHandlers(apiBase: string): void {
     "fileProvider:set-enabled",
     async (_event, opts: { enabled: unknown; userId?: unknown }) => {
       const enabled = opts?.enabled;
-      if (typeof enabled !== "boolean") throw new Error("Invalid enabled");
+      if (typeof enabled !== "boolean") throw new Error(t("native.error.invalidEnabled"));
       const userId = typeof opts?.userId === "string" && opts.userId.length <= 200 ? opts.userId : null;
       await writePreference(preferenceDir(), enabled);
       // Take effect now rather than on the next sign-in: a switch that does

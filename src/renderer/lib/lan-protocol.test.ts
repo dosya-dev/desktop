@@ -8,6 +8,13 @@ import {
   encodeControl,
   ReceiveAssembler,
 } from "./lan-protocol.ts";
+import { readFileSync } from "node:fs";
+import { setTranslator } from "./locale-state.ts";
+import { makeT } from "../../i18n/translator.ts";
+
+// The receive errors are catalog messages: translate them in English, as the app does.
+const enMessages = JSON.parse(readFileSync(new URL("../../i18n/messages/en.json", import.meta.url), "utf8"));
+setTranslator(makeT("en", enMessages, enMessages));
 
 // The wire protocol for LAN transfer. One data channel, one file at a time:
 // a JSON control frame opens the file, binary frames carry its bytes in

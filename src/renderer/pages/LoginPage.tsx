@@ -1,19 +1,42 @@
 import { useState, useRef, useEffect, type FormEvent } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
 import { ipc } from "@/lib/ipc";
 import { Logo } from "@/components/Logo";
 import { LegalNotice } from "@/components/LegalNotice";
 import { useAuthDirection } from "@/lib/auth-direction";
+import { useT } from "@/lib/i18n";
+import { useOnClosedToTray } from "@/lib/use-closed-to-tray";
 
 export function LoginPage() {
+  const t = useT();
   const { login, refreshUser, isAuthenticated, isLoading: authLoading } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState("");
+  const location = useLocation();
+  // Sign-up's "Sign in instead" hands the address over so it is not retyped.
+  const handedEmail = (location.state as { email?: unknown } | null)?.email;
+  // Set by the verify screen after a successful code, so the user knows the
+  // verification worked and what to do next.
+  const justVerified = (location.state as { verified?: unknown } | null)?.verified === true;
+  const [email, setEmail] = useState(typeof handedEmail === "string" ? handedEmail : "");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  // Set only for a request that never got an answer: the form then offers
+  // a retry next to the message instead of leaving a dead end.
+  const [canRetry, setCanRetry] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  // Closing the window only hides it to the tray, so this form outlives it.
+  // Never keep a typed password (or a stale error) for whoever reopens the
+  // app (QA TC-004/TC-010). The email stays: it is not a secret and saves
+  // retyping. Nothing on this page is written to disk.
+  useOnClosedToTray(() => {
+    setPassword("");
+    setShowPassword(false);
+    setError("");
+    setCanRetry(false);
+  });
 
   // Pending OAuth teardown (IPC listener + 2-min timeout). Held in a ref so we
   // can tear it down when the flow completes AND if the page unmounts first -
@@ -30,9 +53,9 @@ export function LoginPage() {
     return <Navigate to="/dashboard" replace />;
   }
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
+  async function submit() {
     setError("");
+    setCanRetry(false);
     setLoading(true);
 
     const result = await login(email, password);
@@ -42,9 +65,17 @@ export function LoginPage() {
       navigate("/dashboard");
     } else if (result.requires_2fa) {
       navigate("/2fa", { state: { email, method: result.twofa_method } });
+    } else if (result.reason === "unverified") {
+      navigate("/verify", { state: { email, fromSignIn: true } });
     } else {
-      setError(result.error || "Login failed");
+      setError(result.error || t("sign-in.error.couldNotSignYouIn"));
+      setCanRetry(result.reason === "network");
     }
+  }
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    void submit();
   }
 
   async function handleOAuth(provider: string) {
@@ -64,9 +95,12 @@ export function LoginPage() {
       const oauthUrl = await window.electronAPI.beginOAuth(provider);
       // Open in system browser (Chrome, Firefox, etc.)
       window.open(oauthUrl, "_blank");
-    } catch (err: any) {
+    } catch (err) {
+      // The main-process error is technical ("Error invoking remote
+      // method..."); the log keeps it, the user gets a sentence.
+      console.error("OAuth start failed:", err);
       setLoading(false);
-      setError(err?.message || `Could not start ${provider} sign-in. Please try again.`);
+      setError(t("sign-in.error.couldNotStartProviderSignInPleaseTryAgain", { provider }));
       return;
     }
 
@@ -81,8 +115,9 @@ export function LoginPage() {
         await window.electronAPI.waitForSession();
         await refreshUser(true);
         navigate("/dashboard");
-      } catch (err: any) {
-        setError(err.message || "Login failed");
+      } catch (err) {
+        console.error("OAuth completion failed:", err);
+        setError(t("sign-in.error.couldNotSignYouIn"));
       } finally {
         setLoading(false);
       }
@@ -93,7 +128,7 @@ export function LoginPage() {
       oauthCleanup.current?.();
       oauthCleanup.current = null;
       setLoading(false);
-      setError("Login timed out. Please try again.");
+      setError(t("sign-in.error.browserSignInDidNotFinish"));
     }, 120_000);
 
     // One combined teardown for both the listener and the timer.
@@ -114,21 +149,36 @@ export function LoginPage() {
       </div>
       <div className="auth-step w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-8 shadow-sm border" style={{ borderColor: "var(--color-border)" }}>
         <div className="mb-6 text-center">
-          <h1 className="text-2xl font-semibold">Welcome back</h1>
+          <h1 className="text-2xl font-semibold">{t("common.heading.welcomeBack")}</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-            Sign in to your dosya account
+            {t("sign-in.label.signInToYourDosyaAccount")}
           </p>
         </div>
 
+        {justVerified && !error && (
+          <div role="status" className="mb-4 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
+            {t("sign-in.notice.emailVerifiedSignIn")}
+          </div>
+        )}
         {error && (
-          <div className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">
+          <div role="alert" className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">
             {error}
+            {canRetry && (
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={loading}
+                className="ms-1 font-medium underline disabled:opacity-50"
+              >
+                {t("common.action.tryAgain")}
+              </button>
+            )}
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium">Email</label>
+            <label className="mb-1 block text-sm font-medium">{t("common.label.email")}</label>
             <input
               type="email"
               value={email}
@@ -136,18 +186,18 @@ export function LoginPage() {
               required
               className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
               style={{ borderColor: "var(--color-border)" }}
-              placeholder="you@example.com"
+              placeholder={t("common.placeholder.youExampleCom")}
             />
           </div>
 
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <label className="text-sm font-medium">Password</label>
+              <label className="text-sm font-medium">{t("common.label.password")}</label>
               <Link
                 to="/forgot-password"
                 className="text-xs text-[var(--color-primary)] hover:underline"
               >
-                Forgot password?
+                {t("sign-in.action.forgotPassword")}
               </Link>
             </div>
             <div className="relative">
@@ -156,14 +206,14 @@ export function LoginPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="w-full rounded-lg border px-3 py-2 pr-10 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
+                className="w-full rounded-lg border px-3 py-2 pe-10 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                 style={{ borderColor: "var(--color-border)" }}
-                placeholder="Enter your password"
+                placeholder={t("sign-in.placeholder.enterYourPassword")}
               />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
+                className="absolute inset-e-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
                 tabIndex={-1}
               >
                 {showPassword ? (
@@ -192,13 +242,13 @@ export function LoginPage() {
                 : "var(--color-primary)",
             }}
           >
-            {loading ? "Signing in..." : "Sign in"}
+            {loading ? t("sign-in.action.signingIn") : t("common.action.signIn")}
           </button>
         </form>
 
         <div className="my-5 flex items-center gap-3">
           <div className="h-px flex-1 bg-[var(--color-border)]" />
-          <span className="text-xs text-[var(--color-text-muted)]">or</span>
+          <span className="text-xs text-[var(--color-text-muted)]">{t("common.label.or")}</span>
           <div className="h-px flex-1 bg-[var(--color-border)]" />
         </div>
 
@@ -226,7 +276,7 @@ export function LoginPage() {
                 fill="#EA4335"
               />
             </svg>
-            Continue with Google
+            {t("common.action.continueWithGoogle")}
           </button>
           <button
             onClick={() => handleOAuth("github")}
@@ -236,7 +286,7 @@ export function LoginPage() {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
             </svg>
-            Continue with GitHub
+            {t("common.action.continueWithGitHub")}
           </button>
           <button
             onClick={() => handleOAuth("apple")}
@@ -249,19 +299,19 @@ export function LoginPage() {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
               <path d="M17.05 12.536c-.02-2.29 1.87-3.39 1.955-3.443-1.065-1.558-2.72-1.771-3.31-1.795-1.41-.142-2.75.83-3.465.83-.714 0-1.816-.81-2.986-.788-1.536.023-2.953.893-3.743 2.267-1.596 2.766-.408 6.86 1.146 9.105.76 1.099 1.667 2.334 2.856 2.29 1.145-.046 1.577-.741 2.962-.741 1.385 0 1.774.741 2.986.718 1.233-.02 2.014-1.12 2.768-2.223.873-1.275 1.232-2.51 1.253-2.573-.027-.012-2.404-.922-2.428-3.657zM14.79 5.518c.632-.766 1.058-1.832.942-2.894-.91.037-2.013.606-2.665 1.371-.586.679-1.099 1.764-.96 2.805 1.015.079 2.05-.516 2.683-1.282z" />
             </svg>
-            Continue with Apple
+            {t("common.action.continueWithApple")}
           </button>
         </div>
 
         <LegalNotice className="mt-6" />
 
         <p className="mt-4 text-center text-sm text-[var(--color-text-secondary)]">
-          Don't have an account?{" "}
+          {t("sign-in.description.donTHaveAnAccount")}{" "}
           <Link
             to="/signup"
             className="font-medium text-[var(--color-primary)] hover:underline"
           >
-            Sign up
+            {t("sign-in.action.signUp")}
           </Link>
         </p>
       </div>

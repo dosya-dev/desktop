@@ -4,7 +4,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 
 const apiRequest = vi.fn();
-vi.mock("../lib/api-client", () => ({ apiRequest: (...a: unknown[]) => apiRequest(...a) }));
+vi.mock("../lib/api-client", async (importOriginal) => ({
+  // The real ApiError: the dialog's failure path checks `instanceof ApiError`.
+  ApiError: (await importOriginal<typeof import("../lib/api-client")>()).ApiError,
+  apiRequest: (...a: unknown[]) => apiRequest(...a),
+}));
 vi.mock("../lib/workspace-context", () => ({ useWorkspace: () => ({ active: { id: "ws_1" } }) }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 

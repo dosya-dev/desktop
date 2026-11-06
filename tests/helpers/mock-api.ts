@@ -843,6 +843,10 @@ export async function startMockServer(
       });
     }
 
+    if (path === "/api/workspace-dashboard" && method === "GET") {
+      return json({ ok: true, ...data.mockWorkspaceDashboard });
+    }
+
     // ── Regions ───────────────────────────────────────────
     if (path === "/api/regions" && method === "GET") {
       return json({

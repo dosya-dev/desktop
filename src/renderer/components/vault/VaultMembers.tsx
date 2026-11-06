@@ -3,6 +3,8 @@ import { Users, UserPlus, Trash2, ShieldAlert } from "lucide-react";
 import { useVault, type WorkspaceMember } from "@/lib/vault/store";
 import { useAuth } from "@/lib/auth-context";
 import { Modal } from "@/components/files/Modal";
+import { useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
 import { Notice, VaultButton, VaultInput } from "./ui";
 
 /**
@@ -12,6 +14,7 @@ import { Notice, VaultButton, VaultInput } from "./ui";
  * invites, and what revoke does and does not cut off.
  */
 export function VaultMembers({ workspaceName, onClose }: { workspaceName: string; onClose: () => void }) {
+  const t = useT();
   const { user } = useAuth();
   const members = useVault((s) => s.members);
   const busy = useVault((s) => s.busy);
@@ -37,22 +40,22 @@ export function VaultMembers({ workspaceName, onClose }: { workspaceName: string
     <>
       <Modal onClose={onClose} maxWidth={448}>
         <div className="space-y-3" data-testid="vault-members-modal">
-          <h2 className="flex items-center gap-2 text-base font-semibold"><Users size={16} /> Members: {workspaceName}</h2>
+          <h2 className="flex items-center gap-2 text-base font-semibold"><Users size={16} /> {t("vault.heading.membersWorkspaceName", { workspaceName })}</h2>
 
           <div className="max-h-64 space-y-1.5 overflow-y-auto">
             {members.length === 0 ? (
-              <p className="py-4 text-center text-xs text-[var(--color-text-secondary)]">No members yet.</p>
+              <p className="py-4 text-center text-xs text-[var(--color-text-secondary)]">{t("vault.label.noMembersYet")}</p>
             ) : members.map((m) => {
               const isYou = user != null && m.userId === user.id;
               return (
                 <div key={m.userId} data-testid={`vault-member-${m.userId}`}
                   className="flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] px-3 py-2">
                   <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate text-sm">{m.email}</span>
-                    {isYou && <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 text-[9px] font-medium text-[var(--color-text-secondary)]">you</span>}
+                    <span dir="ltr" className="ltr-value truncate text-sm">{m.email}</span>
+                    {isYou && <span className="rounded-full bg-[var(--color-bg-secondary)] px-1.5 text-[9px] font-medium text-[var(--color-text-secondary)]">{t("vault.label.you")}</span>}
                   </div>
                   {!isYou && (
-                    <VaultButton variant="ghost" size="icon" title="Revoke access" disabled={busy}
+                    <VaultButton variant="ghost" size="icon" title={t("vault.tooltip.revokeAccess")} disabled={busy}
                       data-testid={`vault-revoke-${m.userId}`} onClick={() => setRevokeTarget(m)}
                       className="text-[var(--color-danger)] hover:text-[var(--color-danger)]">
                       <Trash2 size={14} />
@@ -64,14 +67,14 @@ export function VaultMembers({ workspaceName, onClose }: { workspaceName: string
           </div>
 
           <Notice tone="muted" icon={<ShieldAlert size={14} />}>
-            Access is granted by trust-on-first-use. Verify a contact out of band; automatic key-transparency protection is coming.
+            {t("vault.description.accessIsGrantedByTrustOnFirstUseVerify")}
           </Notice>
 
           <div className="flex items-center gap-1.5">
-            <VaultInput type="email" placeholder="teammate@example.com" value={email} disabled={busy} data-testid="vault-invite-email"
+            <VaultInput type="email" placeholder={t("vault.placeholder.teammateExampleCom")} value={email} disabled={busy} data-testid="vault-invite-email"
               onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") invite(); }} className="min-w-0" />
             <VaultButton size="sm" onClick={invite} disabled={busy || !email.trim()} className="shrink-0" data-testid="vault-invite">
-              <UserPlus size={14} /> Invite
+              <UserPlus size={14} /> {t("common.action.invite")}
             </VaultButton>
           </div>
         </div>
@@ -80,16 +83,18 @@ export function VaultMembers({ workspaceName, onClose }: { workspaceName: string
       {revokeTarget && (
         <Modal onClose={() => setRevokeTarget(null)} maxWidth={400}>
           <div className="space-y-3" data-testid="vault-revoke-modal">
-            <h2 className="text-base font-semibold">Revoke access?</h2>
+            <h2 className="text-base font-semibold">{t("vault.heading.revokeAccess")}</h2>
             <p className="text-sm text-[var(--color-text-secondary)]">
-              Revoke <span className="font-semibold text-[var(--color-text)]">{revokeTarget.email}</span>'s access to “{workspaceName}”?
+              {richText(t, "vault.description.revokeEmailSAccessToWorkspaceName", { workspaceName }, {
+                email: <span className="font-semibold text-[var(--color-text)]">{revokeTarget.email}</span>,
+              })}
             </p>
             <Notice tone="muted" icon={<ShieldAlert size={14} />}>
-              Revoking re-keys this Space so future content is unreadable to them. Anything they already downloaded stays with them. Re-keying a large Space can take a while.
+              {t("vault.description.revokingReKeysThisSpaceSoFutureContentIs")}
             </Notice>
             <div className="flex justify-end gap-2">
-              <VaultButton variant="outline" onClick={() => setRevokeTarget(null)}>Cancel</VaultButton>
-              <VaultButton variant="danger" onClick={revoke} disabled={busy} data-testid="vault-revoke-confirm"><Trash2 size={14} /> Revoke</VaultButton>
+              <VaultButton variant="outline" onClick={() => setRevokeTarget(null)}>{t("common.cancel")}</VaultButton>
+              <VaultButton variant="danger" onClick={revoke} disabled={busy} data-testid="vault-revoke-confirm"><Trash2 size={14} /> {t("common.action.revoke")}</VaultButton>
             </div>
           </div>
         </Modal>

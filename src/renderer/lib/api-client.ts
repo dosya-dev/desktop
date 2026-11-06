@@ -6,6 +6,10 @@
  */
 
 import { isSessionLossResponse, sessionLoss } from "./session-loss";
+import { t } from "./i18n";
+import { EDGE_CHALLENGE_CODE, isAbortError, isEdgeChallenge } from "./request-failure";
+
+export { EDGE_CHALLENGE_CODE } from "./request-failure";
 
 let _apiBase: string | null = null;
 
@@ -26,7 +30,7 @@ export async function primeApiBase(): Promise<void> {
  * before rendering.
  */
 export function apiBase(): string {
-  if (!_apiBase) throw new Error("API base not primed");
+  if (!_apiBase) throw new Error(t("common.error.apiBaseNotPrimed"));
   return _apiBase;
 }
 
@@ -44,6 +48,24 @@ export class ApiError extends Error {
     this.status = status;
     this.data = data;
   }
+}
+
+/**
+ * The request never produced a response the app could read. Kept apart from
+ * ApiError on purpose: many callers read `instanceof ApiError` as "the server
+ * answered", and this is the opposite. `message` is already human and
+ * translated; the original TypeError is kept as `cause` for logs.
+ */
+export class NetworkError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = "NetworkError";
+  }
+}
+
+/** True when `err` is the WAF refusal raised above (any auth or API route). */
+export function isEdgeChallengeError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.data.code === EDGE_CHALLENGE_CODE;
 }
 
 interface RequestOptions {
@@ -65,18 +87,39 @@ export async function apiRequest<T>(
     fetchHeaders["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(`${apiBase}${path}`, {
-    method,
-    headers: fetchHeaders,
-    body:
-      body instanceof FormData || body instanceof ArrayBuffer
-        ? body
-        : body
-          ? JSON.stringify(body)
-          : undefined,
-    credentials: "include",
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase}${path}`, {
+      method,
+      headers: fetchHeaders,
+      body:
+        body instanceof FormData || body instanceof ArrayBuffer
+          ? body
+          : body
+            ? JSON.stringify(body)
+            : undefined,
+      credentials: "include",
+      signal,
+    });
+  } catch (err) {
+    // A rejected fetch() means no readable response at all: offline, DNS,
+    // TLS, or a response the browser refused to hand over (CORS). Chromium's
+    // own text for that is "Failed to fetch (api.dosya.dev)", which is what
+    // QA TC-014/015 saw on the sign-in form. Callers cancelling on purpose
+    // still get their AbortError untouched.
+    if (isAbortError(err)) throw err;
+    throw new NetworkError(t("common.error.couldNotReachDosyaCheckYourConnectionAndTryAgain"), err);
+  }
+
+  // Cloudflare answered instead of the API: a WAF managed challenge (today
+  // the "leaked password" rule on the auth routes). The page it sends is an
+  // HTML puzzle this app cannot solve. Main makes the refusal readable (see
+  // main/edge-challenge.ts); without that it lands in the catch above.
+  if (isEdgeChallenge(res.headers)) {
+    throw new ApiError(t("common.error.ourSecurityCheckBlockedThisRequest"), res.status, {
+      code: EDGE_CHALLENGE_CODE,
+    });
+  }
 
   if (!res.ok) {
     // A dead session is a global fact, not this one caller's problem: the
@@ -89,7 +132,8 @@ export async function apiRequest<T>(
       // non-JSON error response
     }
     throw new ApiError(
-      (errorData.error as string) || `Request failed (${res.status})`,
+      // The server's own message as sent; only the fallback is ours.
+      (errorData.error as string) || t("common.error.requestFailedStatus", { status: res.status }),
       res.status,
       errorData,
     );
@@ -111,7 +155,7 @@ export async function apiRequest<T>(
   } catch {
     const text = await bodyClone.text().catch(() => "");
     if (!text.trim()) return undefined as T;
-    throw new ApiError("Malformed response from server", res.status);
+    throw new ApiError(t("common.error.malformedResponseFromServer"), res.status);
   }
 }
 

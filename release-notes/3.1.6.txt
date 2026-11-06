@@ -1,0 +1,7 @@
+What's new in 3.1.6
+
+• AI search: on paid plans, find files by what they are about and by the text inside documents and photos. Turn it on under Settings → AI search, choose whether existing files are indexed, and exclude folders you do not want indexed. The Search page shows matches from inside files next to name matches.
+• Dashboard shows how much of your workspace is indexed, and the account Workspace dashboard shows your AI processing allowance with a breakdown by workspace.
+• A new "Change AI search" permission lets an admin delegate the AI search settings to a role.
+• Videos in the library show the poster frame made by the device that uploaded them.
+• Vault: rollback detection now survives reopening a Space, and signed roots bind the membership log and folder indexes they are served with.

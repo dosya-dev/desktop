@@ -3,6 +3,7 @@ import { KeyRound, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { useVault } from "@/lib/vault/store";
 import { Modal } from "@/components/files/Modal";
+import { useT } from "@/lib/i18n";
 import { VaultButton } from "./ui";
 
 /**
@@ -13,6 +14,7 @@ import { VaultButton } from "./ui";
  * first view of the browser until the user confirms they saved the key.
  */
 export function RecoveryKeyModal() {
+  const t = useT();
   const recoveryKeyHex = useVault((s) => s.recoveryKeyOnce);
   const dismissRecoveryKey = useVault((s) => s.dismissRecoveryKey);
   const [copied, setCopied] = useState(false);
@@ -22,10 +24,10 @@ export function RecoveryKeyModal() {
     try {
       await navigator.clipboard.writeText(recoveryKeyHex);
       setCopied(true);
-      toast.success("Copied", { description: "Recovery key copied to clipboard." });
+      toast.success(t("common.status.copied"), { description: t("vault.description.recoveryKeyCopiedToClipboard") });
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Copy failed", { description: "Select and copy the key manually." });
+      toast.error(t("common.error.copyFailed"), { description: t("vault.description.selectAndCopyTheKeyManually") });
     }
   };
 
@@ -33,17 +35,17 @@ export function RecoveryKeyModal() {
     // No overlay-click dismissal: the only way out is the button, on purpose.
     <Modal onClose={() => {}}>
       <div className="space-y-3" data-testid="vault-recovery-key">
-        <h2 className="flex items-center gap-2 text-base font-semibold"><KeyRound size={16} className="text-[var(--color-primary)]" /> Save your recovery key</h2>
+        <h2 className="flex items-center gap-2 text-base font-semibold"><KeyRound size={16} className="text-[var(--color-primary)]" /> {t("vault.heading.saveYourRecoveryKey")}</h2>
         <p className="text-xs text-[var(--color-text-secondary)]">
-          This is the only time this key will ever be shown. Store it somewhere safe, in a password manager or an offline note. If you forget your passphrase, this key is the only way to recover your encrypted files.
+          {t("vault.description.thisIsTheOnlyTimeThisKeyWillEver")}
         </p>
         <div className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2">
-          <code className="flex-1 break-all font-mono text-xs">{recoveryKeyHex}</code>
-          <VaultButton variant="outline" size="icon" onClick={copy} title="Copy recovery key"><Copy size={14} /></VaultButton>
+          <code dir="ltr" className="flex-1 break-all font-mono text-xs">{recoveryKeyHex}</code>
+          <VaultButton variant="outline" size="icon" onClick={copy} title={t("vault.tooltip.copyRecoveryKey")}><Copy size={14} /></VaultButton>
         </div>
-        {copied && <p className="text-[11px] text-[var(--color-primary)]">Copied to clipboard.</p>}
+        {copied && <p className="text-[11px] text-[var(--color-primary)]">{t("common.description.copiedToClipboard")}</p>}
         <div className="flex justify-end">
-          <VaultButton onClick={() => dismissRecoveryKey()} data-testid="vault-recovery-key-saved">I've saved it</VaultButton>
+          <VaultButton onClick={() => dismissRecoveryKey()} data-testid="vault-recovery-key-saved">{t("vault.action.iVeSavedIt")}</VaultButton>
         </div>
       </div>
     </Modal>

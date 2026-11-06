@@ -18,3 +18,12 @@ export function markQuitting(): void {
 export function isQuitting(): boolean {
   return quitting;
 }
+
+/**
+ * A quit was called off before anything was torn down (the user chose Keep
+ * editing over unsaved changes): the window's close button goes back to
+ * hiding to the tray.
+ */
+export function clearQuitting(): void {
+  quitting = false;
+}

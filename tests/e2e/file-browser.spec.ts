@@ -80,4 +80,42 @@ test.describe("File Browser", () => {
 
     await expect(appPage.getByText("Open in editor")).not.toBeVisible();
   });
+
+  // "Version history" used to open the viewer, whose version column starts
+  // collapsed and has no toggle at all for a single-version file, so the item
+  // looked like it did nothing. It opens the detail panel's version list now.
+  test("Version history opens the detail panel's version list", async ({ appPage }) => {
+    await navigateTo(appPage, "/files");
+
+    await appPage.getByText("Versioned Report.pdf").click({ button: "right" });
+    await appPage.getByText("Version history").click();
+
+    for (const v of ["v3", "v2", "v1"]) {
+      await expect(appPage.getByText(v, { exact: true }).first()).toBeVisible();
+    }
+    await expect(appPage.getByTestId("viewer-versions-toggle")).toHaveCount(0);
+  });
+
+  test("Version history shows the only version of a single-version file", async ({ appPage }) => {
+    await navigateTo(appPage, "/files");
+
+    await appPage.getByText("Project Report.pdf").click({ button: "right" });
+    await appPage.getByText("Version history").click();
+
+    await expect(appPage.getByText("Versions", { exact: true })).toBeVisible();
+    await expect(appPage.getByText("v1", { exact: true }).first()).toBeVisible();
+    await expect(appPage.getByText(/Only one version so far/)).toBeVisible();
+  });
+
+  // Clicking a file opens the same panel without the flag: a lone version
+  // stays hidden there, the history only shows when asked for.
+  test("the detail panel hides a lone version unless Version history asked", async ({ appPage }) => {
+    // The ?panel= deep link opens the panel the way a row click does (see
+    // comments.spec.ts); the grid has no row test ids to drive.
+    await navigateTo(appPage, "/files?panel=file_1");
+
+    await expect(appPage.getByText("Uploaded by")).toBeVisible();
+    await expect(appPage.getByText(/Only one version so far/)).toHaveCount(0);
+    await expect(appPage.getByText("v1", { exact: true })).toHaveCount(0);
+  });
 });

@@ -14,6 +14,8 @@ import { Waveform } from './Waveform';
 import { QueuePanel } from './QueuePanel';
 import { LyricsPanel } from './LyricsPanel';
 import { LOOP_OFF, nextLoopState, nextSpeed, SLEEP_OPTIONS, type LoopState } from './audioModes';
+import { useDir, useT } from '@/lib/i18n';
+import { richText } from '@/lib/rich-text';
 
 interface Props {
   file: ViewerFile;
@@ -25,6 +27,8 @@ interface Props {
 }
 
 export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props) {
+  const t = useT();
+  const dir = useDir();
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
@@ -137,18 +141,18 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
   // Only facts the file actually reported. A chip reading "0 kbps" would be
   // worse than no chip at all.
   const chips = [
-    (extOf(file.name) || 'file').toUpperCase(),
-    tags.bitrateKbps ? `${tags.bitrateKbps} kbps` : null,
-    tags.sampleRateHz ? `${(tags.sampleRateHz / 1000).toFixed(1)} kHz` : null,
+    extOf(file.name) ? extOf(file.name).toUpperCase() : t('common.label.fileUppercase'),
+    tags.bitrateKbps ? t('common.label.bitratekbpsKbps', { bitrateKbps: String(tags.bitrateKbps) }) : null,
+    tags.sampleRateHz ? t('common.label.sampleratekhzKHz', { sampleRateKhz: (tags.sampleRateHz / 1000).toFixed(1) }) : null,
     humanSize(file.size_bytes),
   ].filter(Boolean) as string[];
 
   // Every armed mode writes a chip here, so nothing is ever running invisibly.
   const armChips = [
-    loopState.loop ? `A-B ${mmss(loopState.loop.a)}-${mmss(loopState.loop.b)}` : null,
-    loopState.stage === 1 ? `A ${mmss(loopState.a ?? 0)} - set B` : null,
-    sleepLabel ? `Sleep ${sleepLabel}` : null,
-    speed !== 1 ? `${speed}x` : null,
+    loopState.loop ? t('common.label.aBStartEnd', { start: mmss(loopState.loop.a), end: mmss(loopState.loop.b) }) : null,
+    loopState.stage === 1 ? t('common.label.aStartSetB', { start: mmss(loopState.a ?? 0) }) : null,
+    sleepLabel ? t('common.label.sleepSleepLabel', { sleepLabel }) : null,
+    speed !== 1 ? t('common.label.speedX', { speed: String(speed) }) : null,
   ].filter(Boolean) as string[];
 
   return (
@@ -162,7 +166,7 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
               <>
                 <img
                   src={artworkUrl}
-                  alt={`Cover art for ${title}`}
+                  alt={t('common.accessibility.coverArtForTitle', { title })}
                   className="relative z-10 size-full rounded-[inherit] object-cover shadow-[0_16px_34px_-14px_rgb(0_0_0/0.55)]"
                 />
                 {/* The only art-derived colour on the surface: light spilling
@@ -204,9 +208,11 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
           </div>
         </div>
 
+        {/* Transport, timeline and time labels are a physical timeline: left to right in every language. */}
+        <div dir="ltr">
         {decodeFailed ? (
-          <div className="mt-[22px] flex h-[78px] items-center justify-center rounded-lg border border-dashed px-4 text-center text-xs text-muted-foreground">
-            This app can't decode this audio format. Download the file to play it in another app.
+          <div dir={dir} className="mt-[22px] flex h-[78px] items-center justify-center rounded-lg border border-dashed px-4 text-center text-xs text-muted-foreground">
+            {t('common.error.thisAppCanTDecodeThisAudioFormatDownload')}
           </div>
         ) : waveState === 'ready' && peaks ? (
           <Waveform peaks={peaks} position={position} duration={duration} loop={loopState.loop} onSeek={seek} />
@@ -230,7 +236,7 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
                 max={Math.max(1, Math.round(duration))}
                 value={Math.round(position)}
                 onChange={(e) => seek(Number(e.target.value))}
-                aria-label="Seek"
+                aria-label={t('common.accessibility.seek')}
                 className="w-full accent-[var(--color-primary)]"
               />
             )}
@@ -253,31 +259,31 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
         </div>
 
         <div className="mt-5 flex items-center justify-center gap-2">
-          <button className="inline-flex size-9 items-center justify-center rounded-full text-[var(--color-text-secondary)] hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title="Shuffle queue" aria-label="Shuffle queue">
+          <button className="inline-flex size-9 items-center justify-center rounded-full text-[var(--color-text-secondary)] hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title={t('common.accessibility.shuffleQueue')} aria-label={t('common.accessibility.shuffleQueue')}>
             <Shuffle className="size-[17px]" />
           </button>
           <button
             onClick={() => (position > 3 ? seek(0) : goTrack(-1))}
             disabled={activeIndex <= 0 && position <= 3}
             className="inline-flex size-10 items-center justify-center rounded-full hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)] disabled:pointer-events-none disabled:opacity-35"
-            title="Previous track (Shift + Left)"
-            aria-label="Previous track"
+            title={t('common.tooltip.previousTrackShiftLeft')}
+            aria-label={t('common.accessibility.previousTrack')}
           >
             <SkipBack className="size-5" />
           </button>
-          <button onClick={() => seek(position - 15)} className="relative inline-flex size-10 items-center justify-center rounded-full hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title="Back 15 seconds (J)" aria-label="Back 15 seconds">
+          <button onClick={() => seek(position - 15)} className="relative inline-flex size-10 items-center justify-center rounded-full hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title={t('common.tooltip.back15SecondsJ')} aria-label={t('common.accessibility.back15Seconds')}>
             <RotateCcw className="size-[21px]" />
             <span aria-hidden className="absolute inset-0 flex items-center justify-center pt-px font-mono text-[8px] font-bold">15</span>
           </button>
           <button
             onClick={toggle}
             className="mx-1.5 inline-flex size-[58px] items-center justify-center rounded-full bg-[var(--color-primary)] text-[var(--color-bg)] shadow-[0_6px_16px_-8px_rgb(0_0_0/0.5)] transition-transform hover:brightness-95 active:scale-95"
-            aria-label={playing ? 'Pause' : 'Play'}
-            title={playing ? 'Pause (Space)' : 'Play (Space)'}
+            aria-label={playing ? t('common.accessibility.pause') : t('common.accessibility.play')}
+            title={playing ? t('common.tooltip.pauseSpace') : t('common.tooltip.playSpace')}
           >
             {playing ? <Pause className="size-5 fill-current" /> : <Play className="size-[23px] fill-current" />}
           </button>
-          <button onClick={() => seek(position + 15)} className="relative inline-flex size-10 items-center justify-center rounded-full hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title="Forward 15 seconds (L)" aria-label="Forward 15 seconds">
+          <button onClick={() => seek(position + 15)} className="relative inline-flex size-10 items-center justify-center rounded-full hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title={t('common.tooltip.forward15SecondsL')} aria-label={t('common.accessibility.forward15Seconds')}>
             <RotateCw className="size-[21px]" />
             <span aria-hidden className="absolute inset-0 flex items-center justify-center pt-px font-mono text-[8px] font-bold">15</span>
           </button>
@@ -285,12 +291,12 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
             onClick={() => goTrack(1)}
             disabled={activeIndex < 0 || activeIndex >= queue.length - 1}
             className="inline-flex size-10 items-center justify-center rounded-full hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)] disabled:pointer-events-none disabled:opacity-35"
-            title="Next track (Shift + Right)"
-            aria-label="Next track"
+            title={t('common.tooltip.nextTrackShiftRight')}
+            aria-label={t('common.accessibility.nextTrack')}
           >
             <SkipForward className="size-5" />
           </button>
-          <button className="inline-flex size-9 items-center justify-center rounded-full text-[var(--color-text-secondary)] hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title="Repeat queue" aria-label="Repeat queue">
+          <button className="inline-flex size-9 items-center justify-center rounded-full text-[var(--color-text-secondary)] hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]" title={t('common.accessibility.repeatQueue')} aria-label={t('common.accessibility.repeatQueue')}>
             <Repeat className="size-[17px]" />
           </button>
         </div>
@@ -303,11 +309,11 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
                 ? 'border-[color-mix(in_oklab,var(--color-primary)_45%,transparent)] bg-[color-mix(in_oklab,var(--color-primary)_10%,transparent)] text-[var(--color-primary)]'
                 : 'border-transparent text-[var(--color-text-secondary)]'
             }`}
-            title="Playback speed"
-            aria-label={`Playback speed, currently ${speed} times`}
+            title={t('common.tooltip.playbackSpeed')}
+            aria-label={t('common.accessibility.playbackSpeedCurrentlySpeedTimes', { speed: String(speed) })}
           >
             <Gauge className="size-[15px]" />
-            <span className="font-mono text-xs tabular-nums">{speed}x</span>
+            <span className="font-mono text-xs tabular-nums">{t('common.label.speedX', { speed: String(speed) })}</span>
           </button>
 
           <span className="relative inline-flex">
@@ -320,15 +326,15 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
                   ? 'border-[color-mix(in_oklab,var(--color-primary)_45%,transparent)] bg-[color-mix(in_oklab,var(--color-primary)_10%,transparent)] text-[var(--color-primary)]'
                   : 'border-transparent text-[var(--color-text-secondary)]'
               }`}
-              title="Stop playing after a while"
+              title={t('common.tooltip.stopPlayingAfterAWhile')}
             >
               <Timer className="size-[15px]" />
-              <span className="font-mono text-xs tabular-nums">{sleepLabel ?? 'Sleep'}</span>
+              <span className="font-mono text-xs tabular-nums">{sleepLabel ?? t('common.label.sleep')}</span>
             </button>
             {sleepOpen && (
-              <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 min-w-[168px] rounded-[calc(var(--radius)*0.75)] border border-[var(--color-border)] bg-[var(--color-bg)] p-1.5 text-[var(--color-text)] shadow-lg">
+              <div dir={dir} className="absolute bottom-[calc(100%+8px)] inset-s-0 z-20 min-w-[168px] rounded-[calc(var(--radius)*0.75)] border border-[var(--color-border)] bg-[var(--color-bg)] p-1.5 text-[var(--color-text)] shadow-lg">
                 <h4 className="m-0 px-2 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-secondary)]">
-                  Stop playing after
+                  {t('common.heading.stopPlayingAfter')}
                 </h4>
                 {SLEEP_OPTIONS.map((o) => (
                   <button
@@ -338,9 +344,9 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
                       setSleepLabel(o.minutes === null ? null : mmss(o.minutes * 60));
                       setSleepOpen(false);
                     }}
-                    className="flex w-full items-center rounded-[calc(var(--radius)*0.4)] px-2 py-1.5 text-left text-[13px] hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]"
+                    className="flex w-full items-center rounded-[calc(var(--radius)*0.4)] px-2 py-1.5 text-start text-[13px] hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]"
                   >
-                    {o.label}
+                    {t(o.label)}
                   </button>
                 ))}
               </div>
@@ -355,20 +361,20 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
                 : 'border-transparent text-[var(--color-text-secondary)]'
             }`}
             title={
-              loopState.stage === 0 ? 'Loop a section - sets point A'
-                : loopState.stage === 1 ? 'Set point B to close the loop'
-                : 'Clear the loop'
+              loopState.stage === 0 ? t('common.tooltip.loopASectionSetsPointA')
+                : loopState.stage === 1 ? t('common.tooltip.setPointBToCloseTheLoop')
+                : t('common.tooltip.clearTheLoop')
             }
-            aria-label="A to B loop"
+            aria-label={t('common.accessibility.aToBLoop')}
           >
             <Repeat className="size-[15px]" />
-            <span>A-B</span>
+            <span>{t('common.label.aB')}</span>
           </button>
 
           <button
             onClick={() => setMuted((m) => !m)}
             className="inline-flex h-[30px] items-center gap-1.5 rounded-[calc(var(--radius)*0.5)] px-2.5 text-xs text-[var(--color-text-secondary)] hover:bg-[color-mix(in_oklab,var(--color-text)_10%,transparent)]"
-            aria-label={muted ? 'Unmute' : 'Mute'}
+            aria-label={muted ? t('common.accessibility.unmute') : t('common.accessibility.mute')}
           >
             {muted ? <VolumeX className="size-[15px]" /> : <Volume2 className="size-[15px]" />}
           </button>
@@ -382,15 +388,16 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
               setVolume(v / 100);
               setMuted(v === 0);
             }}
-            aria-label="Volume"
+            aria-label={t('common.accessibility.volume')}
             className="w-[78px] accent-[var(--color-primary)]"
           />
+        </div>
         </div>
       </div>
 
       {(queue.length > 1 || lyrics) && (
         <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--color-border)] bg-[var(--color-bg)]">
-          <div className="flex shrink-0 items-stretch gap-0.5 border-b border-[var(--color-border)] pl-5 pr-3">
+          <div className="flex shrink-0 items-stretch gap-0.5 border-b border-[var(--color-border)] ps-5 pe-3">
             {queue.length > 1 && (
               <button
                 role="tab"
@@ -402,8 +409,10 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
                     : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                 }`}
               >
-                <ListMusic className="size-[15px]" /> Up next
-                <span className="font-mono text-[11px] font-normal text-[var(--color-text-secondary)]">{queue.length}</span>
+                <ListMusic className="size-[15px]" />{' '}
+                {richText(t, 'common.action.upNextQueueCount', {}, {
+                  queueCount: <span className="font-mono text-[11px] font-normal text-[var(--color-text-secondary)]">{queue.length}</span>,
+                })}
               </button>
             )}
             {/* Present only when this file actually carries lyrics. A disabled
@@ -419,7 +428,7 @@ export function AudioPlayer({ file, files, rawUrl, version, onNavigate }: Props)
                     : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
                 }`}
               >
-                <MicVocal className="size-[15px]" /> Lyrics
+                <MicVocal className="size-[15px]" /> {t('common.action.lyrics')}
               </button>
             )}
           </div>

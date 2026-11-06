@@ -4,16 +4,21 @@ import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, CheckCheck, X, Loader2 } from "lucide-react";
 import { NotificationIcon } from "@/components/notifications/NotificationIcon";
 import {
-  mergeInboxPages, groupByDay, parseActions, isUnread, relativeTime, mapActionPath,
+  mergeInboxPages, groupByDay, parseActions, isUnread, mapActionPath,
   type NotificationItem,
 } from "@dosya-dev/shared";
 import { fetchInbox, markRead, markAllRead, dismiss } from "@/lib/notifications-api";
+import { dayGroupLabel, notificationAge } from "@/components/notifications/notification-labels";
+import { useT } from "@/lib/i18n";
+import { Bdi, useAutoDir } from "@/lib/bidi-ui";
 
 /**
  * The full inbox. The dropdown in the title bar shows the latest 10; the API
  * caps a page at 50, so anyone with real history needs this paginated view.
  */
 export function NotificationsPage() {
+  const ownDir = useAutoDir();
+  const t = useT();
   const navigate = useNavigate();
   const qc = useQueryClient();
 
@@ -73,14 +78,14 @@ export function NotificationsPage() {
   return (
     <div className="mx-auto max-w-3xl px-6 py-6">
       <div className="mb-5 flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Notifications</h1>
+        <h1 className="text-xl font-semibold">{t("common.heading.notifications")}</h1>
         {items.some(isUnread) && (
           <button
             data-testid="mark-all-read"
             onClick={onReadAll}
             className="inline-flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
           >
-            <CheckCheck size={14} /> Mark all read
+            <CheckCheck size={14} /> {t("notifications.action.markAllRead")}
           </button>
         )}
       </div>
@@ -92,13 +97,13 @@ export function NotificationsPage() {
       {!q.isLoading && items.length === 0 && (
         <div data-testid="inbox-empty" className="py-16 text-center">
           <Bell size={22} className="mx-auto mb-2 text-[var(--color-text-secondary)]" />
-          <p className="text-sm text-[var(--color-text-secondary)]">You&rsquo;re all caught up.</p>
+          <p className="text-sm text-[var(--color-text-secondary)]">{t("notifications.description.youReAllCaughtUp")}</p>
         </div>
       )}
 
       {groups.map((g) => (
         <section key={g.label} className="mb-6">
-          <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[var(--color-text-secondary)]">{g.label}</h2>
+          <h2 className="mb-2 text-[11px] uppercase tracking-wide text-[var(--color-text-secondary)]">{dayGroupLabel(t, g.label)}</h2>
           <div className="overflow-hidden rounded-xl border" style={{ borderColor: "var(--color-border)" }}>
             {g.items.map((item) => {
               const actions = parseActions(item.actions);
@@ -115,9 +120,9 @@ export function NotificationsPage() {
                     priority={item.priority}
                     unread={isUnread(item)}
                   />
-                  <button onClick={() => openItem(item)} className="min-w-0 flex-1 text-left">
+                  <button onClick={() => openItem(item)} className="min-w-0 flex-1 text-start">
                     <p className={`flex items-center gap-2 text-sm ${isUnread(item) ? "font-semibold" : ""}`}>
-                      <span>{item.title}</span>
+                      <span dir={ownDir}>{item.title}</span>
                       {isUnread(item) && (
                         <span
                           data-testid={`unread-dot-${item.id}`}
@@ -127,11 +132,11 @@ export function NotificationsPage() {
                       )}
                     </p>
                     {item.body && (
-                      <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">{item.body}</p>
+                      <p dir={ownDir} className="mt-0.5 text-xs text-[var(--color-text-secondary)]">{item.body}</p>
                     )}
                     <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-                      {relativeTime(item.created_at, now)}
-                      {item.actor_name ? ` · ${item.actor_name}` : ""}
+                      {notificationAge(t, item.created_at, now)}
+                      {item.actor_name ? <> · <Bdi>{item.actor_name}</Bdi></> : ""}
                     </p>
                   </button>
                   <div className="flex shrink-0 items-start gap-3">
@@ -154,7 +159,7 @@ export function NotificationsPage() {
                     })}
                     <button
                       data-testid={`dismiss-${item.id}`}
-                      aria-label={`Dismiss ${item.title}`}
+                      aria-label={t("notifications.accessibility.dismissTitle", { title: item.title })}
                       onClick={() => onDismiss(item)}
                       className="text-[var(--color-text-secondary)] hover:text-[var(--color-danger)]"
                     >
@@ -178,7 +183,7 @@ export function NotificationsPage() {
             style={{ borderColor: "var(--color-border)" }}
           >
             {q.isFetchingNextPage && <Loader2 size={13} className="animate-spin" />}
-            {q.isFetchingNextPage ? "Loading…" : "Load older"}
+            {q.isFetchingNextPage ? t("common.status.loading") : t("notifications.action.loadOlder")}
           </button>
         </div>
       )}

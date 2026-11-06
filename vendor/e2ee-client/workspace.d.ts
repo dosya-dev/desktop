@@ -14,7 +14,7 @@
  * yet, same caveat as the plan's Global Constraints).
  */
 import { type Op, type FolderState, type RootManifestFields, type Conflict } from "@dosya-dev/e2ee-core";
-import type { ApiClient, CommitBody } from "./api.js";
+import type { ApiClient, CommitBody, MemberRow } from "./api.js";
 import type { Session } from "./session.js";
 export type Workspace = {
     workspaceId: string;
@@ -29,21 +29,46 @@ export type Workspace = {
      * anything is acceptable" (trust-on-first-use), which is exactly the
      * `undefined` state here.
      *
-     * IN-MEMORY ONLY for P1b: this field resets every time a fresh
-     * `Workspace` is constructed (`createWorkspace` or a future
-     * `openWorkspace`/resume path), so it only protects reads made *within*
-     * one running session. A real client MUST persist `lastSeen` durably
-     * across sessions (disk/localStorage/keychain, keyed by `workspaceId`) --
-     * that is the CALLER's responsibility, not this engine's. Without durable
-     * persistence, every fresh session is fresh-device trust-on-first-use: a
-     * server that rolls a workspace back between sessions (rather than
-     * mid-session) goes undetected because there is no prior `lastSeen` to
-     * compare the rolled-back head against.
+     * This field itself resets every time a fresh `Workspace` is constructed,
+     * so on its own it only protects reads made *within* one running session.
+     * Across sessions the CALLER persists each mark `onAdvance` reports
+     * (disk/localStorage/keychain, keyed by account + `workspaceId`) and hands
+     * it back as `openWorkspace`'s `opts.highWater`, which becomes `floor`.
+     * A caller that skips this is fresh-device trust-on-first-use on every
+     * open: a server that rolls a workspace back between sessions goes
+     * undetected.
      */
     lastSeen?: {
         version: number;
         hash: Uint8Array;
     };
+    /**
+     * The high-water mark a PREVIOUS session of this client persisted for
+     * this workspace (via `onAdvance`), handed back in through
+     * `openWorkspace`'s `opts.highWater`. This is what makes §6 rollback
+     * detection survive a reload, a Space switch or a lock/unlock: without it
+     * every fresh `Workspace` starts at trust-on-first-use, and a server that
+     * serves a pre-revocation head between sessions would be accepted - the
+     * client would then go back to the old key epoch a removed member still
+     * holds.
+     *
+     * Checked by version only, never by chain link: other members may have
+     * committed any number of times since the mark was saved, and the client
+     * has no way to fetch the intermediate roots, so `checkFreshness`'s
+     * `prevRootHash` link test would misreport every such gap as a fork. A
+     * head OLDER than the floor is a rollback; one at the SAME version with a
+     * different hash is a fork; a grant OLDER than `floor.wkVersion` is a key
+     * rollback. Never mutated after `openWorkspace`.
+     */
+    floor?: HighWaterMark;
+    /**
+     * Called every time `lastSeen` advances (a verified read or this client's
+     * own successful commit/rotation), with the mark the caller should
+     * persist durably, keyed by account + `workspaceId`. A throwing callback is
+     * swallowed: failing to save the mark must not fail the read or write it
+     * reports on.
+     */
+    onAdvance?: (mark: HighWaterMark) => void;
     /**
      * Whether THIS session's own identity is the workspace's founder - an
      * ordinary `createWorkspace` call (always `true`, hard-set in-process,
@@ -90,6 +115,16 @@ export type Workspace = {
     selfFounded: boolean;
 };
 /**
+ * A persistable §6 high-water mark: the newest verified root manifest
+ * `(version, hash)` plus the workspace-key epoch in force at that point. See
+ * `Workspace.floor`/`Workspace.onAdvance`.
+ */
+export type HighWaterMark = {
+    version: number;
+    hash: Uint8Array;
+    wkVersion: number;
+};
+/**
  * The longest Space name this engine will store.
  *
  * A bound is not cosmetic here: the root index is fetched and parsed by every
@@ -124,6 +159,7 @@ export declare function decodeSignedRoot(signedRoot: string): {
  */
 export declare function createWorkspace(api: ApiClient, session: Session, workspaceId: string, opts?: {
     name?: string;
+    onAdvance?: (mark: HighWaterMark) => void;
 }): Promise<Workspace>;
 /**
  * Re-open a personal workspace this identity already created: fetch the
@@ -186,9 +222,20 @@ export declare function createWorkspace(api: ApiClient, session: Session, worksp
  * `true` for a workspace this identity did NOT actually found) makes a
  * legitimate cross-user grant reject with "founder anchor mismatch" --
  * a loud, safe failure, never a silent forgery.
+ *
+ * `opts.highWater` / `opts.onAdvance` carry §6's rollback mark across
+ * sessions (see `Workspace.floor`, and `createHighWaterPersistence` for the
+ * shared caller half). With a mark, a head older than it throws
+ * `"e2ee: workspace rollback detected"`, a different head at the same
+ * version throws `"e2ee: workspace fork detected"`, and a grant from an
+ * older key epoch throws `"e2ee: workspace key rollback detected"` - before
+ * any key from that grant is used. Without one, the first head is trusted
+ * on first use, as on a new device.
  */
 export declare function openWorkspace(api: ApiClient, session: Session, workspaceId: string, opts?: {
     selfFounded?: boolean;
+    highWater?: HighWaterMark;
+    onAdvance?: (mark: HighWaterMark) => void;
 }): Promise<Workspace>;
 /**
  * Grant another user access to this workspace (P2b Task 3 - the payoff of
@@ -334,13 +381,14 @@ export declare function revokeAccess(api: ApiClient, session: Session, ws: Works
  * pubkey + x25519 ENCRYPTION pubkey), for the P2c members/revoke UI, as the
  * `granteeEd25519PubHex` source `revokeAccess`'s caller needs, and as the
  * `remaining`/`removed` source `computeRotation`'s caller needs (P2d Task 1).
+ *
+ * SERVER DATA, not authority: `computeRotation` accepts a roster only if its
+ * signing identities are exactly the signed log's current members, and each
+ * row's x25519 key only if that member's signed `grant` binds it (see
+ * `verifyMemberKeyPin`). Display may show this list as-is; nothing is ever
+ * sealed to it unverified.
  */
-export declare function listMembers(api: ApiClient, ws: Workspace): Promise<{
-    userId: string;
-    email: string;
-    ed25519Pub: string;
-    x25519Pub: string;
-}[]>;
+export declare function listMembers(api: ApiClient, ws: Workspace): Promise<MemberRow[]>;
 /**
  * The client-computed result of a full workspace-key rotation (P2d, spec
  * §8's "revoke becomes real" guarantee): a fresh WK (`newWkVersion =
@@ -437,11 +485,7 @@ export type RotationPayload = {
  * being revoked, NOT present in `remaining`.
  */
 export declare function computeRotation(api: ApiClient, session: Session, ws: Workspace, args: {
-    remaining: {
-        userId: string;
-        ed25519Pub: string;
-        x25519Pub: string;
-    }[];
+    remaining: MemberRow[];
     removed: {
         userId: string;
         ed25519Pub: string;

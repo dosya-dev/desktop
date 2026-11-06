@@ -68,4 +68,22 @@ describe("MaintenanceScreen", () => {
       vi.useRealTimers();
     }
   });
+
+  it("in English the team's message carries no dir, so a Hebrew message lays out exactly as before", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<MaintenanceScreen message={"\u05e0\u05d7\u05d6\u05d5\u05e8 \u05d1-14:00."} onRetry={async () => false} email="f@x.dev" onSignOut={() => {}} />);
+    });
+    // dir="auto" is set only in a right-to-left language (useAutoDir), on an
+    // inline span that keeps the box on the page's alignment; English keeps
+    // the bare text, as before.
+    expect(container.querySelector("[dir]")).toBeNull();
+    const box = container.querySelector(".whitespace-pre-wrap")!;
+    expect(box.hasAttribute("dir")).toBe(false);
+    expect(box.children.length).toBe(0);
+    expect(box.textContent).toBe("\u05e0\u05d7\u05d6\u05d5\u05e8 \u05d1-14:00.");
+  });
 });
+

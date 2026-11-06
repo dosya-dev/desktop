@@ -14,6 +14,8 @@ import type { ViewerFile } from "@/components/files/FileViewer";
 import { formatBytes } from "@/lib/format";
 import { timeAgo, extOf, originLabel, kindLabel, regionLabel } from "@/lib/file-type";
 import { KIND_COPY, formatItemDate, type LibraryKind, type LibraryItem } from "@/lib/library-request";
+import { tl } from "@/lib/locale-state";
+import type { MessageKey } from "../../i18n/keys";
 
 export interface FolderRow {
   id: string;
@@ -76,26 +78,35 @@ export const NAME_COL_MIN = 260;
 export const CHECKBOX_COL = 32;
 export const ACTIONS_COL = 40;
 
+/**
+ * A column whose header is a getter over its catalog key: ALL_COLUMNS is
+ * built once at module load, and the header has to follow a language switch.
+ * (A getter, not a spread: spreading would read the label once, here.)
+ */
+function column(labelKey: MessageKey, def: Omit<ColumnDef, "label">): ColumnDef {
+  return Object.defineProperty({ ...def }, "label", { get: () => tl(labelKey), enumerable: true }) as ColumnDef;
+}
+
 export const ALL_COLUMNS: ColumnDef[] = [
-  { key: "name", label: "Name", defaultVisible: true, render: () => null /* handled separately */ },
-  { key: "size", label: "Size", defaultVisible: true, width: 88, render: (f) => formatBytes(f.size_bytes), renderFolder: (f) => formatBytes(f.total_size_bytes ?? 0) },
-  { key: "created", label: "Created", defaultVisible: true, width: 104, render: (f) => timeAgo(f.created_at), renderFolder: (f) => timeAgo(f.created_at) },
-  { key: "modified", label: "Modified", defaultVisible: false, width: 104, render: (f) => timeAgo(f.updated_at), renderFolder: (f) => timeAgo(f.content_updated_at ?? f.created_at) },
+  column("common.label.name", { key: "name", defaultVisible: true, render: () => null /* handled separately */ }),
+  column("files.label.size", { key: "size", defaultVisible: true, width: 88, render: (f) => formatBytes(f.size_bytes), renderFolder: (f) => formatBytes(f.total_size_bytes ?? 0) }),
+  column("files.label.created", { key: "created", defaultVisible: true, width: 104, render: (f) => timeAgo(f.created_at), renderFolder: (f) => timeAgo(f.created_at) }),
+  column("files.label.modified", { key: "modified", defaultVisible: false, width: 104, render: (f) => timeAgo(f.updated_at), renderFolder: (f) => timeAgo(f.content_updated_at ?? f.created_at) }),
   // The raw MIME type was unreadable at any column width
   // ("application/vnd.openxmlformats-officedocument.wordprocessingml.document").
   // A category rather than the extension, because Extension is its own column
   // and two columns reading "DOCX" would waste one of them. The full MIME type
   // is still on hover, via the title attribute that cell carries.
-  { key: "type", label: "Type", defaultVisible: false, width: 96, render: (f) => kindLabel(f.name), renderFolder: () => "Folder" },
-  { key: "extension", label: "Extension", defaultVisible: false, width: 88, render: (f) => (f.extension || extOf(f.name) || "-").toUpperCase() },
-  { key: "version", label: "Version", defaultVisible: false, width: 80, render: (f) => (f.current_version ?? 1) > 1 ? `v${f.current_version}` : "-" },
-  { key: "uploader", label: "Uploader", defaultVisible: false, width: 120, render: (f) => f.uploader_name ?? "-", renderFolder: (f) => f.uploader_name ?? "-" },
+  column("files.label.type", { key: "type", defaultVisible: false, width: 96, render: (f) => kindLabel(f.name), renderFolder: () => tl("common.label.folder") }),
+  column("files.label.extension", { key: "extension", defaultVisible: false, width: 88, render: (f) => (f.extension || extOf(f.name) || "-").toUpperCase() }),
+  column("files.label.versionTitleCase", { key: "version", defaultVisible: false, width: 80, render: (f) => (f.current_version ?? 1) > 1 ? tl("common.label.vVersion", { version: String(f.current_version) }) : "-" }),
+  column("files.label.uploader", { key: "uploader", defaultVisible: false, width: 120, render: (f) => f.uploader_name ?? "-", renderFolder: (f) => f.uploader_name ?? "-" }),
   // regionLabel already existed and turns "ap-southeast-2" into "Sydney" - the
   // raw code was both wider and less useful.
-  { key: "region", label: "Region", defaultVisible: true, width: 112, render: (f) => f.region ? regionLabel(f.region) : "-", renderFolder: (f) => f.region ? regionLabel(f.region) : "-" },
-  { key: "origin", label: "Origin", defaultVisible: true, width: 88, render: (f) => originLabel(f.origin), renderFolder: (f) => originLabel(f.origin) },
-  { key: "shares", label: "Shares", defaultVisible: false, width: 72, render: (f) => f.share_count > 0 ? String(f.share_count) : "-", renderFolder: (f) => f.share_count > 0 ? String(f.share_count) : "-" },
-  { key: "comments", label: "Comments", defaultVisible: false, width: 88, render: (f) => f.comment_count > 0 ? String(f.comment_count) : "-", renderFolder: (f) => f.comment_count > 0 ? String(f.comment_count) : "-" },
+  column("files.label.region", { key: "region", defaultVisible: true, width: 112, render: (f) => f.region ? regionLabel(f.region) : "-", renderFolder: (f) => f.region ? regionLabel(f.region) : "-" }),
+  column("files.label.origin", { key: "origin", defaultVisible: true, width: 88, render: (f) => originLabel(f.origin), renderFolder: (f) => originLabel(f.origin) }),
+  column("files.label.shares", { key: "shares", defaultVisible: false, width: 72, render: (f) => f.share_count > 0 ? String(f.share_count) : "-", renderFolder: (f) => f.share_count > 0 ? String(f.share_count) : "-" }),
+  column("files.label.comments", { key: "comments", defaultVisible: false, width: 88, render: (f) => f.comment_count > 0 ? String(f.comment_count) : "-", renderFolder: (f) => f.comment_count > 0 ? String(f.comment_count) : "-" }),
 ];
 
 export const DEFAULT_VISIBLE: Set<ColumnKey> = new Set(ALL_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key));
@@ -141,13 +152,12 @@ export function loadSavedColumns(): Set<ColumnKey> {
  * inserted right after it.
  */
 export function libraryColumnsFor(kind: LibraryKind): ColumnDef[] {
-  const takenColumn: ColumnDef = {
+  const takenColumn = column(KIND_COPY[kind].primaryDateLabel, {
     key: "taken",
-    label: KIND_COPY[kind].primaryDateLabel,
     defaultVisible: true,
     width: 104,
     render: (f) => formatItemDate((f as LibraryItem).taken_at),
-  };
+  });
   const columns = [...ALL_COLUMNS];
   const createdIdx = columns.findIndex((c) => c.key === "created");
   if (kind === "photos") {

@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Check, Copy, ChevronLeft } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
-import { channelName, syncLine, updateButton, updateHint, type SyncSummaryInput, type UpdateState } from "@/lib/about-info";
-import acknowledgements from "virtual:acknowledgements";
+import { aboutRows, detailsText, updateButton, updateHint, type AboutInfo, type SyncSummaryInput, type UpdateState } from "@/lib/about-info";
+import { AcknowledgementsList } from "@/components/AcknowledgementsList";
+import { useDir, useT } from "@/lib/i18n";
+import { makeT, type T } from "../../i18n/translator";
+import en from "../../i18n/messages/en.json";
 import appIcon from "@/assets/app-icon.png";
 
 /**
@@ -15,24 +18,31 @@ import appIcon from "@/assets/app-icon.png";
  * updater, the sync engine's status, the Finder location switch, and the
  * signed-in account from AuthProvider (which wraps every route).
  */
-interface AboutInfo {
-  version: string;
-  distribution: string;
-  platform: string;
-  arch: string;
-  electron: string;
-  chrome: string;
+/** Copy Details goes to support, so it is always English. */
+const english: T = makeT("en", en, en);
+
+/**
+ * Where the Acknowledgements back button sits: the page's inline start,
+ * physical because the macOS traffic lights are drawn by the OS on its own
+ * start side (top-left, or top-right under a right-to-left OS). On the
+ * lights' side it keeps the 5rem reservation; otherwise 1rem.
+ */
+function backButtonInset(dir: "ltr" | "rtl"): CSSProperties {
+  const side = dir === "rtl" ? "right" : "left";
+  const lights = document.documentElement.dataset.osDir === "rtl" ? "right" : "left";
+  return { [side]: side === lights ? "5rem" : "1rem" }; // rtl-ok: physical geometry, the traffic lights' side is the OS's
 }
 
 export function AboutPage() {
   const { user } = useAuth();
+  const t = useT();
+  const dir = useDir();
   const [info, setInfo] = useState<AboutInfo | null>(null);
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [sync, setSync] = useState<SyncSummaryInput | null>(null);
   const [finder, setFinder] = useState<{ available: boolean; enabled: boolean } | null>(null);
   const [copied, setCopied] = useState(false);
   const [showAck, setShowAck] = useState(false);
-  const [openAck, setOpenAck] = useState<string | null>(null);
 
   useEffect(() => {
     const api = window.electronAPI;
@@ -53,26 +63,14 @@ export function AboutPage() {
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
-  const rows = useMemo(() => {
-    const list: [string, string, boolean?][] = [];
-    if (info) {
-      list.push(["Channel", channelName(info.distribution)]);
-      list.push(["System", `${info.platform} · ${info.arch}`]);
-      list.push(["Engine", `Electron ${info.electron} · Chromium ${info.chrome}`]);
-    }
-    list.push(["Signed in as", user?.email ?? "Not signed in"]);
-    list.push(["Sync", syncLine(sync), !!sync && sync.pairs.length > 0 && syncLine(sync).startsWith("All synced")]);
-    if (finder?.available) list.push(["Finder location", finder.enabled ? "On" : "Off", finder.enabled]);
-    return list;
-  }, [info, user, sync, finder]);
+  // The rows in a given language: the chosen one on screen, English for
+  // Copy Details.
+  const rowsIn = useCallback((tr: T) => aboutRows(tr, info, user?.email, sync, finder), [info, user, sync, finder]);
+  const rows = useMemo(() => rowsIn(t), [rowsIn, t]);
 
   const copyDetails = async () => {
-    const lines = [
-      `dosya ${info?.version ?? ""} (${info ? channelName(info.distribution) : "unknown channel"})`,
-      ...rows.map(([k, v]) => `${k}: ${v}`),
-    ];
     try {
-      await navigator.clipboard.writeText(lines.join("\n"));
+      await navigator.clipboard.writeText(detailsText(english, info, rowsIn(english)));
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {}
@@ -105,34 +103,17 @@ export function AboutPage() {
         <div className="titlebar-drag flex h-11 shrink-0 items-center justify-center border-b px-4" style={{ borderColor: "var(--color-border)" }}>
           <button
             onClick={() => setShowAck(false)}
-            className="titlebar-no-drag absolute left-20 flex items-center gap-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+            // Back sits at the page's inline start. The traffic lights sit on
+            // the OS's start side; when the two meet it clears them (5rem).
+            style={backButtonInset(dir)}
+            className="titlebar-no-drag absolute flex items-center gap-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
           >
-            <ChevronLeft size={14} /> Back
+            <ChevronLeft size={14} className="rtl:-scale-x-100" /> {t("common.back")}
           </button>
-          <span className="text-sm font-semibold">Acknowledgements</span>
+          <span className="text-sm font-semibold">{t("about.label.acknowledgements")}</span>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-3">
-          <p className="mb-3 text-xs text-[var(--color-text-secondary)]">
-            dosya is built with these open-source packages. Select one to read its licence.
-          </p>
-          <ul className="divide-y" style={{ borderColor: "var(--color-border)" }}>
-            {acknowledgements.map((a: { name: string; version: string; license: string; text: string | null }) => (
-              <li key={a.name} className="py-1.5">
-                <button
-                  onClick={() => setOpenAck(openAck === a.name ? null : a.name)}
-                  className="flex w-full items-center justify-between gap-3 text-left text-sm"
-                >
-                  <span>{a.name} <span className="font-mono text-xs text-[var(--color-text-muted)]">{a.version}</span></span>
-                  <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{a.license}</span>
-                </button>
-                {openAck === a.name && (
-                  <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg p-3 font-mono text-[11px] leading-relaxed text-[var(--color-text-secondary)]" style={{ background: "var(--color-bg-secondary)" }}>
-                    {a.text ?? `Licensed under ${a.license}. No licence file ships with the package.`}
-                  </pre>
-                )}
-              </li>
-            ))}
-          </ul>
+          <AcknowledgementsList />
         </div>
       </div>
     );
@@ -148,16 +129,16 @@ export function AboutPage() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight">dosya</h1>
             <p className="font-mono text-xs text-[var(--color-text-secondary)]" data-testid="about-version">
-              {info ? `Version ${info.version}` : "Version …"}
+              {info ? t("common.description.versionVersion", { version: info.version }) : t("about.label.version")}
             </p>
           </div>
         </div>
 
-        <dl className="mt-5 divide-y border-t" style={{ borderColor: "var(--color-border)" }}>
+        <dl className="mt-5 divide-y divide-[var(--color-border)] border-t" style={{ borderColor: "var(--color-border)" }}>
           {rows.map(([k, v, ok]) => (
             <div key={k} className="flex items-center justify-between gap-4 py-2 text-[13px]">
               <dt className="text-[var(--color-text-secondary)]">{k}</dt>
-              <dd className={`text-right font-mono text-xs ${ok ? "text-[var(--color-success,var(--color-primary))]" : ""}`}>{v}</dd>
+              <dd className={`text-end font-mono text-xs ${ok ? "text-[var(--color-success,var(--color-primary))]" : ""}`}>{v}</dd>
             </div>
           ))}
         </dl>
@@ -179,7 +160,7 @@ export function AboutPage() {
             style={{ borderColor: "var(--color-border)" }}
           >
             {copied ? <Check size={14} /> : <Copy size={14} />}
-            {copied ? "Copied" : "Copy Details"}
+            {copied ? t("about.action.copied") : t("about.action.copyDetails")}
           </button>
         </div>
         {hint && <p className="mt-2 text-xs text-[var(--color-text-secondary)]">{hint}</p>}
@@ -187,10 +168,10 @@ export function AboutPage() {
         <div className="mt-5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t pt-3 text-xs" style={{ borderColor: "var(--color-border)" }}>
           <div className="flex gap-3">
             {link("dosya.dev", "https://dosya.dev")}
-            {link("Release Notes", "https://dosya.dev/changelog/")}
-            <button onClick={() => setShowAck(true)} className="text-[var(--color-primary)] hover:underline">Acknowledgements</button>
+            {link(t("about.label.releaseNotes"), "https://dosya.dev/changelog/")}
+            <button onClick={() => setShowAck(true)} className="text-[var(--color-primary)] hover:underline">{t("about.label.acknowledgements")}</button>
           </div>
-          <span className="text-[var(--color-text-muted)]">© {new Date().getFullYear()} dosya.dev</span>
+          <span className="text-[var(--color-text-muted)]">{t("about.label.yearDosyaDev", { year: String(new Date().getFullYear()) })}</span>
         </div>
       </div>
     </div>

@@ -4,6 +4,7 @@ import { loadConfig } from "./config";
 import { createElectronEnv } from "./electron-env";
 import { mergeStatusPairs } from "./status-merge";
 import { RestartPolicy, HEALTHY_AFTER_MS } from "./restart-policy";
+import { engineStartedFromReply } from "./engine-start-reply";
 import {
   isChildToParent,
   errorText,
@@ -248,8 +249,8 @@ export class SyncEngineHost extends EventEmitter implements SyncEngineHandle {
       if (!this.wantRunning || this.parked) return;
       this.spawn()
         .then(() => this.rpc("start", []))
-        .then(() => {
-          this.running = true;
+        .then((reply) => {
+          this.running = engineStartedFromReply(reply);
         })
         .catch((err) => {
           console.error("[sync-engine] restart failed:", errorText(err));
@@ -381,7 +382,12 @@ export class SyncEngineHost extends EventEmitter implements SyncEngineHandle {
     return this.enqueueLifecycle(async () => {
       if (!this.wantRunning) return; // a stop was requested after us
       try {
-        await this.rpc("start", []);
+        const reply = await this.rpc("start", []);
+        if (!engineStartedFromReply(reply)) {
+          // Signed out: stay "not running" so the login cookie starts it.
+          console.log("[sync-engine] not started yet - waiting for sign-in");
+          if (this.wantRunning) this.running = false;
+        }
       } catch (err) {
         this.running = false;
         throw err;

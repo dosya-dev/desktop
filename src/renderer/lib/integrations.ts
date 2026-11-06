@@ -2,6 +2,8 @@ import {
   RefreshCw, HardDrive, Server, Cloud, Terminal, Code2, Webhook, CloudDownload,
   CopyX, type LucideIcon,
 } from "lucide-react";
+import { t } from "./i18n";
+import type { MessageKey } from "../../i18n/keys";
 
 /**
  * Card metadata for the Integrations page.
@@ -16,17 +18,29 @@ import {
  *  - No "Desktop apps" card. It offers a download of the app you are already in.
  *  - No "Photo map" tool. On desktop the map lives under Files in the sidebar,
  *    so listing it here too would give one feature two doors on one screen.
+ *
+ * Text is held as catalog keys and translated at render (cardTitle(), t()).
+ * A product name (WebDAV, rclone, Google Drive) is a plain `name` and never
+ * translated; a descriptive title ("Remote download") is a `titleKey`.
  */
 
 export type IntegrationSlug =
   | "rclone" | "webdav" | "sftp" | "s3" | "cli" | "rest-api"
   | "google" | "onedrive" | "dropbox" | "webhooks" | "remote-download";
 
+/** A card title: a product name as is, or a catalog key for a descriptive one. */
+export type CardTitle = { name: string } | { titleKey: MessageKey };
+
+/** The card title in the current language (product names unchanged). */
+export function cardTitle(title: CardTitle): string {
+  return "name" in title ? title.name : t(title.titleKey);
+}
+
 export interface IntegrationMeta {
   slug: IntegrationSlug;
-  title: string;
-  description: string;
-  tag: string;
+  title: CardTitle;
+  description: MessageKey;
+  tag: MessageKey;
   icon: LucideIcon;
   /** Brand logo served from renderer/public. Rendered instead of `icon` when set. */
   iconSrc?: string;
@@ -37,18 +51,18 @@ export interface IntegrationMeta {
 /** In-app tools that run natively here - no setup, no browser hand-off. */
 export interface ToolMeta {
   to: string;
-  title: string;
-  description: string;
-  tag: string;
+  title: CardTitle;
+  description: MessageKey;
+  tag: MessageKey;
   icon: LucideIcon;
 }
 
 export const TOOLS: ToolMeta[] = [
   {
     to: "/duplicates",
-    title: "Duplicate finder",
-    description: "Find byte-identical copies of your files and move the extras to trash.",
-    tag: "Tool",
+    title: { titleKey: "integrations.heading.duplicateFinder" },
+    description: "integrations.description.findByteIdenticalCopiesOfYourFilesAndMove",
+    tag: "integrations.label.tool",
     icon: CopyX,
   },
 ];
@@ -56,89 +70,89 @@ export const TOOLS: ToolMeta[] = [
 export const INTEGRATIONS: IntegrationMeta[] = [
   {
     slug: "webdav",
-    title: "WebDAV",
-    description: "Mount your workspace as a network drive on macOS, Windows or Linux.",
-    tag: "Mount as drive",
+    title: { name: "WebDAV" },
+    description: "integrations.description.mountYourWorkspaceAsANetworkDriveOnMacOS",
+    tag: "integrations.label.mountAsDrive",
     icon: HardDrive,
     docsUrl: "https://dosya.dev/developer/webdav",
   },
   {
     slug: "s3",
-    title: "S3",
-    description: "Point any S3-compatible tool or SDK at your workspace.",
-    tag: "S3 API",
+    title: { name: "S3" },
+    description: "integrations.description.pointAnyS3CompatibleToolOrSDKAtYour",
+    tag: "integrations.label.s3API",
     icon: Cloud,
     docsUrl: "https://dosya.dev/developer/s3",
   },
   {
     slug: "sftp",
-    title: "SFTP",
-    description: "Upload and manage files with any SFTP client - FileZilla, WinSCP, Cyberduck or the terminal.",
-    tag: "Secure transfer",
+    title: { name: "SFTP" },
+    description: "integrations.description.uploadAndManageFilesWithAnySFTPClientFileZilla",
+    tag: "integrations.label.secureTransfer",
     icon: Server,
     docsUrl: "https://dosya.dev/developer/sftp",
   },
   {
     slug: "rclone",
-    title: "rclone",
-    description: "Copy, sync and mount your files from the command line with rclone.",
-    tag: "Sync & mount",
+    title: { name: "rclone" },
+    description: "integrations.description.copySyncAndMountYourFilesFromTheCommand",
+    tag: "integrations.label.syncMount",
     icon: RefreshCw,
     docsUrl: "https://dosya.dev/developer/rclone",
   },
   {
     slug: "cli",
-    title: "CLI",
-    description: "Script uploads, downloads and folder sync from your terminal with the dosya CLI.",
-    tag: "Terminal",
+    title: { titleKey: "integrations.heading.cli" },
+    description: "integrations.description.scriptUploadsDownloadsAndFolderSyncFromYourTerminal",
+    tag: "integrations.label.terminal",
     icon: Terminal,
     docsUrl: "https://dosya.dev/developer/cli",
   },
   {
     slug: "rest-api",
-    title: "REST API",
-    description: "Automate everything with the dosya REST API and bearer tokens.",
-    tag: "HTTP API",
+    title: { titleKey: "integrations.heading.restAPI" },
+    description: "integrations.description.automateEverythingWithTheDosyaRESTAPIAndBearer",
+    tag: "integrations.label.httpAPI",
     icon: Code2,
     docsUrl: "https://dosya.dev/developer/api",
   },
   {
     slug: "google",
-    title: "Google Drive",
-    description: "Import folders and files from Google Drive, with your folder structure preserved.",
-    tag: "Import",
+    title: { name: "Google Drive" },
+    description: "integrations.description.importFoldersAndFilesFromGoogleDriveWithYour",
+    tag: "common.label.import",
     icon: HardDrive,
     iconSrc: "/google-color.svg",
   },
   {
     slug: "onedrive",
-    title: "OneDrive",
-    description: "Import folders and files from OneDrive, with your folder structure preserved.",
-    tag: "Import",
+    title: { name: "OneDrive" },
+    description: "integrations.description.importFoldersAndFilesFromOneDriveWithYourFolder",
+    tag: "common.label.import",
     icon: HardDrive,
     iconSrc: "/onedrive-color.svg",
   },
   {
     slug: "dropbox",
-    title: "Dropbox",
-    description: "Import folders and files from Dropbox, with your folder structure preserved.",
-    tag: "Import",
+    title: { name: "Dropbox" },
+    description: "integrations.description.importFoldersAndFilesFromDropboxWithYourFolder",
+    tag: "common.label.import",
     icon: HardDrive,
     iconSrc: "/dropbox-color.svg",
   },
   {
     slug: "webhooks",
-    title: "Webhooks",
-    description: "Get realtime HTTP notifications when files are uploaded, deleted, or shares are accessed.",
-    tag: "Events",
+    title: { titleKey: "integrations.heading.webhooks" },
+    description: "integrations.description.getRealtimeHTTPNotificationsWhenFilesAreUploadedDeleted",
+    tag: "integrations.label.events",
     icon: Webhook,
     docsUrl: "https://dosya.dev/developer/api#webhooks",
   },
   {
     slug: "remote-download",
-    title: "Remote download",
-    description: "Paste a direct file link and dosya downloads it into your workspace server-side - ideal on slow connections.",
-    tag: "Import",
+    title: { titleKey: "integrations.heading.remoteDownload" },
+    description: "integrations.description.pasteADirectFileLinkAndDosyaDownloadsIt",
+    tag: "common.label.import",
     icon: CloudDownload,
   },
 ];

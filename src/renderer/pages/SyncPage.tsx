@@ -38,8 +38,14 @@ import { api } from "@/lib/api-client";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { FolderIcon, syncIconSrc } from "@/components/files/FileIcon";
 import { toast } from "sonner";
+import { Bdi, externalDir, ipcErrorText, useAutoDir } from "@/lib/bidi-ui";
 import { openReport } from "../lib/report-problem-store";
 import { ConflictList } from "../components/sync/ConflictList";
+import { intlLocale } from "@/lib/locale-state";
+import { translateExternal, useDir, useT } from "@/lib/i18n";
+import { usePairFolderLabel } from "@/lib/root-pairs";
+import { DEFAULT_ROOT_FOLDER_NAME, DEFAULT_WORKSPACE_NAME } from "../../main/sync-pair-label";
+import type { MessageKey } from "../../i18n/keys";
 
 type Tab = "overview" | "conflicts" | "activity" | "settings";
 
@@ -62,15 +68,38 @@ function formatElapsed(ms: number): string {
 // what moves where, then what is ignored or protected. A picker where one
 // option explains itself differently than the rest reads as a different KIND
 // of option, not a different direction.
-const SYNC_MODES = [
-  { id: "two-way", label: "Full Sync", desc: "Changes on either side are mirrored to the other side. Deletions are applied in both directions." },
-  { id: "push", label: "Push to Cloud", desc: "Local changes are sent to the cloud, including deletions. Cloud changes are ignored locally." },
-  { id: "push-safe", label: "Protect & Upload", desc: "Local files are uploaded to the cloud as they change. Nothing is ever deleted from the cloud." },
-  { id: "pull", label: "Pull from Cloud", desc: "Cloud changes are downloaded to this device, including deletions. Local changes are ignored." },
-  { id: "pull-safe", label: "Save to Device", desc: "Cloud files are downloaded to this device as they change. Nothing is ever deleted locally." },
+//
+// `note` is the one thing a mode does NOT do that people expect it to
+// (TC-052): Protect & Upload never brings cloud-side changes down, so a
+// file deleted in dosya stays on this computer and the folder still reads
+// "Synced". Shown under the description in the picker, the help dialog and
+// the folder row's mode badge tooltip.
+const SYNC_MODES: { id: string; label: MessageKey; desc: MessageKey; note?: MessageKey }[] = [
+  { id: "two-way", label: "sync.label.fullSync", desc: "sync.description.changesOnEitherSideAreMirroredToTheOther" },
+  { id: "push", label: "sync.label.pushToCloud", desc: "sync.description.localChangesAreSentToTheCloudIncludingDeletions" },
+  {
+    id: "push-safe",
+    label: "sync.label.protectUpload",
+    desc: "sync.description.localFilesAreUploadedToTheCloudAsThey",
+    note: "sync.description.filesYouDeleteOrChangeInDosyaStayOnThisComputer",
+  },
+  { id: "pull", label: "sync.label.pullFromCloud", desc: "sync.description.cloudChangesAreDownloadedToThisDeviceIncludingDeletions" },
+  { id: "pull-safe", label: "sync.label.saveToDevice", desc: "sync.description.cloudFilesAreDownloadedToThisDeviceAsThey" },
 ];
 
+/**
+ * A "1. Pick a folder..." step: the number keeps its bold styling wherever
+ * the translation's leading "N." is; a translation without one renders plain.
+ */
+function NumberedStep({ text }: { text: string }) {
+  const m = /^(\d+\.)\s+([\s\S]*)$/.exec(text);
+  if (!m) return <li className="flex gap-2">{text}</li>;
+  return <li className="flex gap-2"><span className="font-semibold text-[var(--color-text)] shrink-0">{m[1]}</span> {m[2]}</li>;
+}
+
 export function SyncPage() {
+  const ownDir = useAutoDir();
+  const t = useT();
   const { active, workspaces } = useWorkspace();
   const { status, isLoading, loadFailed, init, refresh } = useSyncStore();
   const [tab, setTab] = useState<Tab>("overview");
@@ -121,6 +150,8 @@ export function SyncPage() {
     [allPairs, activeId],
   );
   const pairs = useMemo(() => allPairs.filter((p) => pairIds.has(p.pairId)), [allPairs, pairIds]);
+  // "Root" on a workspace-root pair in the chosen language; other names as stored.
+  const folderName = usePairFolderLabel(pairs);
   const transfers = useMemo(() => allTransfers.filter((t) => pairIds.has(t.pairId)), [allTransfers, pairIds]);
   // Status carries counts only; ConflictList pages the list itself.
   const conflictCountByPair = status?.conflictCountByPair;
@@ -168,25 +199,21 @@ export function SyncPage() {
       }, 0);
     }
 
-    let eta = "";
+    // Raw numbers here; the labels are built at render so a language switch
+    // relabels them without waiting for the next status tick.
+    let etaSec = 0;
     if (earliest && effectiveTotalBytes > 0 && effectiveCompletedBytes > 0) {
       const elapsed = Date.now() - earliest;
       const speed = effectiveCompletedBytes / elapsed; // bytes/ms
       const remaining = effectiveTotalBytes - effectiveCompletedBytes;
-      if (speed > 0 && remaining > 0) {
-        const sec = Math.ceil(remaining / speed / 1000);
-        if (sec < 60) eta = `${sec}s remaining`;
-        else if (sec < 3600) eta = `${Math.ceil(sec / 60)}m remaining`;
-        else { const h = Math.floor(sec / 3600); const m = Math.ceil((sec % 3600) / 60); eta = `${h}h ${m}m remaining`; }
-      }
+      if (speed > 0 && remaining > 0) etaSec = Math.ceil(remaining / speed / 1000);
     }
 
     // Speed
-    let speed = "";
+    let bytesPerSec = 0;
     if (earliest && effectiveCompletedBytes > 0) {
       const elapsed = Date.now() - earliest;
-      const bps = effectiveCompletedBytes / (elapsed / 1000);
-      speed = `${formatBytes(bps)}/s`;
+      bytesPerSec = effectiveCompletedBytes / (elapsed / 1000);
     }
 
     // Check if any pair is in a preparatory phase (connecting, comparing, scanning, hashing, creating folders).
@@ -209,7 +236,7 @@ export function SyncPage() {
       completedFiles: displayCompletedFiles,
       totalBytes: effectiveTotalBytes,
       completedBytes: effectiveCompletedBytes,
-      pct, eta, speed,
+      pct, etaSec, bytesPerSec,
       pairCount: syncing.length || 1,
       scanning,
       isTransferring,
@@ -220,8 +247,20 @@ export function SyncPage() {
     };
   }, [pairs, transfers]);
 
+  let eta = "";
+  let speed = "";
+  if (syncProgress) {
+    const sec = syncProgress.etaSec;
+    if (sec > 0) {
+      if (sec < 60) eta = t("sync.label.secSRemaining", { sec });
+      else if (sec < 3600) eta = t("sync.label.minutesMRemaining", { minutes: Math.ceil(sec / 60) });
+      else eta = t("sync.label.hHMMRemaining", { h: Math.floor(sec / 3600), m: Math.ceil((sec % 3600) / 60) });
+    }
+    if (syncProgress.bytesPerSec > 0) speed = t("sync.label.bpsS", { bps: formatBytes(syncProgress.bytesPerSec) });
+  }
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-testid="sync-page">
       {/* Overall sync progress banner */}
       {syncProgress && (
         <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-primary)", background: "var(--color-primary-bg, var(--color-bg-secondary))" }}>
@@ -230,32 +269,34 @@ export function SyncPage() {
             <>
               <div className="flex items-center gap-2 mb-2">
                 <Loader2 size={16} className="animate-spin text-[var(--color-primary)]" />
-                <span className="text-sm font-semibold">
-                  {syncProgress.statusText || `Scanning folder${syncProgress.pairCount > 1 ? "s" : ""}...`}
+                <span dir={externalDir(syncProgress.statusText)} className="text-sm font-semibold">
+                  {/* statusText is engine text, translated where the catalog knows it. */}
+                  {(syncProgress.statusText && translateExternal(syncProgress.statusText)) || t(syncProgress.pairCount > 1 ? "sync.status.scanningFolders" : "sync.status.scanningFolder")}
                 </span>
                 {syncProgress.scannedFiles > 0 && (
                   <span className="text-xs text-[var(--color-text-secondary)]">
-                    {syncProgress.scannedFiles.toLocaleString()} file{syncProgress.scannedFiles !== 1 ? "s" : ""}
-                    {syncProgress.scannedFolders > 0 ? `, ${syncProgress.scannedFolders.toLocaleString()} folder${syncProgress.scannedFolders !== 1 ? "s" : ""} found` : " found"}
+                    {syncProgress.scannedFolders > 0
+                      ? t("sync.description.fileFolderFound", { scannedFiles: syncProgress.scannedFiles, scannedFolders: syncProgress.scannedFolders })
+                      : t("sync.label.fileFound", { scannedFiles: syncProgress.scannedFiles })}
                   </span>
                 )}
                 {syncProgress.syncStartedAt > 0 && (
-                  <span className="ml-auto flex items-center gap-1 text-xs text-[var(--color-text-muted)] tabular-nums">
+                  <span className="ms-auto flex items-center gap-1 text-xs text-[var(--color-text-muted)] tabular-nums">
                     <Clock size={11} />
-                    {formatElapsed(nowTick - syncProgress.syncStartedAt)} elapsed
+                    {t("sync.label.timeElapsed", { time: formatElapsed(nowTick - syncProgress.syncStartedAt) })}
                   </span>
                 )}
               </div>
               <div className="h-2 w-full rounded-full bg-[var(--color-border)] overflow-hidden">
                 <div
-                  className="h-2 w-1/3 rounded-full"
+                  className="sync-indeterminate h-2 w-1/3 rounded-full"
                   style={{
                     background: "var(--color-primary)",
                     animation: "indeterminate 1.5s ease-in-out infinite",
                   }}
                 />
               </div>
-              <style>{`@keyframes indeterminate { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }`}</style>
+              <style>{`@keyframes indeterminate { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } } @keyframes indeterminate-rtl { 0% { transform: translateX(100%); } 100% { transform: translateX(-400%); } } [dir="rtl"] .sync-indeterminate { animation-name: indeterminate-rtl !important; }`}</style>
             </>
           ) : (
             /* ── Transferring phase: real progress bar with ETA + active files ── */
@@ -265,14 +306,17 @@ export function SyncPage() {
                   <Loader2 size={16} className="animate-spin text-[var(--color-primary)]" />
                   <span className="text-sm font-semibold">
                     {syncProgress.totalFiles > 1
-                      ? `Syncing ${syncProgress.completedFiles} of ${syncProgress.totalFiles} files`
-                      : "Syncing file"}
-                    {syncProgress.pairCount > 1 ? ` across ${syncProgress.pairCount} folders` : ""}
+                      ? syncProgress.pairCount > 1
+                        ? t("sync.label.syncingCompletedFilesOfTotalFilesFilesAcrossPairCountFolders", { completedFiles: syncProgress.completedFiles, totalFiles: syncProgress.totalFiles, pairCount: syncProgress.pairCount })
+                        : t("sync.label.syncingCompletedFilesOfTotalFilesFiles", { completedFiles: syncProgress.completedFiles, totalFiles: syncProgress.totalFiles })
+                      : syncProgress.pairCount > 1
+                        ? t("sync.label.syncingFileAcrossPairCountFolders", { pairCount: syncProgress.pairCount })
+                        : t("sync.label.syncingFile")}
                   </span>
                 </div>
                 <div className="flex items-center gap-3 text-xs text-[var(--color-text-secondary)]">
-                  {syncProgress.speed && <span>{syncProgress.speed}</span>}
-                  <span>{syncProgress.eta || "estimating time…"}</span>
+                  {speed && <span>{speed}</span>}
+                  <span>{eta || t("sync.status.estimatingTime")}</span>
                   <span className="font-semibold text-[var(--color-primary)]">{syncProgress.pct}%</span>
                 </div>
               </div>
@@ -284,7 +328,7 @@ export function SyncPage() {
               </div>
               {syncProgress.totalBytes > 0 && (
                 <p className="mt-1.5 text-[11px] text-[var(--color-text-muted)]">
-                  {formatBytes(syncProgress.completedBytes)} of {formatBytes(syncProgress.totalBytes)}
+                  {t("sync.description.completedbytesOfTotalBytes", { completedBytes: formatBytes(syncProgress.completedBytes), totalBytes: formatBytes(syncProgress.totalBytes) })}
                 </p>
               )}
               {/* Active transfers - show what's currently uploading/downloading */}
@@ -299,8 +343,8 @@ export function SyncPage() {
                         ) : (
                           <Download size={10} className="shrink-0 text-[var(--color-primary)]" />
                         )}
-                        <span className="truncate text-[var(--color-text-secondary)] max-w-[200px]">{t.fileName}</span>
-                        <span className="ml-auto shrink-0 text-[var(--color-text-muted)]">
+                        <span dir={ownDir} className="truncate text-[var(--color-text-secondary)] max-w-[200px]">{t.fileName}</span>
+                        <span className="ms-auto shrink-0 text-[var(--color-text-muted)]">
                           {formatBytes(t.bytesTransferred)} / {formatBytes(t.bytesTotal)}
                         </span>
                         <div className="w-16 h-1 rounded-full bg-[var(--color-border)] shrink-0">
@@ -314,7 +358,7 @@ export function SyncPage() {
                   })}
                   {transfers.length > 5 && (
                     <p className="text-[10px] text-[var(--color-text-muted)]">
-                      +{transfers.length - 5} more transferring...
+                      {t("sync.description.countMoreTransferring", { count: transfers.length - 5 })}
                     </p>
                   )}
                 </div>
@@ -326,9 +370,9 @@ export function SyncPage() {
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Sync</h1>
+          <h1 className="text-2xl font-semibold">{t("common.label.sync")}</h1>
           <p className="text-sm text-[var(--color-text-muted)]">
-            Keep local folders in sync with your dosya.dev workspace
+            {t("sync.description.keepLocalFoldersInSyncWithYourDosyaDev")}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -346,9 +390,9 @@ export function SyncPage() {
                 }}
                 className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
                 style={{ borderColor: "var(--color-border)" }}
-                title="Resume all sync pairs in this workspace"
+                title={t("sync.tooltip.resumeAllSyncPairsInThisWorkspace")}
               >
-                <Play size={13} /> Resume all
+                <Play size={13} /> {t("sync.action.resumeAll")}
               </button>
             ) : (
               <button
@@ -360,16 +404,16 @@ export function SyncPage() {
                 }}
                 className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
                 style={{ borderColor: "var(--color-border)" }}
-                title="Pause all sync pairs in this workspace"
+                title={t("sync.tooltip.pauseAllSyncPairsInThisWorkspace")}
               >
-                <Pause size={13} /> Pause all
+                <Pause size={13} /> {t("sync.action.pauseAll")}
               </button>
             );
           })()}
           <button
             onClick={() => setShowHelp(true)}
             className="flex items-center justify-center rounded-full w-7 h-7 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
-            title="How sync works"
+            title={t("sync.heading.howSyncWorks")}
           >
             <HelpCircle size={16} />
           </button>
@@ -378,7 +422,7 @@ export function SyncPage() {
             className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--color-primary-fg)]"
             style={{ background: "var(--color-primary)" }}
           >
-            <Plus size={14} /> Add sync folder
+            <Plus size={14} /> {t("sync.action.addSyncFolder")}
           </button>
         </div>
       </div>
@@ -386,10 +430,10 @@ export function SyncPage() {
       {/* Tabs */}
       <div className="flex gap-1 border-b" style={{ borderColor: "var(--color-border)" }}>
         {([
-          { id: "overview" as Tab, label: "Overview" },
-          { id: "conflicts" as Tab, label: "Issues", count: wsConflictCount + pairs.filter((p) => p.status === "error").length },
-          { id: "activity" as Tab, label: "Activity" },
-          { id: "settings" as Tab, label: "Settings" },
+          { id: "overview" as Tab, label: t("shared-links.heading.overview") },
+          { id: "conflicts" as Tab, label: t("sync.label.issues"), count: wsConflictCount + pairs.filter((p) => p.status === "error").length },
+          { id: "activity" as Tab, label: t("sync.label.activity") },
+          { id: "settings" as Tab, label: t("common.label.settings") },
         ]).map((t) => (
           <button
             key={t.id}
@@ -415,13 +459,13 @@ export function SyncPage() {
         <div>
           {status?.globalPaused && !isLoading && (
             <div className="mb-3 flex items-center justify-between rounded-xl border px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
-              <p className="text-sm font-medium">Sync is paused for all folders.</p>
+              <p className="text-sm font-medium">{t("sync.description.syncIsPausedForAllFolders")}</p>
               <button
                 onClick={() => { void window.electronAPI.resumeAllSync?.().then(() => refresh()); }}
                 className="rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
-                Resume all
+                {t("sync.action.resumeAll")}
               </button>
             </div>
           )}
@@ -439,43 +483,43 @@ export function SyncPage() {
             </div>
           ) : loadFailed ? (
             <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
-              <p className="text-sm font-medium">Couldn't read sync status</p>
+              <p className="text-sm font-medium">{t("sync.error.couldnTReadSyncStatus")}</p>
               <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                The app couldn't reach its sync engine - try restarting dosya.
+                {t("sync.error.theAppCouldnTReachItsSyncEngineTry")}
               </p>
               <button
                 onClick={() => { void refresh().catch(() => {}); }}
                 className="mt-4 rounded-lg border px-4 py-2 text-sm font-medium"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Try again
+                {t("common.action.tryAgain")}
               </button>
             </div>
           ) : pairs.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
               <img src={syncIconSrc()} alt="" width={48} height={48} className="mb-3 opacity-50" />
-              <p className="text-sm font-medium">No sync folders yet</p>
+              <p className="text-sm font-medium">{t("sync.empty.noSyncFoldersYet")}</p>
               <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                Add a folder to start syncing files between your computer and dosya.dev
+                {t("sync.description.addAFolderToStartSyncingFilesBetweenYour")}
               </p>
               <button
                 onClick={() => setShowAdd(true)}
                 className="mt-4 flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
-                <Plus size={14} /> Add sync folder
+                <Plus size={14} /> {t("sync.action.addSyncFolder")}
               </button>
             </div>
           ) : (
             <div className="overflow-auto">
-              <table className="w-full text-left text-sm">
+              <table className="w-full text-start text-sm">
                 <thead>
                   <tr className="border-b text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
-                    <th className="py-2.5 pl-4 pr-2 font-medium">Folder</th>
-                    <th className="py-2.5 px-2 font-medium w-28">Mode</th>
-                    <th className="py-2.5 px-2 font-medium w-28">Status</th>
-                    <th className="py-2.5 px-2 font-medium w-28">Last synced</th>
-                    <th className="py-2.5 px-2 w-24"></th>
+                    <th className="py-2.5 text-start ps-4 pe-2 font-medium">{t("common.label.folder")}</th>
+                    <th className="py-2.5 text-start px-2 font-medium w-28">{t("sync.column.mode")}</th>
+                    <th className="py-2.5 text-start px-2 font-medium w-28">{t("common.column.status")}</th>
+                    <th className="py-2.5 text-start px-2 font-medium w-28">{t("sync.column.lastSynced")}</th>
+                    <th className="py-2.5 text-start px-2 w-24"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -511,7 +555,7 @@ export function SyncPage() {
             {!hasIssues ? (
               <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
                 <CheckCircle2 size={32} className="mb-2 text-[var(--color-primary)]" />
-                <p className="text-sm text-[var(--color-text-muted)]">No issues</p>
+                <p className="text-sm text-[var(--color-text-muted)]">{t("sync.label.noIssues")}</p>
               </div>
             ) : (
               <>
@@ -520,16 +564,16 @@ export function SyncPage() {
                   <div key={p.pairId} className="flex items-start gap-3 rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
                     <AlertCircle size={16} className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium">{p.remoteFolderName}</p>
-                      <p className="mt-0.5 text-xs text-[var(--color-warning)]">macOS needs permission to this folder again.</p>
-                      <p className="mt-1 truncate font-mono text-[11px] text-[var(--color-text-muted)]">{p.localPath}</p>
+                      <p dir={folderName(p) === p.remoteFolderName ? ownDir : undefined} className="text-sm font-medium">{folderName(p)}</p>
+                      <p className="mt-0.5 text-xs text-[var(--color-warning)]">{t("sync.description.macosNeedsPermissionToThisFolderAgain")}</p>
+                      <p dir="ltr" className="ltr-value mt-1 truncate font-mono text-[11px] text-[var(--color-text-muted)]">{p.localPath}</p>
                     </div>
                     <button
                       onClick={() => void reselectFolder(p.pairId, p.localPath)}
                       className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                       style={{ borderColor: "var(--color-border)" }}
                     >
-                      Reselect folder
+                      {t("sync.action.reselectFolder")}
                     </button>
                   </div>
                 ))}
@@ -543,9 +587,10 @@ export function SyncPage() {
                   >
                     <AlertCircle size={16} className="mt-0.5 shrink-0 text-[var(--color-danger)]" />
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium">{p.remoteFolderName}</p>
-                      <p className="mt-0.5 text-xs text-[var(--color-danger)]">{p.errorMessage}</p>
-                      <p className="mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
+                      <p dir={folderName(p) === p.remoteFolderName ? ownDir : undefined} className="text-sm font-medium">{folderName(p)}</p>
+                      {/* Engine text, translated where the catalog knows it. */}
+                      <p dir={externalDir(p.errorMessage)} className="mt-0.5 text-xs text-[var(--color-danger)]">{translateExternal(p.errorMessage ?? "")}</p>
+                      <p dir="ltr" className="ltr-value mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       <button
@@ -553,14 +598,14 @@ export function SyncPage() {
                         className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                         style={{ borderColor: "var(--color-border)" }}
                       >
-                        Retry
+                        {t("common.retry")}
                       </button>
                       <button
                         onClick={() => openReport({ errorMessage: p.errorMessage ?? "Sync folder in error" })}
                         className="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                         style={{ borderColor: "var(--color-border)" }}
                       >
-                        <span className="inline-flex items-center gap-1.5"><Bug size={12} /> Report</span>
+                        <span className="inline-flex items-center gap-1.5"><Bug size={12} /> {t("sync.label.report")}</span>
                       </button>
                     </div>
                   </div>
@@ -578,9 +623,10 @@ export function SyncPage() {
                     >
                       <AlertTriangle size={16} className="mt-0.5 shrink-0 text-[var(--color-warning)]" />
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium">{p.remoteFolderName}</p>
-                        <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">{n.message}</p>
-                        <p className="mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
+                        <p dir={folderName(p) === p.remoteFolderName ? ownDir : undefined} className="text-sm font-medium">{folderName(p)}</p>
+                        {/* Engine text, translated where the catalog knows it. */}
+                        <p dir={externalDir(n.message)} className="mt-0.5 text-xs text-[var(--color-text-muted)]">{translateExternal(n.message)}</p>
+                        <p dir="ltr" className="ltr-value mt-1 text-[11px] text-[var(--color-text-muted)] font-mono truncate">{p.localPath}</p>
                         {n.kind === "conflict-copy" && (
                           // Both versions are sitting side by side on disk;
                           // the only thing left is to look at them and delete
@@ -590,7 +636,7 @@ export function SyncPage() {
                             className="mt-2 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                             style={{ borderColor: "var(--color-border)" }}
                           >
-                            Show both versions
+                            {t("sync.action.showBothVersions")}
                           </button>
                         )}
                       </div>
@@ -617,25 +663,25 @@ export function SyncPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-lg rounded-xl bg-[var(--color-bg)] shadow-xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b px-6 py-4" style={{ borderColor: "var(--color-border)" }}>
-              <h3 className="text-lg font-semibold">How sync works</h3>
+              <h3 className="text-lg font-semibold">{t("sync.heading.howSyncWorks")}</h3>
               <button onClick={() => setShowHelp(false)} className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]">
                 <X size={16} />
               </button>
             </div>
             <div className="px-6 py-5 space-y-5 max-h-[70vh] overflow-y-auto">
               <p className="text-sm text-[var(--color-text-secondary)]">
-                Sync keeps a folder on your computer connected to a folder in your dosya.dev workspace. Changes are transferred automatically based on the sync mode you choose.
+                {t("sync.description.syncKeepsAFolderOnYourComputerConnectedTo")}
               </p>
 
               <div className="space-y-3">
-                <h4 className="text-sm font-semibold">Sync modes</h4>
+                <h4 className="text-sm font-semibold">{t("sync.heading.syncModes")}</h4>
 
                 <div className="flex items-start gap-3 rounded-lg bg-[var(--color-bg-secondary)] p-3">
                   <ArrowUpDown size={16} className="mt-0.5 shrink-0 text-[var(--color-primary)]" />
                   <div>
-                    <p className="text-sm font-medium">Full Sync</p>
+                    <p className="text-sm font-medium">{t("sync.label.fullSync")}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      Two-way mirror. Changes on either side, including deletions, are reflected on the other. Best for keeping two locations identical.
+                      {t("sync.description.twoWayMirrorChangesOnEitherSideIncludingDeletions")}
                     </p>
                   </div>
                 </div>
@@ -643,9 +689,9 @@ export function SyncPage() {
                 <div className="flex items-start gap-3 rounded-lg bg-[var(--color-bg-secondary)] p-3">
                   <ArrowUp size={16} className="mt-0.5 shrink-0 text-[var(--color-primary)]" />
                   <div>
-                    <p className="text-sm font-medium">Push to Cloud</p>
+                    <p className="text-sm font-medium">{t("sync.label.pushToCloud")}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      One-way upload. Local changes are sent to the cloud, including deletions, and cloud-only changes are ignored. Best for publishing work from this device.
+                      {t("sync.description.oneWayUploadLocalChangesAreSentToThe")}
                     </p>
                   </div>
                 </div>
@@ -653,9 +699,12 @@ export function SyncPage() {
                 <div className="flex items-start gap-3 rounded-lg bg-[var(--color-bg-secondary)] p-3">
                   <ShieldCheck size={16} className="mt-0.5 shrink-0 text-[var(--color-primary)]" />
                   <div>
-                    <p className="text-sm font-medium">Protect & Upload</p>
+                    <p className="text-sm font-medium">{t("sync.label.protectUpload")}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      Safe upload mode. Files are uploaded to the cloud but never deleted there, even if you delete them locally. Best for backing up this device.
+                      {t("sync.description.safeUploadModeFilesAreUploadedToTheCloud")}
+                    </p>
+                    <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                      {t("sync.description.filesYouDeleteOrChangeInDosyaStayOnThisComputer")}
                     </p>
                   </div>
                 </div>
@@ -663,9 +712,9 @@ export function SyncPage() {
                 <div className="flex items-start gap-3 rounded-lg bg-[var(--color-bg-secondary)] p-3">
                   <ArrowDown size={16} className="mt-0.5 shrink-0 text-[var(--color-primary)]" />
                   <div>
-                    <p className="text-sm font-medium">Pull from Cloud</p>
+                    <p className="text-sm font-medium">{t("sync.label.pullFromCloud")}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      One-way download. Cloud changes are downloaded to this device, including deletions, and local-only changes are ignored. Best for following a shared folder.
+                      {t("sync.description.oneWayDownloadCloudChangesAreDownloadedToThis")}
                     </p>
                   </div>
                 </div>
@@ -673,31 +722,31 @@ export function SyncPage() {
                 <div className="flex items-start gap-3 rounded-lg bg-[var(--color-bg-secondary)] p-3">
                   <HardDriveDownload size={16} className="mt-0.5 shrink-0 text-[var(--color-primary)]" />
                   <div>
-                    <p className="text-sm font-medium">Save to Device</p>
+                    <p className="text-sm font-medium">{t("sync.label.saveToDevice")}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      Safe download mode. Files are downloaded from the cloud but never deleted locally, even if removed there. Best for keeping an offline copy.
+                      {t("sync.description.safeDownloadModeFilesAreDownloadedFromTheCloud")}
                     </p>
                   </div>
                 </div>
               </div>
 
               <div className="space-y-2">
-                <h4 className="text-sm font-semibold">How it works</h4>
+                <h4 className="text-sm font-semibold">{t("lan-transfer.label.howItWorks")}</h4>
                 <ul className="space-y-1.5 text-xs text-[var(--color-text-secondary)]">
-                  <li className="flex gap-2"><span className="font-semibold text-[var(--color-text)] shrink-0">1.</span> Pick a remote folder in your workspace and a local folder on your computer.</li>
-                  <li className="flex gap-2"><span className="font-semibold text-[var(--color-text)] shrink-0">2.</span> Choose a sync mode that fits your use case.</li>
-                  <li className="flex gap-2"><span className="font-semibold text-[var(--color-text)] shrink-0">3.</span> The sync engine watches for changes and transfers files automatically in the background.</li>
-                  <li className="flex gap-2"><span className="font-semibold text-[var(--color-text)] shrink-0">4.</span> You can pause, resume, or remove a sync pair at any time without losing files.</li>
+                  <NumberedStep text={t("sync.label.onePickARemoteFolderInYourWorkspaceAnd")} />
+                  <NumberedStep text={t("sync.label.twoChooseASyncModeThatFitsYourUse")} />
+                  <NumberedStep text={t("sync.description.threeTheSyncEngineWatchesForChangesAndTransfers")} />
+                  <NumberedStep text={t("sync.description.fourYouCanPauseResumeOrRemoveASync")} />
                 </ul>
               </div>
 
               <div className="space-y-2">
-                <h4 className="text-sm font-semibold">Good to know</h4>
+                <h4 className="text-sm font-semibold">{t("sync.heading.goodToKnow")}</h4>
                 <ul className="space-y-1.5 text-xs text-[var(--color-text-secondary)]">
-                  <li>Sync runs in the background even when the window is closed (app stays in the system tray).</li>
-                  <li>If a conflict is detected (same file changed in both places), you'll be notified in the Conflicts tab.</li>
-                  <li>Temporary files, system files (.DS_Store, node_modules, .git, etc.) are automatically ignored.</li>
-                  <li>Removing a sync pair stops syncing but does not delete any files on either side.</li>
+                  <li>{t("sync.description.syncRunsInTheBackgroundEvenWhenTheWindow")}</li>
+                  <li>{t("sync.description.ifAConflictIsDetectedSameFileChangedIn")}</li>
+                  <li>{t("sync.description.temporaryFilesSystemFilesDSStoreNodeModulesGit")}</li>
+                  <li>{t("sync.label.removingASyncPairStopsSyncingButDoesNot")}</li>
                 </ul>
               </div>
             </div>
@@ -707,7 +756,7 @@ export function SyncPage() {
                 className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
-                Got it
+                {t("sync.action.gotIt")}
               </button>
             </div>
           </div>
@@ -733,27 +782,34 @@ function SyncPairRow({
   transfers: { fileName: string; direction: string; bytesTotal: number; bytesTransferred: number }[];
   onRefresh: () => void;
 }) {
+  const ownDir = useAutoDir();
+  const t = useT();
+  const dir = useDir();
+  const folderName = usePairFolderLabel([pair]);
   const [showMenu, setShowMenu] = useState(false);
-  const [menuPos, setMenuPos] = useState({ top: 0, right: 0 });
+  // Under the button, aligned with its inline-end edge: the right edge in
+  // left-to-right, the left edge (opening rightward) in right-to-left.
+  const [menuPos, setMenuPos] = useState<{ top: number } & ({ right: number } | { left: number })>({ top: 0, right: 0 }); // rtl-ok: mirrored
   // "N files not synced" pill → the list of failed files with Retry / Clear.
   const [showErrors, setShowErrors] = useState(false);
   const [errorActionBusy, setErrorActionBusy] = useState(false);
   const failedCount = pair.fileErrorCount ?? pair.fileErrors?.length ?? 0;
 
-  const statusConfig: Record<string, { icon: React.ReactNode; color: string; label: string; dot: string }> = {
-    idle: { icon: <CheckCircle2 size={12} />, color: "var(--color-primary)", label: "Synced", dot: "bg-green-500" },
-    syncing: { icon: <Loader2 size={12} className="animate-spin" />, color: "#3b82f6", label: "Syncing", dot: "bg-blue-500" },
-    paused: { icon: <Pause size={12} />, color: "var(--color-text-muted)", label: "Paused", dot: "bg-gray-400" },
-    error: { icon: <AlertCircle size={12} />, color: "var(--color-danger)", label: "Error", dot: "bg-red-500" },
-    offline: { icon: <AlertCircle size={12} />, color: "#f59e0b", label: "Offline", dot: "bg-yellow-500" },
-    "rate-limited": { icon: <Clock size={12} />, color: "#f59e0b", label: "Waiting", dot: "bg-yellow-500" },
-    "needs-confirmation": { icon: <AlertTriangle size={12} />, color: "#f59e0b", label: "Needs attention", dot: "bg-yellow-500" },
-    "needs-permission": { icon: <AlertCircle size={12} />, color: "var(--color-warning)", label: "Needs permission", dot: "bg-yellow-500" },
+  // Keyed by the engine's status value, never by displayed text.
+  const statusConfig: Record<string, { icon: React.ReactNode; color: string; label: MessageKey; dot: string }> = {
+    idle: { icon: <CheckCircle2 size={12} />, color: "var(--color-primary)", label: "common.status.synced", dot: "bg-green-500" },
+    syncing: { icon: <Loader2 size={12} className="animate-spin" />, color: "#3b82f6", label: "sync.label.syncing", dot: "bg-blue-500" },
+    paused: { icon: <Pause size={12} />, color: "var(--color-text-muted)", label: "common.status.paused", dot: "bg-gray-400" },
+    error: { icon: <AlertCircle size={12} />, color: "var(--color-danger)", label: "common.status.error", dot: "bg-red-500" },
+    offline: { icon: <AlertCircle size={12} />, color: "#f59e0b", label: "common.status.offline", dot: "bg-yellow-500" },
+    "rate-limited": { icon: <Clock size={12} />, color: "#f59e0b", label: "common.status.waiting", dot: "bg-yellow-500" },
+    "needs-confirmation": { icon: <AlertTriangle size={12} />, color: "#f59e0b", label: "common.status.needsAttention", dot: "bg-yellow-500" },
+    "needs-permission": { icon: <AlertCircle size={12} />, color: "var(--color-warning)", label: "common.status.needsPermission", dot: "bg-yellow-500" },
   };
 
   // Unknown/transient status falls back to a neutral state, NOT "Error" - a
   // status we don't recognize is not a failure and shouldn't be alarmed as one.
-  const s = statusConfig[pair.status] ?? { icon: <Clock size={12} />, color: "var(--color-text-muted)", label: "Idle", dot: "bg-gray-400" };
+  const s = statusConfig[pair.status] ?? { icon: <Clock size={12} />, color: "var(--color-text-muted)", label: "sync.label.idle", dot: "bg-gray-400" };
 
   // Progress info for syncing state
   const isSyncing = transfers.length > 0 || pair.totalFilesInBatch > 0;
@@ -780,7 +836,7 @@ function SyncPairRow({
       progressPct = total > 0 ? Math.min(100, Math.round((effective / total) * 100)) : 0;
     }
 
-    progressLabel = `${completed}/${total} files`;
+    progressLabel = t("sync.label.completedTotalFiles", { completed, total });
 
     // ETA based on byte throughput
     if (pair.batchStartedAt && totalBytes > 0 && completedBytes > 0) {
@@ -790,13 +846,13 @@ function SyncPairRow({
       if (bytesPerMs > 0 && remainingBytes > 0) {
         const remainingSec = Math.ceil(remainingBytes / bytesPerMs / 1000);
         if (remainingSec < 60) {
-          etaLabel = `~${remainingSec}s left`;
+          etaLabel = t("sync.label.remainingsecSLeft", { remainingSec });
         } else if (remainingSec < 3600) {
-          etaLabel = `~${Math.ceil(remainingSec / 60)}m left`;
+          etaLabel = t("sync.label.minutesMLeft", { minutes: Math.ceil(remainingSec / 60) });
         } else {
           const h = Math.floor(remainingSec / 3600);
           const m = Math.ceil((remainingSec % 3600) / 60);
-          etaLabel = `~${h}h ${m}m left`;
+          etaLabel = t("sync.label.hHMMLeft", { h, m });
         }
       }
     }
@@ -809,12 +865,12 @@ function SyncPairRow({
         style={{ borderColor: "var(--color-border)" }}
       >
         {/* Folder */}
-        <td className="py-2.5 pl-4 pr-2">
+        <td className="py-2.5 ps-4 pe-2">
           <div className="flex items-center gap-2.5">
             <img src={syncIconSrc()} alt="" width={20} height={20} className="shrink-0" />
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{pair.remoteFolderName}</p>
-              <p className="truncate text-[11px] text-[var(--color-text-muted)] font-mono max-w-[260px]">
+              <p dir={folderName(pair) === pair.remoteFolderName ? ownDir : undefined} className="truncate text-sm font-medium">{folderName(pair)}</p>
+              <p dir="ltr" className="ltr-value truncate text-[11px] text-[var(--color-text-muted)] font-mono max-w-[260px]">
                 {pair.localPath}
               </p>
             </div>
@@ -823,9 +879,18 @@ function SyncPairRow({
 
         {/* Mode */}
         <td className="py-2.5 px-2">
-          <span className="rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)] whitespace-nowrap">
-            {SYNC_MODES.find(m => m.id === pair.syncMode)?.label ?? "Protect & Upload"}
-          </span>
+          {(() => {
+            const mode = SYNC_MODES.find(m => m.id === (pair.syncMode || "push-safe"));
+            const tip = mode ? [t(mode.desc), mode.note ? t(mode.note) : ""].filter(Boolean).join(" ") : undefined;
+            return (
+              <span
+                title={tip}
+                className="rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)] whitespace-nowrap"
+              >
+                {t(mode?.label ?? "sync.label.protectUpload")}
+              </span>
+            );
+          })()}
         </td>
 
         {/* Status */}
@@ -852,7 +917,7 @@ function SyncPairRow({
             </div>
           ) : (
             <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: s.color }}>
-              {s.icon} {s.label}
+              {s.icon} {t(s.label)}
             </span>
           )}
           {pair.errorMessage && (pair.status === "error" || pair.status === "offline" || pair.status === "needs-permission") && (
@@ -868,9 +933,11 @@ function SyncPairRow({
                   pair.status === "needs-permission" ? "var(--color-warning)" :
                   "var(--color-danger)",
               }}
-              title={pair.errorMessage}
+              title={translateExternal(pair.errorMessage)}
+              dir={externalDir(pair.errorMessage)}
             >
-              {pair.errorMessage}
+              {/* Engine text, translated where the catalog knows it. */}
+              {translateExternal(pair.errorMessage)}
             </p>
           )}
           {/* Files the engine gave up on this cycle. "Synced" above is about
@@ -880,10 +947,10 @@ function SyncPairRow({
             <button
               onClick={() => setShowErrors((v) => !v)}
               className="mt-1 inline-flex items-center gap-1 rounded-full bg-[var(--color-danger)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--color-danger)] hover:bg-[var(--color-danger)]/20"
-              title={showErrors ? "Hide the list" : "Show which files"}
+              title={showErrors ? t("sync.tooltip.hideTheList") : t("sync.tooltip.showWhichFiles")}
             >
               <AlertCircle size={10} />
-              {failedCount.toLocaleString()} file{failedCount === 1 ? "" : "s"} not synced
+              {t("sync.error.fileNotSynced", { failedCount })}
             </button>
           )}
         </td>
@@ -900,7 +967,7 @@ function SyncPairRow({
               onClick={() => { window.electronAPI.syncNow(pair.pairId); onRefresh(); }}
               disabled={pair.status === "syncing" || isSyncing}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)] disabled:opacity-30 disabled:pointer-events-none"
-              title={isSyncing ? "Sync in progress" : "Sync now"}
+              title={isSyncing ? t("sync.tooltip.syncInProgress") : t("sync.tooltip.syncNow")}
             >
               <RefreshCw size={13} />
             </button>
@@ -908,7 +975,7 @@ function SyncPairRow({
               <button
                 onClick={() => { window.electronAPI.resumeSyncPair(pair.pairId); onRefresh(); }}
                 className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]"
-                title="Resume"
+                title={t("common.tooltip.resume")}
               >
                 <Play size={13} />
               </button>
@@ -916,7 +983,7 @@ function SyncPairRow({
               <button
                 onClick={() => { window.electronAPI.pauseSyncPair(pair.pairId); onRefresh(); }}
                 className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]"
-                title="Pause"
+                title={t("common.accessibility.pause")}
               >
                 <Pause size={13} />
               </button>
@@ -926,7 +993,9 @@ function SyncPairRow({
                 ref={(el) => { if (el) (el as any)._menuAnchor = el; }}
                 onClick={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect();
-                  setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                  setMenuPos(dir === "rtl"
+                    ? { top: rect.bottom + 4, left: rect.left } // rtl-ok: mirrored
+                    : { top: rect.bottom + 4, right: window.innerWidth - rect.right }); // rtl-ok: mirrored
                   setShowMenu(!showMenu);
                 }}
                 className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)]"
@@ -938,25 +1007,25 @@ function SyncPairRow({
                   <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
                   <div
                     className="fixed z-50 w-40 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
-                    style={{ borderColor: "var(--color-border)", top: menuPos.top, right: menuPos.right }}
+                    style={{ borderColor: "var(--color-border)", ...menuPos }}
                   >
                     <button
                       onClick={() => { window.electronAPI.openSyncFolder(pair.pairId); setShowMenu(false); }}
                       className="flex w-full items-center gap-2 px-3 py-1.5 text-sm hover:bg-[var(--color-bg-secondary)]"
                     >
-                      <FolderOpen size={13} /> Open folder
+                      <FolderOpen size={13} /> {t("sync.action.openFolder")}
                     </button>
                     <div className="my-1 h-px bg-[var(--color-border)]" />
                     <button
                       onClick={async () => {
                         await window.electronAPI.removeSyncPair(pair.pairId);
                         onRefresh();
-                        toast.success("Sync pair removed");
+                        toast.success(t("sync.status.syncPairRemoved"));
                         setShowMenu(false);
                       }}
                       className="flex w-full items-center gap-2 px-3 py-1.5 text-sm text-[var(--color-danger)] hover:bg-[var(--color-bg-secondary)]"
                     >
-                      <Trash2 size={13} /> Remove
+                      <Trash2 size={13} /> {t("common.remove")}
                     </button>
                   </div>
                 </>
@@ -971,8 +1040,9 @@ function SyncPairRow({
             <div className="rounded-lg border p-3" style={{ borderColor: "var(--color-border)", background: "var(--color-bg-secondary)" }}>
               <div className="mb-2 flex items-center justify-between gap-2">
                 <p className="text-xs font-medium">
-                  {failedCount.toLocaleString()} file{failedCount === 1 ? "" : "s"} could not be synced
-                  {pair.fileErrors.length < failedCount ? ` - showing the ${pair.fileErrors.length} most recent` : ""}
+                  {pair.fileErrors.length < failedCount
+                    ? t("sync.error.fileCouldNotBeSyncedShowingTheFileErrorCountMost", { failedCount, fileErrorCount: pair.fileErrors.length })
+                    : t("sync.error.fileCouldNotBeSynced", { failedCount })}
                 </p>
                 <div className="flex items-center gap-1.5">
                   <button
@@ -981,19 +1051,19 @@ function SyncPairRow({
                       setErrorActionBusy(true);
                       try {
                         await window.electronAPI.retryFileErrors(pair.pairId);
-                        toast.success("Retrying - the files stay listed until they sync");
+                        toast.success(t("sync.status.retryingFilesRemainUntilSynced"));
                         onRefresh();
                       } catch (e: any) {
-                        toast.error(e?.message || "Could not retry");
+                        toast.error(ipcErrorText(e?.message, t("sync.error.couldNotRetry")));
                       } finally {
                         setErrorActionBusy(false);
                       }
                     }}
                     className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
                     style={{ borderColor: "var(--color-border)" }}
-                    title="Try every listed file again, including the ones marked won't retry"
+                    title={t("sync.tooltip.tryEveryListedFileAgainIncludingTheOnesMarked")}
                   >
-                    <RefreshCw size={11} /> Retry
+                    <RefreshCw size={11} /> {t("common.retry")}
                   </button>
                   <button
                     disabled={errorActionBusy}
@@ -1004,16 +1074,16 @@ function SyncPairRow({
                         setShowErrors(false);
                         onRefresh();
                       } catch (e: any) {
-                        toast.error(e?.message || "Could not clear");
+                        toast.error(ipcErrorText(e?.message, t("sync.error.couldNotClear")));
                       } finally {
                         setErrorActionBusy(false);
                       }
                     }}
                     className="flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
                     style={{ borderColor: "var(--color-border)" }}
-                    title="Dismiss the list. The files are tried again on the next scan."
+                    title={t("sync.tooltip.dismissTheListTheFilesAreTriedAgainOn")}
                   >
-                    <X size={11} /> Clear
+                    <X size={11} /> {t("common.action.clear")}
                   </button>
                 </div>
               </div>
@@ -1021,11 +1091,12 @@ function SyncPairRow({
                 {pair.fileErrors.map((f) => (
                   <li key={f.path} className="flex items-start gap-2 text-[11px]">
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate font-mono" title={f.path}>{f.path}</span>
-                      <span className="block truncate text-[var(--color-text-muted)]" title={f.message}>{f.message}</span>
+                      <span dir="ltr" className="ltr-value block truncate font-mono" title={f.path}>{f.path}</span>
+                      {/* Engine text, translated where the catalog knows it. */}
+                      <span dir={externalDir(f.message)} className="block truncate text-[var(--color-text-muted)]" title={translateExternal(f.message)}>{translateExternal(f.message)}</span>
                     </span>
-                    <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]" title={new Date(f.at).toLocaleString()}>
-                      {f.permanent ? "won't retry" : "will retry"}
+                    <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]" title={new Date(f.at).toLocaleString(intlLocale())}>
+                      {f.permanent ? t("sync.label.wonTRetry") : t("sync.label.willRetry")}
                     </span>
                   </li>
                 ))}
@@ -1041,6 +1112,8 @@ function SyncPairRow({
 // ── PendingDeletionBanner ───────────────────────────────────────────
 
 function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatus; onDecided: () => void }) {
+  const t = useT();
+  const folderName = usePairFolderLabel([pair]);
   const [busy, setBusy] = useState<"delete" | "keep" | null>(null);
   const held = pair.pendingDeletion;
   if (!held) return null;
@@ -1051,14 +1124,14 @@ function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatu
     try {
       if (kind === "delete") {
         await window.electronAPI.confirmPendingDeletion(pair.pairId);
-        toast.success(`Deleted ${n.toLocaleString()} file${n === 1 ? "" : "s"} from the cloud`);
+        toast.success(t("sync.label.deletedFileFromTheCloud", { count: n }));
       } else {
         await window.electronAPI.dismissPendingDeletion(pair.pairId);
-        toast.success("Cloud copies kept");
+        toast.success(t("sync.label.cloudCopiesKept"));
       }
       onDecided();
     } catch (e: any) {
-      toast.error(e?.message || "Could not apply that - try again");
+      toast.error(ipcErrorText(e?.message, t("sync.error.couldNotApplyThatTryAgain")));
     } finally {
       setBusy(null);
     }
@@ -1070,19 +1143,20 @@ function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatu
         <AlertTriangle size={16} className="mt-0.5 shrink-0" style={{ color: "#f59e0b" }} />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium">
-            dosya paused this folder: {n.toLocaleString()} file{n === 1 ? "" : "s"} disappeared locally.
-            Delete {n === 1 ? "it" : "them"} from the cloud too, or keep the cloud {n === 1 ? "copy" : "copies"}?
+            {t("sync.description.dosyaPausedThisFolderFileDisappearedLocallyDeleteIt", { count: n })}
           </p>
           <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)] font-mono truncate">
-            {pair.remoteFolderName} - {pair.localPath}
+            <Bdi>{folderName(pair)}</Bdi> - <Bdi dir="ltr">{pair.localPath}</Bdi>
           </p>
           {held.sample.length > 0 && (
             <p className="mt-1 text-[11px] text-[var(--color-text-muted)] truncate" title={held.sample.join("\n")}>
-              {held.sample.join(", ")}{n > held.sample.length ? `, and ${(n - held.sample.length).toLocaleString()} more` : ""}
+              {n > held.sample.length
+                ? t("sync.description.sampleAndCountMore", { sample: held.sample.join(", "), count: n - held.sample.length })
+                : held.sample.join(", ")}
             </p>
           )}
           <p className="mt-1.5 text-[11px] text-[var(--color-text-muted)]">
-            This usually means a drive was unplugged or a folder was moved. Keeping the cloud copies changes nothing on the server; deleting moves them to the cloud trash.
+            {t("sync.description.thisUsuallyMeansADriveWasUnpluggedOrA")}
           </p>
         </div>
       </div>
@@ -1093,7 +1167,7 @@ function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatu
           className="rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
           style={{ background: "var(--color-primary)" }}
         >
-          {busy === "keep" ? "Keeping..." : "Keep the cloud copies"}
+          {busy === "keep" ? t("sync.status.keeping") : t("sync.action.keepTheCloudCopies")}
         </button>
         <button
           disabled={busy !== null}
@@ -1101,7 +1175,7 @@ function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatu
           className="rounded-lg border px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
           style={{ borderColor: "var(--color-border)" }}
         >
-          {busy === "delete" ? "Deleting..." : "Delete from the cloud too"}
+          {busy === "delete" ? t("sync.status.deleting") : t("sync.action.deleteFromTheCloudToo")}
         </button>
       </div>
     </div>
@@ -1113,6 +1187,8 @@ function PendingDeletionBanner({ pair, onDecided }: { pair: SyncPairRuntimeStatu
 // ── SyncActivityLog ────────────────────────────────────────────────
 
 function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPairRuntimeStatus[] }) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when new logs arrive
@@ -1133,7 +1209,10 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
     return () => clearInterval(id);
   }, [syncingPairs.length]);
 
-  const pairNameMap = new Map(pairs.map(p => [p.pairId, p.remoteFolderName]));
+  const folderName = usePairFolderLabel(pairs);
+  const pairNameMap = new Map(pairs.map(p => [p.pairId, folderName(p)]));
+  // A stored folder name takes its own direction; the translated "Root" label follows the page; an id is ltr.
+  const pairDirMap = new Map(pairs.map(p => [p.pairId, folderName(p) === p.remoteFolderName ? ownDir : undefined]));
 
   const liveHeader = syncingPairs.length > 0 && (
     <div className="mb-3 space-y-2">
@@ -1145,9 +1224,10 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
         >
           <Loader2 size={15} className="shrink-0 animate-spin text-[var(--color-primary)]" />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium">{p.remoteFolderName}</p>
-            <p className="truncate text-xs text-[var(--color-text-secondary)]">
-              {p.statusText || "Syncing…"}
+            <p dir={folderName(p) === p.remoteFolderName ? ownDir : undefined} className="truncate text-sm font-medium">{folderName(p)}</p>
+            <p dir={externalDir(p.statusText)} className="truncate text-xs text-[var(--color-text-secondary)]">
+              {/* statusText is engine text, translated where the catalog knows it. */}
+              {(p.statusText && translateExternal(p.statusText)) || t("common.status.syncing")}
             </p>
           </div>
           {p.syncStartedAt > 0 && (
@@ -1167,8 +1247,8 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
         {liveHeader}
         <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }}>
           <Clock size={32} className="mb-2 text-[var(--color-text-muted)]" />
-          <p className="text-sm text-[var(--color-text-muted)]">No sync activity yet</p>
-          <p className="mt-1 text-xs text-[var(--color-text-muted)]">Activity will appear here when syncing starts</p>
+          <p className="text-sm text-[var(--color-text-muted)]">{t("sync.empty.noSyncActivityYet")}</p>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">{t("sync.description.activityWillAppearHereWhenSyncingStarts")}</p>
         </div>
       </div>
     );
@@ -1184,7 +1264,7 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
       >
       {logs.map((log, i) => {
         const time = new Date(log.timestamp);
-        const timeStr = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const timeStr = time.toLocaleTimeString(intlLocale(), { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         const pairName = pairNameMap.get(log.pairId) || log.pairId.slice(0, 8);
 
         return (
@@ -1194,8 +1274,9 @@ function SyncActivityLog({ logs, pairs }: { logs: SyncLogEntry[]; pairs: SyncPai
             style={{ borderColor: "var(--color-border)" }}
           >
             <span className="shrink-0 text-[var(--color-text-muted)]">{timeStr}</span>
-            <span className="shrink-0 text-[var(--color-primary)] max-w-[100px] truncate">{pairName}</span>
-            <span className="text-[var(--color-text-secondary)]">{log.message}</span>
+            <span dir={pairNameMap.get(log.pairId) ? pairDirMap.get(log.pairId) : "ltr"} className="shrink-0 text-[var(--color-primary)] max-w-[100px] truncate">{pairName}</span>
+            {/* Engine text, translated where the catalog knows it. */}
+            <span dir={externalDir(log.message)} className="text-[var(--color-text-secondary)]">{translateExternal(log.message)}</span>
           </div>
         );
       })}
@@ -1217,13 +1298,22 @@ function PrefToggle({ label, description, checked, onChange }: { label: string; 
         onClick={() => onChange(!checked)}
         className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"}`}
       >
-        <div className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--color-bg)] shadow transition-transform ${checked ? "translate-x-5" : "translate-x-0.5"}`} />
+        {/* rtl-ok: mirrored, the rtl: twin slides the knob the other way */}
+        <div className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--color-bg)] shadow transition-transform ${checked ? "translate-x-5 rtl:-translate-x-5" : "translate-x-0.5 rtl:-translate-x-0.5"}`} />
       </button>
     </div>
   );
 }
 
+const SNOOZE_OPTIONS: { ms: number; label: MessageKey }[] = [
+  { ms: 30 * 60 * 1000, label: "sync.label.thirtyMin" },
+  { ms: 60 * 60 * 1000, label: "common.label.oneHour" },
+  { ms: 4 * 60 * 60 * 1000, label: "sync.label.fourHours" },
+  { ms: 8 * 60 * 60 * 1000, label: "sync.label.eightHours" },
+];
+
 function SyncSettings() {
+  const t = useT();
   const { user } = useAuth();
   const [pollInterval, setPollInterval] = useState(30);
   const [maxTransfers, setMaxTransfers] = useState(3);
@@ -1257,7 +1347,7 @@ function SyncSettings() {
       maxDownloadBytesPerSec: Math.max(0, Math.round(downloadKbps)) * 1024,
       pauseOnBattery,
     });
-    toast.success("Sync settings saved");
+    toast.success(t("sync.label.syncSettingsSaved"));
   };
 
   const toggleLaunch = async (v: boolean) => {
@@ -1267,7 +1357,7 @@ function SyncSettings() {
 
   const snooze = async (ms: number, label: string) => {
     await window.electronAPI.pauseAllSyncFor?.(ms);
-    toast.success(`Sync paused for ${label} - will resume automatically`);
+    toast.success(t("sync.label.syncPausedForLabelWillResumeAutomatically", { label }));
   };
 
   const numCls = "w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]";
@@ -1278,51 +1368,46 @@ function SyncSettings() {
       {/* Transfer settings */}
       <div className="space-y-4">
         <div>
-          <label className="mb-1 block text-sm font-medium">Poll interval (seconds)</label>
+          <label className="mb-1 block text-sm font-medium">{t("sync.label.pollIntervalSeconds")}</label>
           <input type="number" value={pollInterval} onChange={(e) => setPollInterval(Number(e.target.value))} min={10} max={300} className={numCls} style={border} />
-          <p className="mt-1 text-xs text-[var(--color-text-muted)]">How often to check for remote changes</p>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">{t("sync.label.howOftenToCheckForRemoteChanges")}</p>
         </div>
         <div>
-          <label className="mb-1 block text-sm font-medium">Max concurrent transfers</label>
+          <label className="mb-1 block text-sm font-medium">{t("sync.label.maxConcurrentTransfers")}</label>
           <input type="number" value={maxTransfers} onChange={(e) => setMaxTransfers(Number(e.target.value))} min={1} max={10} className={numCls} style={border} />
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="mb-1 block text-sm font-medium">Upload limit (KB/s)</label>
+            <label className="mb-1 block text-sm font-medium">{t("sync.label.uploadLimitKBS")}</label>
             <input type="number" value={uploadKbps} onChange={(e) => setUploadKbps(Number(e.target.value))} min={0} className={numCls} style={border} />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium">Download limit (KB/s)</label>
+            <label className="mb-1 block text-sm font-medium">{t("sync.label.downloadLimitKBS")}</label>
             <input type="number" value={downloadKbps} onChange={(e) => setDownloadKbps(Number(e.target.value))} min={0} className={numCls} style={border} />
           </div>
         </div>
-        <p className="text-xs text-[var(--color-text-muted)]">0 = unlimited. Limits apply across all transfers.</p>
-        <PrefToggle label="Pause on battery" description="Stop syncing while running on battery power" checked={pauseOnBattery} onChange={setPauseOnBattery} />
+        <p className="text-xs text-[var(--color-text-muted)]">{t("sync.description.zeroUnlimitedLimitsApplyAcrossAllTransfers")}</p>
+        <PrefToggle label={t("sync.label.pauseOnBattery")} description={t("sync.label.stopSyncingWhileRunningOnBatteryPower")} checked={pauseOnBattery} onChange={setPauseOnBattery} />
         <button onClick={save} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]" style={{ background: "var(--color-primary)" }}>
-          Save settings
+          {t("sync.action.saveSettings")}
         </button>
       </div>
 
       {/* Desktop app */}
       <div className="space-y-3 border-t pt-5" style={border}>
-        <h3 className="text-sm font-semibold">Desktop app</h3>
-        {launchSupported && <PrefToggle label="Launch at login" description="Start dosya automatically when you sign in" checked={launchAtLogin} onChange={toggleLaunch} />}
+        <h3 className="text-sm font-semibold">{t("sync.heading.desktopApp")}</h3>
+        {launchSupported && <PrefToggle label={t("sync.label.launchAtLogin")} description={t("sync.label.startDosyaAutomaticallyWhenYouSignIn")} checked={launchAtLogin} onChange={toggleLaunch} />}
         <FinderLocationToggle userId={user?.id ?? null} />
       </div>
 
       {/* Snooze */}
       <div className="space-y-2 border-t pt-5" style={border}>
-        <h3 className="text-sm font-semibold">Snooze sync</h3>
-        <p className="text-xs text-[var(--color-text-muted)]">Pause everything and auto-resume later.</p>
+        <h3 className="text-sm font-semibold">{t("sync.heading.snoozeSync")}</h3>
+        <p className="text-xs text-[var(--color-text-muted)]">{t("sync.description.pauseEverythingAndAutoResumeLater")}</p>
         <div className="flex flex-wrap gap-2">
-          {[
-            { ms: 30 * 60 * 1000, label: "30 min" },
-            { ms: 60 * 60 * 1000, label: "1 hour" },
-            { ms: 4 * 60 * 60 * 1000, label: "4 hours" },
-            { ms: 8 * 60 * 60 * 1000, label: "8 hours" },
-          ].map((o) => (
-            <button key={o.label} onClick={() => snooze(o.ms, o.label)} className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={border}>
-              {o.label}
+          {SNOOZE_OPTIONS.map((o) => (
+            <button key={o.label} onClick={() => snooze(o.ms, t(o.label))} className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={border}>
+              {t(o.label)}
             </button>
           ))}
         </div>
@@ -1348,6 +1433,7 @@ const DEFAULT_EXCLUDED = [
 ];
 
 function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const t = useT();
   const { active } = useWorkspace();
   const workspaceId = active?.id ?? "";
   const [step, setStep] = useState(1);
@@ -1355,7 +1441,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
 
   // Step 1: folders
   const [remoteFolderId, setRemoteFolderId] = useState<string | null>(null);
-  const [remoteFolderName, setRemoteFolderName] = useState("Root");
+  const [remoteFolderName, setRemoteFolderName] = useState(DEFAULT_ROOT_FOLDER_NAME);
   const [localPath, setLocalPath] = useState("");
   const [localBookmark, setLocalBookmark] = useState<string | undefined>(undefined);
   const [stdPaths, setStdPaths] = useState<{ desktop: string | null; documents: string | null; pictures: string | null; downloads: string | null; home: string | null } | null>(null);
@@ -1454,7 +1540,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
     try {
       await window.electronAPI.addSyncPair({
         workspaceId,
-        workspaceName: active?.name ?? "Workspace",
+        workspaceName: active?.name ?? DEFAULT_WORKSPACE_NAME,
         remoteFolderId,
         remoteFolderName,
         localPath,
@@ -1469,18 +1555,18 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
       });
       onAdded();
       onClose();
-      toast.success("Sync folder added");
+      toast.success(t("sync.label.syncFolderAdded"));
     } catch (err: any) {
-      toast.error(err.message ?? "Failed to add sync pair");
+      toast.error(err.message != null ? ipcErrorText(err.message, "") : t("sync.error.failedToAddSyncPair"));
     } finally {
       setLoading(false);
     }
   };
 
   const steps = [
-    { num: 1, label: "Folders" },
-    { num: 2, label: "Sync mode" },
-    { num: 3, label: "Advanced" },
+    { num: 1, label: t("common.label.folders") },
+    { num: 2, label: t("sync.label.syncMode") },
+    { num: 3, label: t("sync.label.advanced") },
   ];
 
   return (
@@ -1488,7 +1574,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
       <div className="w-full max-w-lg rounded-xl bg-[var(--color-bg)] shadow-xl" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between border-b px-6 py-4" style={{ borderColor: "var(--color-border)" }}>
-          <h3 className="text-lg font-semibold">Add sync folder</h3>
+          <h3 className="text-lg font-semibold">{t("sync.heading.addSyncFolder")}</h3>
           <button onClick={onClose} className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]">
             <X size={16} />
           </button>
@@ -1541,9 +1627,9 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
           {step === 1 && (
             <div className="space-y-5">
               <div>
-                <label className="mb-1.5 block text-sm font-medium">Cloud folder</label>
+                <label className="mb-1.5 block text-sm font-medium">{t("sync.label.cloudFolder")}</label>
                 <p className="mb-2 text-xs text-[var(--color-text-muted)]">
-                  Choose which folder in your workspace to sync, or select root for the entire workspace.
+                  {t("sync.description.chooseWhichFolderInYourWorkspaceToSyncOr")}
                 </p>
                 <div
                   className="max-h-40 overflow-y-auto rounded-lg border p-1"
@@ -1551,7 +1637,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 >
                   <button
                     type="button"
-                    onClick={() => { setRemoteFolderId(null); setRemoteFolderName("Root"); }}
+                    onClick={() => { setRemoteFolderId(null); setRemoteFolderName(DEFAULT_ROOT_FOLDER_NAME); }}
                     className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-sm transition-colors ${
                       remoteFolderId === null
                         ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
@@ -1559,7 +1645,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     }`}
                   >
                     <svg viewBox="0 0 14 14" fill="none" width="14" height="14"><path d="M2 7.5V12a1 1 0 001 1h3V10h2v3h3a1 1 0 001-1V7.5M1 7l6-5 6 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                    Root (entire workspace)
+                    {t("sync.action.rootEntireWorkspace")}
                   </button>
                   {(folderChildren.get(null) ?? []).map((f: any) => (
                     <SyncFolderTreeItem
@@ -1572,15 +1658,15 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     />
                   ))}
                   {folders.length === 0 && (
-                    <p className="py-3 text-center text-xs text-[var(--color-text-muted)]">No folders yet - a new one will be created</p>
+                    <p className="py-3 text-center text-xs text-[var(--color-text-muted)]">{t("sync.description.noFoldersYetANewOneWillBeCreated")}</p>
                   )}
                 </div>
               </div>
 
               <div>
-                <label className="mb-1.5 block text-sm font-medium">Local folder</label>
+                <label className="mb-1.5 block text-sm font-medium">{t("sync.label.localFolder")}</label>
                 <p className="mb-2 text-xs text-[var(--color-text-muted)]">
-                  Choose a folder on your computer. Its contents will be synced.
+                  {t("sync.description.chooseAFolderOnYourComputerItsContentsWill")}
                 </p>
                 <div className="flex gap-2">
                   <div
@@ -1590,10 +1676,10 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     {localPath ? (
                       <>
                         <FolderOpen size={14} className="shrink-0 text-[var(--color-primary)]" />
-                        <span className="min-w-0 truncate font-mono text-xs" title={localPath}>{localPath}</span>
+                        <span dir="ltr" className="ltr-value min-w-0 truncate font-mono text-xs" title={localPath}>{localPath}</span>
                       </>
                     ) : (
-                      <span className="text-[var(--color-text-muted)]">No folder selected</span>
+                      <span className="text-[var(--color-text-muted)]">{t("sync.label.noFolderSelected")}</span>
                     )}
                   </div>
                   <button
@@ -1601,7 +1687,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     className="shrink-0 rounded-lg border px-4 py-2 text-sm font-medium hover:bg-[var(--color-bg-secondary)]"
                     style={{ borderColor: "var(--color-border)" }}
                   >
-                    Browse
+                    {t("sync.action.browse")}
                   </button>
                 </div>
 
@@ -1610,13 +1696,13 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                     grants nothing in the sandbox. */}
                 {stdPaths && (
                   <div className="mt-2">
-                    <p className="mb-1.5 text-xs text-[var(--color-text-muted)]">Quick backup:</p>
+                    <p className="mb-1.5 text-xs text-[var(--color-text-muted)]">{t("sync.label.quickBackup")}</p>
                     <div className="flex flex-wrap gap-2">
                       {([
-                        ["Desktop", stdPaths.desktop],
-                        ["Documents", stdPaths.documents],
-                        ["Pictures", stdPaths.pictures],
-                        ["Downloads", stdPaths.downloads],
+                        ["sync.label.desktopFolder", stdPaths.desktop],
+                        ["common.label.documents", stdPaths.documents],
+                        ["sync.label.pictures", stdPaths.pictures],
+                        ["sync.label.downloads", stdPaths.downloads],
                       ] as const)
                         .filter(([, p]) => !!p)
                         .map(([label, p]) => (
@@ -1627,7 +1713,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                             className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                             style={{ borderColor: localPath === p ? "var(--color-primary)" : "var(--color-border)", color: localPath === p ? "var(--color-primary)" : undefined }}
                           >
-                            {label}
+                            {t(label)}
                           </button>
                         ))}
                     </div>
@@ -1642,7 +1728,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
             <div className="space-y-4">
               <div>
                 <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-                  Choose how files should be synced between your computer and the cloud.
+                  {t("sync.description.chooseHowFilesShouldBeSyncedBetweenYourComputer")}
                 </p>
               </div>
               <div className="space-y-2">
@@ -1667,8 +1753,9 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                       className="mt-0.5 accent-[var(--color-primary)]"
                     />
                     <div>
-                      <p className={`text-sm font-medium ${syncMode === m.id ? "text-[var(--color-primary)]" : ""}`}>{m.label}</p>
-                      <p className="text-xs text-[var(--color-text-muted)]">{m.desc}</p>
+                      <p className={`text-sm font-medium ${syncMode === m.id ? "text-[var(--color-primary)]" : ""}`}>{t(m.label)}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">{t(m.desc)}</p>
+                      {m.note && <p className="mt-1 text-xs text-[var(--color-text-muted)]">{t(m.note)}</p>}
                     </div>
                   </label>
                 ))}
@@ -1676,7 +1763,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
 
               {syncMode === "two-way" && (
                 <div>
-                  <label className="mb-1.5 block text-sm font-medium">Conflict resolution</label>
+                  <label className="mb-1.5 block text-sm font-medium">{t("sync.label.conflictResolution")}</label>
                   <div className="flex gap-2">
                     <button
                       onClick={() => setStrategy("last-write-wins")}
@@ -1687,7 +1774,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                       }`}
                       style={{ borderColor: strategy === "last-write-wins" ? "var(--color-primary)" : "var(--color-border)" }}
                     >
-                      Last write wins
+                      {t("sync.action.lastWriteWins")}
                     </button>
                     <button
                       onClick={() => setStrategy("keep-both")}
@@ -1698,7 +1785,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                       }`}
                       style={{ borderColor: strategy === "keep-both" ? "var(--color-primary)" : "var(--color-border)" }}
                     >
-                      Keep both copies
+                      {t("sync.action.keepBothCopies")}
                     </button>
                   </div>
                 </div>
@@ -1712,10 +1799,12 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
               {bigFolder && (
                 <div className="rounded-lg border px-3 py-2.5" style={{ borderColor: "var(--color-warning)" }}>
                   <p className="text-sm font-medium">
-                    This folder contains {estimate!.truncated ? "more than" : "about"} {estimate!.files.toLocaleString()} files.
+                    {estimate!.truncated
+                      ? t("sync.description.thisFolderContainsMoreThanFilesFiles", { files: estimate!.files })
+                      : t("sync.description.thisFolderContainsAboutFilesFiles", { files: estimate!.files })}
                   </p>
                   <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
-                    Very large folders can take many hours to sync and use a lot of memory and bandwidth.
+                    {t("sync.description.veryLargeFoldersCanTakeManyHoursToSync")}
                   </p>
                   <label className="mt-2 flex items-center gap-2 text-xs font-medium">
                     <input
@@ -1723,17 +1812,14 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                       checked={confirmedBig}
                       onChange={(e) => setConfirmedBig(e.target.checked)}
                     />
-                    Sync it anyway
+                    {t("sync.label.syncItAnyway")}
                   </label>
                 </div>
               )}
               <div>
-                <label className="mb-1.5 block text-sm font-medium">Excluded files & folders</label>
+                <label className="mb-1.5 block text-sm font-medium">{t("sync.label.excludedFilesFolders")}</label>
                 <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-                  These patterns will be skipped during sync. You can use folder names (node_modules),
-                  file names (.env), wildcards (*.log), or absolute paths (/bin) that only match at the
-                  filesystem root. This is the complete list - remove an entry and it will sync. Only the
-                  virtual filesystems /proc, /sys, /dev and /run are always skipped.
+                  {t("sync.description.thesePatternsWillBeSkippedDuringSyncYouCan")}
                 </p>
               </div>
 
@@ -1744,7 +1830,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                   value={newPattern}
                   onChange={(e) => setNewPattern(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addPattern()}
-                  placeholder="e.g. *.log, dist, .cache"
+                  placeholder={t("sync.placeholder.eGLogDistCache")}
                   className="flex-1 rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
                   style={{ borderColor: "var(--color-border)" }}
                 />
@@ -1754,14 +1840,14 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                   className="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                   style={{ background: "var(--color-primary)" }}
                 >
-                  Add
+                  {t("sync.action.add")}
                 </button>
               </div>
 
               {/* Pattern list */}
               <div className="max-h-48 overflow-y-auto rounded-lg border p-1" style={{ borderColor: "var(--color-border)" }}>
                 {excludedPatterns.length === 0 ? (
-                  <p className="py-4 text-center text-xs text-[var(--color-text-muted)]">No exclusions - all files will be synced</p>
+                  <p className="py-4 text-center text-xs text-[var(--color-text-muted)]">{t("sync.label.noExclusionsAllFilesWillBeSynced")}</p>
                 ) : (
                   <div className="space-y-0.5">
                     {excludedPatterns.map((p) => (
@@ -1786,7 +1872,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 onClick={() => setExcludedPatterns([...DEFAULT_EXCLUDED])}
                 className="text-xs text-[var(--color-primary)] hover:underline"
               >
-                Reset to defaults
+                {t("sync.action.resetToDefaults")}
               </button>
             </div>
           )}
@@ -1799,7 +1885,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
             className="rounded-lg border px-4 py-2 text-sm"
             style={{ borderColor: "var(--color-border)" }}
           >
-            {step === 1 ? "Cancel" : "Back"}
+            {step === 1 ? t("common.cancel") : t("common.back")}
           </button>
 
           <div className="flex gap-2">
@@ -1810,7 +1896,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
-                Continue
+                {t("sync.continue")}
               </button>
             ) : (
               <button
@@ -1819,7 +1905,7 @@ function AddSyncPairModal({ onClose, onAdded }: { onClose: () => void; onAdded: 
                 className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
-                {loading ? "Creating..." : "Start syncing"}
+                {loading ? t("common.status.creating") : t("sync.label.startSyncing")}
               </button>
             )}
           </div>
@@ -1843,6 +1929,7 @@ function SyncFolderTreeItem({
   onSelect: (id: string, name: string) => void;
   depth: number;
 }) {
+  const ownDir = useAutoDir();
   const [expanded, setExpanded] = useState(depth < 1);
   const children = childrenMap.get(folder.id) ?? [];
   const hasChildren = children.length > 0;
@@ -1856,7 +1943,7 @@ function SyncFolderTreeItem({
             ? "bg-[var(--color-primary)]/10"
             : "hover:bg-[var(--color-bg-secondary)]"
         }`}
-        style={{ paddingLeft: `${8 + depth * 16}px` }}
+        style={{ paddingInlineStart: `${8 + depth * 16}px` }}
       >
         {/* Expand toggle */}
         <button
@@ -1868,7 +1955,7 @@ function SyncFolderTreeItem({
             viewBox="0 0 10 10"
             width="10"
             height="10"
-            className={`transition-transform ${expanded ? "rotate-90" : ""}`}
+            className={`transition-transform ${expanded ? "rotate-90" : "rtl:rotate-180"}`}
           >
             <path d="M3 2l4 3-4 3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -1878,12 +1965,12 @@ function SyncFolderTreeItem({
         <button
           type="button"
           onClick={() => onSelect(folder.id, folder.name)}
-          className={`flex flex-1 items-center gap-2 py-1.5 pr-2 text-sm ${
+          className={`flex flex-1 items-center gap-2 py-1.5 pe-2 text-sm ${
             isSelected ? "font-medium text-[var(--color-primary)]" : ""
           }`}
         >
           <FolderIcon fileCount={folder.file_count ?? 0} size={14} />
-          <span className="truncate">{folder.name}</span>
+          <span dir={ownDir} className="truncate">{folder.name}</span>
         </button>
       </div>
 

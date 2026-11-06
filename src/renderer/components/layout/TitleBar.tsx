@@ -6,8 +6,12 @@ import { useSyncPaused, useSyncSyncing, useSyncHasPairs } from "@/lib/sync-store
 import { Logo } from "@/components/Logo";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import { ThemeMenu } from "@/components/ThemeMenu";
+import { LanguageMenu } from "@/components/LanguageMenu";
+import { NavButtons } from "@/components/layout/NavButtons";
+import { useT } from "@/lib/i18n";
 
 export function TitleBar() {
+  const t = useT();
   const [platform, setPlatform] = useState<string>("darwin");
   // Read from the shared store via primitive selectors - this component now
   // only re-renders when one of these booleans actually flips, not on every
@@ -50,8 +54,8 @@ export function TitleBar() {
         void window.electronAPI.popupAppMenu(r.left, r.bottom);
       }}
       className="titlebar-no-drag flex items-center rounded-lg px-2 py-1 text-[var(--color-text-secondary)] hover:bg-black/5 transition-colors"
-      title="Menu"
-      aria-label="Menu"
+      title={t("navigation.accessibility.menu")}
+      aria-label={t("navigation.accessibility.menu")}
       data-testid="app-menu-button"
     >
       <MenuIcon size={15} />
@@ -62,7 +66,7 @@ export function TitleBar() {
     <button
       onClick={() => navigate("/lan-transfer")}
       className="titlebar-no-drag flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-black/5 transition-colors"
-      title="LAN Transfer"
+      title={t("lan-transfer.heading.lanTransfer")}
     >
       <ArrowUpDown size={13} />
     </button>
@@ -72,28 +76,29 @@ export function TitleBar() {
     <button
       onClick={toggleSync}
       className={`titlebar-no-drag flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
+        // Paused is a deliberate stop, not a failure (TC-055): neutral, never red.
         syncPaused
-          ? "bg-red-50 text-red-600 hover:bg-red-100"
+          ? "bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-black/5"
           : syncSyncing
             ? "bg-blue-50 text-blue-600"
             : "bg-[var(--color-primary)]/10 text-[var(--color-primary)] hover:bg-[var(--color-primary)]/20"
       }`}
-      title={syncPaused ? "Resume sync" : "Pause sync"}
+      title={syncPaused ? t("navigation.action.resumeSync") : t("navigation.action.pauseSync")}
     >
       {syncPaused ? (
         <>
           <Play size={12} />
-          Resume sync
+          {t("navigation.action.resumeSync")}
         </>
       ) : syncSyncing ? (
         <>
           <RefreshCw size={12} className="animate-spin" />
-          Syncing...
+          {t("navigation.status.syncing")}
         </>
       ) : (
         <>
           <Pause size={12} />
-          Pause sync
+          {t("navigation.action.pauseSync")}
         </>
       )}
     </button>
@@ -103,12 +108,16 @@ export function TitleBar() {
   if (platform === "darwin") {
     return (
       <div
-        className="titlebar-drag flex h-[var(--titlebar-height)] items-center justify-between pl-20 pr-4"
+        data-testid="titlebar"
+        // The traffic lights are on the side the OS puts them, top-left, or
+        // top-right in an RTL macOS (data-os-dir), whatever the app's language.
+        // rtl-ok: physical geometry, macOS traffic lights follow the OS direction, not the app's
+        className="titlebar-drag flex h-[var(--titlebar-height)] items-center justify-between pl-20 pr-4 os-rtl:pl-4 os-rtl:pr-20"
         style={{ background: "var(--color-bg-secondary)", borderBottom: "1px solid var(--color-border)" }}
       >
-        <div className="flex-1" />
+        <div className="flex flex-1 items-center"><NavButtons /></div>
         {lockup}
-        <div className="flex flex-1 items-center justify-end gap-1"><ThemeMenu />{LanButton}{SyncButton}<NotificationBell /></div>
+        <div className="flex flex-1 items-center justify-end gap-1"><LanguageMenu /><ThemeMenu />{LanButton}{SyncButton}<NotificationBell /></div>
       </div>
     );
   }
@@ -117,10 +126,17 @@ export function TitleBar() {
   if (platform === "win32") {
     return (
       <div
-        className="titlebar-drag flex h-[var(--titlebar-height)] items-center px-4"
+        data-testid="titlebar"
+        // In RTL the button cluster is at the right, where the OS paints the
+        // caption buttons: end it before them. LTR keeps px-4 (the empty third
+        // column already sits under the overlay).
+        // An RTL Windows that mirrors the overlay to the left starts the row
+        // after it (.titlebar-caption-row in styles/index.css).
+        // rtl-ok: rtl selector, Windows caption overlay
+        className="titlebar-drag titlebar-caption-row flex h-[var(--titlebar-height)] items-center px-4 rtl:pr-[var(--titlebar-inset-right)]"
         style={{ background: "var(--color-bg-secondary)", borderBottom: "1px solid var(--color-border)" }}
       >
-        <div className="flex flex-1 items-center gap-1">{MenuButton}<ThemeMenu align="left" />{LanButton}{SyncButton}<NotificationBell align="left" /></div>
+        <div className="flex flex-1 items-center gap-1">{MenuButton}<NavButtons /><LanguageMenu align="start" /><ThemeMenu align="start" />{LanButton}{SyncButton}<NotificationBell align="start" /></div>
         <div className="flex-1 flex justify-center">{lockup}</div>
         <div className="flex-1" />
       </div>
@@ -130,30 +146,31 @@ export function TitleBar() {
   // Linux (custom window controls)
   return (
     <div
+      data-testid="titlebar"
       className="titlebar-drag flex h-[var(--titlebar-height)] items-center px-4"
       style={{ background: "var(--color-bg-secondary)" }}
     >
-      <div className="flex flex-1 items-center gap-1">{MenuButton}{LanButton}{SyncButton}<NotificationBell align="left" /></div>
+      <div className="flex flex-1 items-center gap-1">{MenuButton}<NavButtons />{LanButton}{SyncButton}<NotificationBell align="start" /></div>
       <div className="flex-1 flex justify-center">{lockup}</div>
       <div className="titlebar-no-drag flex flex-1 items-center justify-end gap-1">
         <button
           onClick={() => ipc.minimize()}
           className="rounded p-1.5 hover:bg-black/5"
-          aria-label="Minimize"
+          aria-label={t("navigation.accessibility.minimize")}
         >
           <Minus size={14} />
         </button>
         <button
           onClick={() => ipc.maximize()}
           className="rounded p-1.5 hover:bg-black/5"
-          aria-label="Maximize"
+          aria-label={t("navigation.accessibility.maximize")}
         >
           <Square size={12} />
         </button>
         <button
           onClick={() => ipc.close()}
           className="rounded p-1.5 hover:bg-red-500 hover:text-white"
-          aria-label="Close"
+          aria-label={t("common.close")}
         >
           <X size={14} />
         </button>

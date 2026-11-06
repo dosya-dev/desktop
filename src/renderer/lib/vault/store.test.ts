@@ -3,6 +3,10 @@ import { useVault, type E2eeEngine, type EncryptedEntry, type KnownWorkspace, ty
 import { setActiveGlobalWorkspaceId } from "./active-workspace";
 import { ApiError } from "@/lib/api-client";
 import { SESSION_RESET_EVENT } from "@/lib/session-reset";
+import { setPersonasUser, onPersonasTeardown } from "@/lib/personas-device/teardown";
+
+const wipePersonasDevice = vi.fn(async (_u: string | null) => {});
+vi.mock("@/lib/personas-device/wipe", () => ({ wipePersonasDevice: (u: string | null) => wipePersonasDevice(u) }));
 
 // The store's module-level initial state constructs the REAL engine
 // (`defaultEngine()`), which builds its API client against the IPC-primed
@@ -821,6 +825,23 @@ describe("useVault: unlockWithRecoveryKey", () => {
 });
 
 describe("useVault: destroyIdentity", () => {
+  it("clears the cached personas key once the server confirms, not when it refuses", async () => {
+    setPersonasUser("u_9");
+    wipePersonasDevice.mockClear();
+    const stopped = vi.fn();
+    const off = onPersonasTeardown(stopped);
+    useVault.getState().__setEngine(makeFakeEngine({ destroyIdentity: async () => { throw new ApiError(401, "Wrong password"); } }));
+    expect(await useVault.getState().destroyIdentity("bad")).toBe(false);
+    expect(wipePersonasDevice).not.toHaveBeenCalled();
+    expect(stopped).not.toHaveBeenCalled();
+    useVault.getState().__setEngine(makeFakeEngine());
+    expect(await useVault.getState().destroyIdentity("good")).toBe(true);
+    expect(wipePersonasDevice).toHaveBeenCalledWith("u_9");
+    // Running engines stop first, so nothing re-persists the key.
+    expect(stopped).toHaveBeenCalledTimes(1);
+    off();
+  });
+
   it("passes password and code to the engine, then returns the user to setup", async () => {
     const calls: [string, string | undefined][] = [];
     useVault.getState().__setEngine(makeFakeEngine({ destroyIdentity: async (pw, code) => { calls.push([pw, code]); } }));

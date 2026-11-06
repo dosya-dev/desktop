@@ -1,3 +1,4 @@
+import { intlLocale, tl } from "./locale-state.ts";
 /**
  * Permanently deleting a trashed folder, one bounded pass at a time.
  *
@@ -83,30 +84,29 @@ export interface PurgeMessage {
   body: string;
 }
 
-/** The title both paths use when a purge stopped with work still to do. */
-const STILL_EMPTYING_TITLE = "Still emptying";
-
-/** "Ask again" is the whole recovery, so both paths say it the same way. */
-const CARRY_ON = 'Choose "Delete permanently" again to carry on.';
-
-const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+/** "About 9,999 to go": a plain count, in the chosen language's digits. */
+const count = (n: number) => n.toLocaleString(intlLocale());
 
 /** What to tell the user when the loop stops, finished or not. */
 export function purgeSummary(outcome: PurgeOutcome, folderName: string): PurgeMessage {
   if (outcome.complete) {
     return {
       kind: "success",
-      title: "Deleted",
+      title: tl("files.heading.deleted"),
       body: outcome.filesAffected > 0
-        ? `"${folderName}" and its ${plural(outcome.filesAffected, "file")} were permanently deleted.`
-        : `"${folderName}" was permanently deleted.`,
+        ? tl("files.message.foldernameAndItsFileWerePermanentlyDeleted", { count: outcome.filesAffected, folderName })
+        : tl("files.message.foldernameWasPermanentlyDeleted", { folderName }),
     };
   }
+  // The title both paths use when a purge stopped with work still to do, and
+  // the same "ask again" instruction: that is the whole recovery.
   return {
     kind: "info",
-    title: STILL_EMPTYING_TITLE,
-    body: `"${folderName}" is very large - ${plural(outcome.filesAffected, "file")} removed so far, `
-      + `about ${outcome.remaining.toLocaleString()} to go. ${CARRY_ON}`,
+    title: tl("files.label.stillEmptying"),
+    body: tl(
+      "files.message.foldernameIsVeryLargeFileRemovedSoFarAboutSentenceCaseWithChoosedeletepermanentlyagaintocarryonForPurgesummary",
+      { count: outcome.filesAffected, folderName, remaining: count(outcome.remaining) },
+    ),
   };
 }
 
@@ -133,28 +133,27 @@ export function bulkPurgeSummary(opts: {
   incomplete: UnfinishedFolder[];
 }): PurgeMessage {
   const { deleted, failed, incomplete } = opts;
-  const parts: string[] = [];
 
   if (incomplete.length === 0) {
-    parts.push(`${plural(deleted, "item")} permanently deleted.`);
-    if (failed > 0) parts.push(`${plural(failed, "item")} could not be deleted.`);
+    const body = tl("files.message.itemPermanentlyDeleted", { deleted, failed });
     // A refusal is an error even when something else did go: reporting it in
     // a green toast is the same overstatement in a smaller form.
     return failed > 0
-      ? { kind: "error", title: "Some items could not be deleted", body: parts.join(" ") }
-      : { kind: "success", title: "Deleted", body: parts.join(" ") };
+      ? { kind: "error", title: tl("files.error.someItemsCouldNotBeDeleted"), body }
+      : { kind: "success", title: tl("files.heading.deleted"), body };
   }
 
+  // One message for the whole summary, so each language orders its parts:
+  // what went, which folder (or how many) is still emptying, the instruction
+  // to ask again, and what was refused.
   const removed = incomplete.reduce((sum, f) => sum + f.filesAffected, 0);
   const left = incomplete.reduce((sum, f) => sum + f.remaining, 0);
-  if (deleted > 0) parts.push(`${plural(deleted, "item")} permanently deleted.`);
-  parts.push(
-    incomplete.length === 1
-      ? `"${incomplete[0].name}" is very large - ${plural(removed, "file")} removed so far, about ${left.toLocaleString()} to go.`
-      : `${plural(incomplete.length, "folder")} are very large - ${plural(removed, "file")} removed so far, about ${left.toLocaleString()} to go.`,
-  );
-  parts.push(CARRY_ON);
-  if (failed > 0) parts.push(`${plural(failed, "item")} could not be deleted.`);
-
-  return { kind: "info", title: STILL_EMPTYING_TITLE, body: parts.join(" ") };
+  return {
+    kind: "info",
+    title: tl("files.label.stillEmptying"),
+    body: tl(
+      "files.message.foldernameIsVeryLargeFileRemovedSoFarAboutSentenceCaseWithChoosedeletepermanentlyagaintocarryonForSourcecomposition",
+      { deleted, incomplete: incomplete.length, folderName: incomplete[0].name, removed, remaining: count(left), failed },
+    ),
+  };
 }

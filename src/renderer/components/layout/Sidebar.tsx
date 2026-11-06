@@ -31,23 +31,33 @@ import {
   EyeOff,
   Plug,
   Lock,
+  ScanFace,
   type LucideIcon,
 } from "lucide-react";
 import type { Workspace } from "@dosya-dev/shared";
 import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useSyncPaused, useSyncStore, useWorkspaceSyncSummaryKey } from "@/lib/sync-store";
-import { workspaceSyncSummary } from "@/lib/sync-summary";
+import { syncNavBadge, workspaceSyncSummary } from "@/lib/sync-summary";
+import { WorkspaceBadge } from "@/components/WorkspaceBadge";
 import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { api, ApiError } from "@/lib/api-client";
 import { useNarrowWindow } from "@/lib/use-narrow-window";
 import { useUiStore } from "@/lib/ui-store";
+import { useSupportChat } from "@/lib/support-chat/store";
+import { UnreadBadge } from "@/components/support-chat/UnreadBadge";
 import { usePermissions } from "@/lib/use-permissions";
+import { usePersonasVisible } from "@/lib/use-personas-access";
 import { ipc } from "@/lib/ipc";
 import { formatBytes } from "@/lib/format";
+import { storagePercent as usagePercent } from "@/lib/storage-percent";
 import { activeFilter, filesHref, type FilterId } from "@/lib/files-params";
 import { toast } from "sonner";
+import { autoDir, useAutoDir } from "@/lib/bidi-ui";
 import { SwatchPicker } from "../SwatchPicker";
+import { currentDir, useDir, useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
+import type { MessageKey } from "../../../i18n/keys";
 
 // `perm` is the page-access permission that reveals the entry. Those six
 // access_* keys shipped in migration 0008 and were read by nothing anywhere -
@@ -65,57 +75,70 @@ import { SwatchPicker } from "../SwatchPicker";
  * for them, not because they share a URL.
  */
 type FilesChild = {
-  label: string;
+  label: MessageKey;
   icon: LucideIcon;
   perm?: string;
+  /**
+   * A gate on top of the permission: "personas" rows show for a signed-in
+   * user once the permissions have answered (lib/use-personas-access.ts).
+   */
+  gate?: "personas";
   /** Render a separator above this row. */
   sep?: boolean;
 } & ({ filter: FilterId; to?: never } | { to: string; filter?: never });
 
 const FILES_CHILDREN: FilesChild[] = [
-  { filter: "all", label: "All", icon: Files, perm: "access_files" },
-  { filter: "documents", label: "Documents", icon: FileText, perm: "access_files" },
-  { filter: "videos", label: "Videos", icon: Video, perm: "access_files" },
-  { filter: "images", label: "Images", icon: ImageIcon, perm: "access_files" },
+  { filter: "all", label: "common.label.all", icon: Files, perm: "access_files" },
+  { filter: "documents", label: "common.label.documents", icon: FileText, perm: "access_files" },
+  { filter: "videos", label: "files.heading.videos", icon: Video, perm: "access_files" },
+  { filter: "images", label: "common.label.images", icon: ImageIcon, perm: "access_files" },
+  // Personas: after Images, before Shared files (its own page, like Map and
+  // File requests). Runs on each member's own devices, free on every plan.
+  { to: "/personas", label: "common.label.personas", icon: ScanFace, perm: "access_files", gate: "personas" },
   // "Shared files" not "Shared": this is the files that HAVE a share link,
   // which is a different thing from the top-level Shared page listing the links
   // themselves. Two rows reading "Shared" on one sidebar would be a riddle.
-  { filter: "shared", label: "Shared files", icon: Share2, perm: "access_files" },
-  { filter: "favourites", label: "Favourites", icon: Star, perm: "access_files" },
+  { filter: "shared", label: "navigation.label.sharedFiles", icon: Share2, perm: "access_files" },
+  { filter: "favourites", label: "common.label.favourites", icon: Star, perm: "access_files" },
   // Ungated: groups are per-user shortcuts, not a workspace resource, so there
   // is no access_* permission that governs them.
-  { to: "/groups", label: "Groups", icon: Layers },
-  { to: "/map", label: "Map", icon: MapPin, perm: "access_files" },
-  { to: "/file-requests", label: "File requests", icon: Inbox },
+  { to: "/groups", label: "groups.heading.groups", icon: Layers },
+  { to: "/map", label: "navigation.label.map", icon: MapPin, perm: "access_files" },
+  { to: "/file-requests", label: "navigation.label.fileRequests", icon: Inbox },
   // The two destructive-adjacent views sit below a rule so they read as a
   // different kind of place than the type filters above them.
-  { filter: "deleted", label: "Deleted", icon: Trash2, perm: "access_files", sep: true },
-  { filter: "hidden", label: "Hidden", icon: EyeOff, perm: "access_files" },
+  { filter: "deleted", label: "common.label.deleted", icon: Trash2, perm: "access_files", sep: true },
+  { filter: "hidden", label: "common.status.hidden", icon: EyeOff, perm: "access_files" },
 ];
 
 /** Routes the Files section owns - used for auto-expand and parent highlight. */
-const FILES_ROUTES = ["/files", "/groups", "/map", "/file-requests"];
+const FILES_ROUTES = ["/files", "/groups", "/map", "/file-requests", "/personas"];
+
+/** Whether `pathname` is `route` or a page under it (/personas/:personaId). */
+const underRoute = (pathname: string, route: string) => pathname === route || pathname.startsWith(`${route}/`);
 
 type NavEntry =
-  | { kind: "link"; to: string; icon: LucideIcon; label: string; perm?: string }
+  // `label` is a catalog key, except "Vault": a product name that reads the
+  // same in every language (glossary do-not-translate list).
+  | { kind: "link"; to: string; icon: LucideIcon; label: MessageKey | "Vault"; perm?: string }
   | { kind: "files" };
 
 const NAV_MAIN: NavEntry[] = [
-  { kind: "link", to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", perm: "access_dashboard" },
+  { kind: "link", to: "/dashboard", icon: LayoutDashboard, label: "common.label.dashboard", perm: "access_dashboard" },
   { kind: "files" },
-  { kind: "link", to: "/upload", icon: Upload, label: "Upload", perm: "access_upload" },
-  { kind: "link", to: "/shared", icon: Share2, label: "Shared", perm: "access_shared" },
+  { kind: "link", to: "/upload", icon: Upload, label: "common.action.upload", perm: "access_upload" },
+  { kind: "link", to: "/shared", icon: Share2, label: "common.label.shared", perm: "access_shared" },
   // Ungated like Groups: the Vault is a per-user surface (its own passphrase
   // and identity), not a workspace resource, so no access_* permission
   // governs it. Same reasoning as apps/web's sidebar.
   { kind: "link", to: "/vault", icon: Lock, label: "Vault" },
-  { kind: "link", to: "/sync", icon: RefreshCw, label: "Sync" },
+  { kind: "link", to: "/sync", icon: RefreshCw, label: "common.label.sync" },
 ];
 
 const NAV_WORKSPACE: NavEntry[] = [
-  { kind: "link", to: "/integrations", icon: Plug, label: "Integrations" },
-  { kind: "link", to: "/team", icon: Users, label: "Team", perm: "access_team" },
-  { kind: "link", to: "/settings", icon: Settings, label: "Settings", perm: "access_settings" },
+  { kind: "link", to: "/integrations", icon: Plug, label: "integrations.heading.integrations" },
+  { kind: "link", to: "/team", icon: Users, label: "common.label.team", perm: "access_team" },
+  { kind: "link", to: "/settings", icon: Settings, label: "common.label.settings", perm: "access_settings" },
 ];
 
 const FILES_OPEN_KEY = "dosya_sidebar_files_open";
@@ -136,19 +159,36 @@ const RAIL_GLIDE_COLORS =
 /** Tallest the collapsed-mode Files flyout is allowed to get, in px. */
 const FLYOUT_MAX_H = 380;
 
+/**
+ * Where a collapsed-rail flyout goes: beside the rail, toward the content. In
+ * left-to-right that is 6px right of the row; in right-to-left the rail is on
+ * the right, so the flyout's right edge sits 6px left of the row instead.
+ */
+type FlyoutPos = { top: number; left?: number; right?: number };
+function flyoutBeside(r: DOMRect, top: number): FlyoutPos {
+  return currentDir() === "rtl"
+    ? { top, right: window.innerWidth - r.left + 6 } // rtl-ok: mirrored, the rail is on the right
+    : { top, left: r.right + 6 };
+}
+
 export function Sidebar() {
+  const ownDir = useAutoDir();
+  const t = useT();
+  const dir = useDir();
   const { user, logout } = useAuth();
+  // Unseen live chat replies (0 when the feature is off: the store never boots).
+  const chatUnread = useSupportChat((s) => s.unread);
   const navigate = useNavigate();
   const { workspaces, active, setActive } = useWorkspace();
-  const { can } = usePermissions();
+  const { can, permissions } = usePermissions();
   const queryClient = useQueryClient();
   const [wsOpen, setWsOpen] = useState(false);
-  // Collapsed (60px) has no room for the inline dropdown - left-3/right-3 of
+  // Collapsed (60px) has no room for the inline dropdown - inset 3 each side of
   // a 60px rail is ~36px - so the workspace button opens a fixed flyout
   // beside the rail instead, same pattern as the Files flyout below. null
   // means the inline dropdown (expanded sidebar).
   const wsBtnRef = useRef<HTMLButtonElement>(null);
-  const [wsFlyout, setWsFlyout] = useState<{ top: number; left: number } | null>(null);
+  const [wsFlyout, setWsFlyout] = useState<FlyoutPos | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newWsName, setNewWsName] = useState("");
   const [newWsColor, setNewWsColor] = useState("#22c55e");
@@ -170,8 +210,15 @@ export function Sidebar() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const onFilesPage = location.pathname === "/files";
-  const inFilesSection = FILES_ROUTES.includes(location.pathname);
+  const inFilesSection = FILES_ROUTES.some((r) => underRoute(location.pathname, r));
   const currentFilter = activeFilter(searchParams);
+
+  // ── Personas row ───────────────────────────────────────────
+  // For every signed-in member whose role may see files: Personas runs on
+  // their own devices, so no server is asked. `can()` alone fails open while
+  // the permissions load, which is right for buttons but would show the row
+  // to a files-less role for a moment.
+  const showPersonas = usePersonasVisible(permissions !== undefined && can("access_files"));
 
   // Shut on first run, and remembered after that.
   //
@@ -191,15 +238,15 @@ export function Sidebar() {
   }, []);
 
   const visibleFilesChildren = useMemo(
-    () => FILES_CHILDREN.filter((c) => !c.perm || can(c.perm)),
-    [can],
+    () => FILES_CHILDREN.filter((c) => (!c.perm || can(c.perm)) && (c.gate !== "personas" || showPersonas)),
+    [can, showPersonas],
   );
 
   // Collapsed (60px) has no room for a tree, so the Files icon opens a flyout
   // instead. Positioned fixed from the row's measured rect: the sidebar's inner
   // wrapper is overflow-hidden, which would clip an absolutely-positioned panel.
   const filesRowRef = useRef<HTMLButtonElement>(null);
-  const [flyout, setFlyout] = useState<{ top: number; left: number } | null>(null);
+  const [flyout, setFlyout] = useState<FlyoutPos | null>(null);
   const openFlyout = () => {
     const r = filesRowRef.current?.getBoundingClientRect();
     if (!r) return;
@@ -207,7 +254,7 @@ export function Sidebar() {
     // minimum-height window, so pull the panel up rather than let it run off
     // the screen. It scrolls if even that isn't enough.
     const top = Math.max(8, Math.min(r.top, window.innerHeight - FLYOUT_MAX_H - 8));
-    setFlyout({ top, left: r.right + 6 });
+    setFlyout(flyoutBeside(r, top));
   };
   // Any navigation, or leaving collapsed mode, dismisses it.
   useEffect(() => { setFlyout(null); }, [location.pathname, location.search]);
@@ -244,7 +291,10 @@ export function Sidebar() {
       setPill({
         top: r.top - navRect.top + nav.scrollTop,
         height: r.height,
-        left: r.left - navRect.left,
+        // Measured: physical on both sides. clientLeft is 0 in left-to-right
+        // (the nav has no border); in right-to-left it is the vertical
+        // scrollbar, which Chromium draws on the left.
+        left: r.left - navRect.left - nav.clientLeft, // rtl-ok: pointer coordinates, measured
         width: r.width,
       });
     };
@@ -282,14 +332,14 @@ export function Sidebar() {
 
   /** Whether a Files child row is the view currently on screen. */
   const childActive = (c: FilesChild) =>
-    c.filter ? onFilesPage && currentFilter === c.filter : location.pathname === c.to;
+    c.filter ? onFilesPage && currentFilter === c.filter : underRoute(location.pathname, c.to);
 
   // With the tree shut, the parent row is the only thing naming where you are,
   // and "Files" alone cannot tell Images from the trash. Name the view beside
   // it. "All" is the bare files page, so it needs no qualifier.
   const activeChild = visibleFilesChildren.find(childActive);
   const filesSuffix =
-    !filesOpen && activeChild && activeChild.filter !== "all" ? activeChild.label : null;
+    !filesOpen && activeChild && activeChild.filter !== "all" ? t(activeChild.label) : null;
 
   // Sync state now comes from the single shared store (see AppShell.init).
   const syncPaused = useSyncPaused();
@@ -354,7 +404,7 @@ export function Sidebar() {
 
   const storageUsed = dashData?.stats?.total_bytes ?? 0;
   const storageCap = dashData?.stats?.storage_cap_bytes ?? 0;
-  const storagePercent = storageCap > 0 ? Math.min(100, Math.round((storageUsed / storageCap) * 100)) : 0;
+  const storage = usagePercent(storageUsed, storageCap);
 
   const createWsMut = useMutation({
     mutationFn: (name: string) => api.post<{ ok: boolean; workspace: { id: string; name: string; slug: string; icon_initials: string; icon_color: string; owner_id: string } }>("/api/workspaces", { name, icon_color: newWsColor }),
@@ -365,10 +415,10 @@ export function Sidebar() {
       setNewWsName("");
       setNewWsColor("#22c55e");
       setWsOpen(false);
-      toast.success("Workspace created");
+      toast.success(t("navigation.label.workspaceCreated"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to create workspace");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("common.error.failedToCreateWorkspace"));
     },
   });
 
@@ -395,7 +445,7 @@ export function Sidebar() {
         }`}
       >
         <c.icon size={14} className="shrink-0" />
-        <span className="truncate">{c.label}</span>
+        <span className="flex-1 truncate text-start">{t(c.label)}</span>
       </button>
     </div>
   );
@@ -416,7 +466,7 @@ export function Sidebar() {
             <button
               ref={filesRowRef}
               data-testid="nav-files"
-              title={collapsed ? "Files" : undefined}
+              title={collapsed ? t("common.label.files") : undefined}
               onClick={() => {
                 if (collapsed) { flyout ? setFlyout(null) : openFlyout(); return; }
                 if (!filesOpen) toggleFiles(true);
@@ -426,11 +476,12 @@ export function Sidebar() {
             >
               <FolderOpen size={18} className="shrink-0" />
               {!collapsed && (
-                <span className="flex-1 truncate text-left">
-                  Files
-                  {filesSuffix && (
-                    <span className="text-[var(--color-text-muted)]"> · {filesSuffix}</span>
-                  )}
+                <span className="flex-1 truncate text-start">
+                  {filesSuffix
+                    ? richText(t, "navigation.label.filesFilesSuffix", {}, {
+                        filesSuffix: <span className="text-[var(--color-text-muted)]">{filesSuffix}</span>,
+                      })
+                    : t("common.label.files")}
                 </span>
               )}
             </button>
@@ -439,16 +490,16 @@ export function Sidebar() {
                 data-testid="nav-files-toggle"
                 onClick={() => toggleFiles(!filesOpen)}
                 aria-expanded={filesOpen}
-                aria-label={filesOpen ? "Collapse Files" : "Expand Files"}
-                className="mr-1 rounded p-1.5 hover:bg-black/10"
+                aria-label={filesOpen ? t("navigation.accessibility.collapseFiles") : t("navigation.accessibility.expandFiles")}
+                className="me-1 rounded p-1.5 hover:bg-black/10"
               >
-                <ChevronRight size={13} className={`transition-transform ${filesOpen ? "rotate-90" : ""}`} />
+                <ChevronRight size={13} className={`transition-transform ${filesOpen ? "rotate-90" : "rtl:rotate-180"}`} />
               </button>
             )}
           </div>
           {!collapsed && filesOpen && (
             <div
-              className="ml-[18px] mt-0.5 space-y-0.5 border-l pl-2.5"
+              className="ms-[18px] mt-0.5 space-y-0.5 border-s ps-2.5"
               style={{ borderColor: "var(--color-border)" }}
             >
               {visibleFilesChildren.map((c) => renderFilesChild(c))}
@@ -458,18 +509,20 @@ export function Sidebar() {
       );
     }
 
-    const { to, icon: Icon, label, perm } = entry;
+    const { to, icon: Icon, perm } = entry;
+    const label = entry.label === "Vault" ? entry.label : t(entry.label);
     if (perm && !can(perm)) return null;
 
     const isSyncNav = to === "/sync";
     // Use per-workspace sync status for the active workspace
     const activeWsSync = active ? wsSyncMap[active.id] : undefined;
-    const wsHasPairs = (activeWsSync?.count ?? 0) > 0;
-    const wsHasError = activeWsSync?.error ?? false;
-    const wsPaused = activeWsSync?.paused ?? false;
-    const showPing = isSyncNav && wsHasPairs && (wsPaused || wsHasError);
-    const showStartNow = isSyncNav && !wsHasPairs;
-    const showRunning = isSyncNav && wsHasPairs && !wsPaused && !wsHasError;
+    // A pause is a deliberate stop, not a failure (TC-055): only "error"
+    // pings red; "paused" is a quiet grey dot and word.
+    const navBadge = isSyncNav ? syncNavBadge(activeWsSync, syncPaused) : null;
+    const showPing = navBadge === "error";
+    const showPausedDot = navBadge === "paused";
+    const showStartNow = navBadge === "start";
+    const showRunning = navBadge === "running";
     const linkActive = location.pathname === to;
     return (
       <NavLink
@@ -485,23 +538,27 @@ export function Sidebar() {
         <span className="relative">
           <Icon size={18} />
           {showPing && (
-            <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5">
+            <span className="absolute -inset-e-1 -top-1 flex h-2.5 w-2.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
               <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
             </span>
           )}
+          {showPausedDot && (
+            <span className="absolute -inset-e-1 -top-1 h-2.5 w-2.5 rounded-full bg-gray-400" />
+          )}
         </span>
         {!collapsed && <span className="flex-1">{label}</span>}
         {!collapsed && showPing && (
-          <span className="text-[10px] font-medium text-red-500">
-            {syncPaused ? "Paused" : "Error"}
-          </span>
+          <span className="text-[10px] font-medium text-red-500">{t("common.status.error")}</span>
+        )}
+        {!collapsed && showPausedDot && (
+          <span className="text-[10px] font-medium text-[var(--color-text-muted)]">{t("common.status.paused")}</span>
         )}
         {!collapsed && showRunning && (
-          <span className="text-[10px] font-medium text-[var(--color-primary)]">Running</span>
+          <span className="text-[10px] font-medium text-[var(--color-primary)]">{t("navigation.status.running")}</span>
         )}
         {!collapsed && showStartNow && (
-          <span className="text-[10px] font-medium text-[var(--color-primary)]">Start now</span>
+          <span className="text-[10px] font-medium text-[var(--color-primary)]">{t("navigation.label.startNow")}</span>
         )}
       </NavLink>
     );
@@ -513,23 +570,18 @@ export function Sidebar() {
     <>
     {switchingWs && (
       <div className="fixed inset-0 z-[9999] flex flex-col items-center justify-center gap-4 bg-[var(--color-bg)]">
-        <div
-          className="flex h-16 w-16 items-center justify-center rounded-2xl text-xl font-bold text-[var(--color-primary-fg)]"
-          style={{ background: switchingWs.icon_color || "var(--color-primary)" }}
-        >
-          {switchingWs.icon_initials}
-        </div>
+        <WorkspaceBadge ws={switchingWs} className="h-16 w-16 rounded-2xl text-xl !font-bold" />
         <div className="text-center">
-          <p className="text-sm font-semibold">{switchingWs.name}</p>
+          <p dir={ownDir} className="text-sm font-semibold">{switchingWs.name}</p>
           <p className="mt-1 flex items-center justify-center gap-1.5 text-xs text-[var(--color-text-muted)]">
             <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--color-primary)] border-t-transparent" />
-            Switching workspace…
+            {t("navigation.status.switchingWorkspace")}
           </p>
         </div>
       </div>
     )}
     <aside
-      className="relative flex h-full flex-col border-r transition-all duration-200"
+      className="relative flex h-full flex-col border-e transition-all duration-200"
       style={{
         width: collapsed ? 60 : 260,
         minWidth: collapsed ? 60 : 260,
@@ -549,13 +601,13 @@ export function Sidebar() {
           className="absolute z-30 flex h-6 w-6 items-center justify-center rounded-full border bg-[var(--color-bg)] text-[var(--color-text-muted)] shadow-sm hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] transition-colors"
           style={{
             borderColor: "var(--color-border)",
-            right: -12,
+            insetInlineEnd: -12,
             bottom: 42,
           }}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? t("navigation.accessibility.expandSidebar") : t("navigation.accessibility.collapseSidebar")}
+          aria-label={collapsed ? t("navigation.accessibility.expandSidebar") : t("navigation.accessibility.collapseSidebar")}
         >
-          {collapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
+          {collapsed ? <PanelLeftOpen size={12} className="rtl:-scale-x-100" /> : <PanelLeftClose size={12} className="rtl:-scale-x-100" />}
         </button>
       )}
 
@@ -578,25 +630,20 @@ export function Sidebar() {
               // Clamped like the Files flyout: taller than the gap below the
               // button and the panel would run off a minimum-height window.
               const top = Math.max(8, Math.min(r.top, window.innerHeight - FLYOUT_MAX_H - 8));
-              setWsFlyout({ top, left: r.right + 6 });
+              setWsFlyout(flyoutBeside(r, top));
             } else {
               setWsFlyout(null);
             }
             setWsOpen(true);
           }}
           className={`flex w-full items-center gap-2.5 rounded-lg py-2 text-sm hover:bg-black/5 ${collapsed ? "px-1" : "px-3"} ${RAIL_GLIDE_COLORS}`}
-          title={collapsed ? active?.name || "Select workspace" : undefined}
+          title={collapsed ? active?.name || t("navigation.label.selectWorkspace") : undefined}
         >
-          <div
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-semibold text-[var(--color-primary-fg)]"
-            style={{ background: active?.icon_color || "var(--color-primary)" }}
-          >
-            {active?.icon_initials || "?"}
-          </div>
+          <WorkspaceBadge ws={active} className="h-7 w-7 rounded-lg text-xs" />
           {!collapsed && (
             <>
-              <span className="flex-1 truncate text-left font-medium">
-                {active?.name || "Select workspace"}
+              <span dir={active?.name ? ownDir : undefined} className="flex-1 truncate text-start font-medium">
+                {active?.name || t("navigation.label.selectWorkspace")}
               </span>
               <ChevronDown
                 size={14}
@@ -617,16 +664,17 @@ export function Sidebar() {
               className={`${
                 wsFlyout
                   ? "anim-pop-in fixed w-64 overflow-y-auto"
-                  : "absolute left-3 right-3 mt-1"
+                  : "absolute inset-s-3 inset-e-3 mt-1"
               } z-50 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg`}
               style={{
                 borderColor: "var(--color-border)",
                 ...(wsFlyout
                   ? {
                       top: wsFlyout.top,
-                      left: wsFlyout.left,
+                      left: wsFlyout.left, // rtl-ok: mirrored, flyoutBeside picks the side
+                      right: wsFlyout.right, // rtl-ok: mirrored, flyoutBeside picks the side
                       maxHeight: FLYOUT_MAX_H,
-                      transformOrigin: "top left",
+                      transformOrigin: dir === "rtl" ? "top right" : "top left",
                     }
                   : {}),
               }}
@@ -645,17 +693,15 @@ export function Sidebar() {
                     }}
                     className="flex w-full items-center gap-2.5 px-3 py-2 text-sm hover:bg-[var(--color-bg-secondary)] transition-colors"
                   >
-                    <div
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs font-semibold text-[var(--color-primary-fg)]"
-                      style={{ background: ws.icon_color || "var(--color-primary)" }}
-                    >
-                      {ws.icon_initials}
-                    </div>
-                    <div className="min-w-0 flex-1 text-left">
-                      <span className="block truncate">{ws.name}</span>
+                    <WorkspaceBadge ws={ws} className="h-6 w-6 rounded text-xs" />
+                    <div className="min-w-0 flex-1 text-start">
+                      <span dir={ownDir} className="block truncate" title={ws.name}>{ws.name}</span>
                       {ws.storage && ws.storage.total > 0 && (
                         <span className="block truncate text-[10px] leading-tight text-[var(--color-text-muted)]">
-                          {formatBytes(Math.max(0, ws.storage.free ?? ws.storage.total - ws.storage.used))} free of {formatBytes(ws.storage.total)}
+                          {t("navigation.label.freeFreeOfTotal", {
+                            free: formatBytes(Math.max(0, ws.storage.free ?? ws.storage.total - ws.storage.used)),
+                            total: formatBytes(ws.storage.total),
+                          })}
                         </span>
                       )}
                     </div>
@@ -663,10 +709,10 @@ export function Sidebar() {
                       <span
                         className="flex items-center gap-1 text-[10px] font-medium"
                         title={
-                          wsSync.error ? "Sync error" :
-                          wsSync.syncing ? "Syncing" :
-                          wsSync.paused ? "Sync paused" :
-                          "Synced"
+                          wsSync.error ? t("navigation.tooltip.syncError") :
+                          wsSync.syncing ? t("sync.label.syncing") :
+                          wsSync.paused ? t("navigation.tooltip.syncPaused") :
+                          t("common.status.synced")
                         }
                       >
                         {wsSync.error ? (
@@ -695,7 +741,7 @@ export function Sidebar() {
                 className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] transition-colors"
               >
                 <LayoutGrid size={14} />
-                Workspace dashboard
+                {t("workspaces.heading.workspaceDashboard")}
               </button>
               <button
                 onClick={() => {
@@ -705,7 +751,7 @@ export function Sidebar() {
                 className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] transition-colors"
               >
                 <Plus size={14} />
-                Create workspace
+                {t("common.action.createWorkspace")}
               </button>
             </div>
           </>
@@ -717,7 +763,7 @@ export function Sidebar() {
         <button
           data-testid="sidebar-search"
           className={`flex w-full items-center gap-2 rounded-lg py-2 text-sm text-[var(--color-text-muted)] hover:bg-black/5 ${collapsed ? "px-2.5" : "px-3"} ${RAIL_GLIDE}`}
-          title={collapsed ? "Search" : undefined}
+          title={collapsed ? t("navigation.tooltip.search") : undefined}
           onClick={() => {
             navigate("/search");
           }}
@@ -725,8 +771,8 @@ export function Sidebar() {
           <Search size={16} />
           {!collapsed && (
             <>
-              <span>Search...</span>
-              <kbd className="ml-auto rounded bg-black/5 px-1.5 py-0.5 text-xs">
+              <span>{t("navigation.status.search")}</span>
+              <kbd translate="no" className="ms-auto rounded bg-black/5 px-1.5 py-0.5 text-xs">
                 {platform === "darwin" ? "\u2318K" : "Ctrl+K"}
               </kbd>
             </>
@@ -751,6 +797,7 @@ export function Sidebar() {
           <div
             aria-hidden
             className="pointer-events-none absolute rounded-lg bg-[var(--color-primary)]/10 transition-[top,height,left,width] duration-200 ease-out motion-reduce:transition-none"
+            // rtl-ok: pointer coordinates, measured
             style={{ top: pill.top, height: pill.height, left: pill.left, width: pill.width }}
           />
         )}
@@ -762,7 +809,7 @@ export function Sidebar() {
               <div className="mx-2 mb-2 h-px" style={{ background: "var(--color-border)" }} />
             ) : (
               <p className="px-3 pb-1 text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-muted)]">
-                Workspace
+                {t("common.label.workspace")}
               </p>
             )}
             <div className="space-y-1">{workspaceRows}</div>
@@ -781,15 +828,16 @@ export function Sidebar() {
             className="anim-pop-in fixed z-50 w-52 overflow-y-auto rounded-lg border p-1.5 shadow-lg"
             style={{
               top: flyout.top,
-              left: flyout.left,
+              left: flyout.left, // rtl-ok: mirrored, flyoutBeside picks the side
+              right: flyout.right, // rtl-ok: mirrored, flyoutBeside picks the side
               maxHeight: FLYOUT_MAX_H,
-              transformOrigin: "top left",
+              transformOrigin: dir === "rtl" ? "top right" : "top left",
               borderColor: "var(--color-border)",
               background: "var(--color-bg)",
             }}
           >
             <p className="px-2.5 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-              Files
+              {t("common.label.files")}
             </p>
             {visibleFilesChildren.map((c) => renderFilesChild(c))}
           </div>
@@ -799,7 +847,7 @@ export function Sidebar() {
       {/* Storage info */}
       <div className="px-3 pb-2">
         {collapsed ? (
-          <div className="flex px-2.5" title={`${formatBytes(storageUsed)} / ${formatBytes(storageCap)} (${storagePercent}%)`}>
+          <div className="flex px-2.5" title={`${formatBytes(storageUsed)} / ${formatBytes(storageCap)} (${storage.label}%)`}>
             <HardDrive size={16} className="text-[var(--color-text-muted)]" />
           </div>
         ) : (
@@ -807,16 +855,16 @@ export function Sidebar() {
             <div className="mb-1.5 flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs text-[var(--color-text-secondary)]">
                 <HardDrive size={12} />
-                Storage
+                {t("navigation.label.storage")}
               </div>
-              <span className="text-xs font-medium">{storagePercent}%</span>
+              <span className="text-xs font-medium">{storage.label}%</span>
             </div>
             <div className="mb-1.5 h-1.5 rounded-full bg-[var(--color-border)]">
               <div
                 className="h-1.5 rounded-full transition-all"
                 style={{
-                  width: `${Math.max(storagePercent, 1)}%`,
-                  background: storagePercent > 90 ? "var(--color-danger)" : "var(--color-primary)",
+                  width: storage.barWidth,
+                  background: storage.pct > 90 ? "var(--color-danger)" : "var(--color-primary)",
                 }}
               />
             </div>
@@ -832,10 +880,12 @@ export function Sidebar() {
         <div className={`flex items-center gap-3 rounded-lg py-2 ${collapsed ? "px-0.5" : "px-3"} ${RAIL_GLIDE}`}>
           <button
             data-testid="sidebar-profile"
-            onClick={() => navigate("/profile")}
+            // An unseen live chat reply lands on Help & contact, where the red row leads into the chat.
+            onClick={() => navigate(chatUnread > 0 ? "/profile?tab=help" : "/profile")}
             className="flex flex-1 items-center gap-3 truncate hover:opacity-80 transition-opacity"
-            title={collapsed ? user?.name || "Profile" : "View profile"}
+            title={collapsed ? user?.name || t("navigation.accessibility.profile") : t("navigation.tooltip.viewProfile")}
           >
+            <span className="relative shrink-0">
             {avatarSrc ? (
               /* Keyed on the URL itself, not on id+version: the component
                  latches a failed load, and that latch must not outlive the
@@ -850,10 +900,13 @@ export function Sidebar() {
                 {user?.name?.charAt(0).toUpperCase() || "?"}
               </div>
             )}
+            {/* Inside the button box: the button truncates (overflow hidden), so the badge cannot overhang. */}
+            {chatUnread > 0 && <UnreadBadge count={chatUnread} className="absolute -end-1.5 top-0" />}
+            </span>
             {!collapsed && (
-              <div className="flex-1 truncate text-left">
-                <p className="truncate text-sm font-medium">{user?.name}</p>
-                <p className="truncate text-xs text-[var(--color-text-muted)]">
+              <div className="flex-1 truncate text-start">
+                <p dir={ownDir} className="truncate text-sm font-medium">{user?.name}</p>
+                <p dir="ltr" className="ltr-value truncate text-xs text-[var(--color-text-muted)]">
                   {user?.email}
                 </p>
               </div>
@@ -863,9 +916,9 @@ export function Sidebar() {
             <button
               onClick={logout}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-black/5 hover:text-[var(--color-danger)]"
-              title="Log out"
+              title={t("create-workspace.action.logOut")}
             >
-              <LogOut size={16} />
+              <LogOut size={16} className="rtl:-scale-x-100" />
             </button>
           )}
         </div>
@@ -877,7 +930,7 @@ export function Sidebar() {
             className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="mb-4 text-lg font-semibold">Create workspace</h3>
+            <h3 className="mb-4 text-lg font-semibold">{t("navigation.heading.createWorkspace")}</h3>
             {/* Preview */}
             <div className="mb-4 flex items-center gap-3">
               <div
@@ -895,7 +948,7 @@ export function Sidebar() {
                 onKeyDown={(e) =>
                   e.key === "Enter" && newWsName.trim() && createWsMut.mutate(newWsName.trim())
                 }
-                placeholder="Workspace name"
+                placeholder={t("create-workspace.label.workspaceName")}
                 autoFocus
                 className="flex-1 rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
                 style={{ borderColor: "var(--color-border)" }}
@@ -903,8 +956,8 @@ export function Sidebar() {
             </div>
             {/* Color picker */}
             <div className="mb-4">
-              <p className="mb-2 text-xs font-medium text-[var(--color-text-secondary)]">Color</p>
-              <SwatchPicker value={newWsColor} onChange={setNewWsColor} label="Workspace colour" />
+              <p className="mb-2 text-xs font-medium text-[var(--color-text-secondary)]">{t("common.label.color")}</p>
+              <SwatchPicker value={newWsColor} onChange={setNewWsColor} label={t("common.label.workspaceColour")} />
             </div>
             <div className="flex justify-end gap-2">
               <button
@@ -912,7 +965,7 @@ export function Sidebar() {
                 className="rounded-lg border px-4 py-2 text-sm"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => newWsName.trim() && createWsMut.mutate(newWsName.trim())}
@@ -920,7 +973,7 @@ export function Sidebar() {
                 className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
-                {createWsMut.isPending ? "Creating..." : "Create"}
+                {createWsMut.isPending ? t("common.status.creating") : t("common.action.create")}
               </button>
             </div>
           </div>
@@ -938,6 +991,7 @@ export function Sidebar() {
 // below cannot outlive the src that set it: a new upload, a new account, or a
 // retry after a transient 500 all mount a fresh component that tries again.
 function SidebarAvatar({ src, name }: { src: string; name: string | undefined }) {
+  const t = useT();
   const [failed, setFailed] = useState(false);
   if (failed) {
     return (
@@ -952,7 +1006,7 @@ function SidebarAvatar({ src, name }: { src: string; name: string | undefined })
   return (
     <img
       src={src}
-      alt={name ?? "Profile"}
+      alt={name ?? t("navigation.accessibility.profile")}
       className="h-8 w-8 shrink-0 rounded-full object-cover"
       onError={() => setFailed(true)}
     />

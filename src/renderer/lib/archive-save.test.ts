@@ -7,6 +7,7 @@
 // required on imports and the assertions are node:assert's.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { planFolderSave, runFolderSave, MAX_FOLDER_SAVE_FILES, type SavePlan } from "./archive-save.ts";
 import { buildArchiveTree, type ArchiveEntry } from "./archive-tree.ts";
 
@@ -133,5 +134,40 @@ describe("runFolderSave", () => {
     assert.equal(d.saved.find((s) => s.index === 3), undefined);
     assert.equal(out.saved, 2);
     assert.deepEqual(d.progress.at(-1), [3, 3]);
+  });
+});
+
+// ArchiveViewer.tsx translates these three sentences of the shared module by
+// exact match (the module itself must stay English and import-free). A reword
+// in the shared copy must fail here, not quietly show English.
+describe("the failure sentences ArchiveViewer translates", () => {
+  const plan = (dirs: string[][], files: SavePlan["files"]): SavePlan => ({ rootName: "Kit", dirs, files, skipped: [] });
+  const noop = { onProgress: () => {}, isCancelled: () => false };
+  const viewerSource = readFileSync(new URL("../components/files/ArchiveViewer.tsx", import.meta.url), "utf8");
+
+  it("still produces each sentence the viewer maps", async () => {
+    const seen = new Set<string>();
+    // Root folder answered without an id.
+    let out = await runFolderSave(plan([], []), null, {
+      ...noop, createFolders: async () => new Map(), saveEntry: async () => ({ file_id: "f", name: "x" }),
+    });
+    out.failed.forEach((f) => seen.add(f.message));
+    // A refusal with no message of its own.
+    out = await runFolderSave(plan([], []), null, {
+      ...noop, createFolders: async () => { throw "nope"; }, saveEntry: async () => ({ file_id: "f", name: "x" }),
+    });
+    out.failed.forEach((f) => seen.add(f.message));
+    // A file whose subfolder was answered without an id.
+    out = await runFolderSave(plan([["sub"]], [{ index: 1, relDir: ["sub"], name: "a.txt" }]), null, {
+      ...noop,
+      createFolders: async (parent) => (parent === null ? new Map([["Kit", "root"]]) : new Map()),
+      saveEntry: async () => ({ file_id: "f", name: "x" }),
+    });
+    out.failed.forEach((f) => seen.add(f.message));
+
+    for (const sentence of ["Request failed", "Folder could not be created", "Its folder could not be created"]) {
+      assert.ok(seen.has(sentence), `archive-save.ts still says "${sentence}"`);
+      assert.ok(viewerSource.includes(`"${sentence}":`), `ArchiveViewer.tsx maps "${sentence}"`);
+    }
   });
 });

@@ -489,3 +489,18 @@ export const mockMapPins = [
   { kind: "file", id: "file_2", name: "Harbour.jpg", size_bytes: 1_048_576, mime_type: "image/jpeg", extension: ".jpg", region: "apac", created_at: 1_740_000_100, updated_at: 1_740_000_100, current_version: 1, lock_mode: "none", is_hidden: 0, uploaded_by: "user_test_1", uploader_name: "Test User", share_count: 0, comment_count: 0, is_synced: 0, latitude: 51.5074, longitude: -0.1278, captured_at: null, source: "exif" },
   { kind: "folder", id: "folder_1", name: "Documents", latitude: 40.7128, longitude: -74.006, source: "ip" },
 ];
+
+/**
+ * GET /api/workspace-dashboard: the storage the user owns across workspaces,
+ * where it comes from, and one workspace shared with them.
+ */
+export const mockWorkspaceDashboard = {
+  total: { limit_bytes: 10_737_418_240, used_bytes: 1_073_741_824, free_bytes: 9_663_676_416 },
+  sources: [{ kind: "plan", label: "Starter 10 GB", bytes: 10_737_418_240, meta: {} }],
+  owned: [
+    { id: "ws_test_1", name: "Test Workspace", icon_initials: "TW", icon_color: "#3B82F6", icon_image_url: null, used_bytes: 1_073_741_824, share_pct: 100 },
+  ],
+  shared: [
+    { id: "ws_shared_1", name: "Design Studio", icon_initials: "DS", icon_color: "#8B5CF6", icon_image_url: null, role_id: "role_member", owner_name: "Dana Owner" },
+  ],
+};

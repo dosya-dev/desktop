@@ -3,11 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, CheckCheck, X, Settings } from "lucide-react";
 import {
-  groupByDay, parseActions, isUnread, relativeTime, mapActionPath,
+  groupByDay, parseActions, isUnread, mapActionPath,
   type NotificationItem,
 } from "@dosya-dev/shared";
 import { fetchInbox, fetchSummary, markRead, markAllRead, dismiss } from "@/lib/notifications-api";
 import { NotificationIcon } from "./NotificationIcon";
+import { dayGroupLabel, notificationAge } from "./notification-labels";
+import { useDir, useT } from "@/lib/i18n";
+import { Bdi, useAutoDir } from "@/lib/bidi-ui";
 
 /** Two digits fit the dot; past that the exact number stops being the point. */
 export function badgeLabel(unread: number): string {
@@ -16,12 +19,15 @@ export function badgeLabel(unread: number): string {
 
 /**
  * `align` names which edge of the bell the dropdown pins to. The titlebar
- * puts the bell in the right cluster on macOS ("right": panel grows leftward,
+ * puts the bell in the right cluster on macOS ("end": panel grows toward the start,
  * staying on-screen) but in the LEFT cluster on Windows/Linux, where the
  * panel must grow rightward instead - right-aligned there, most of its 320px
  * hangs past the window's left edge.
  */
-export function NotificationBell({ align = "right" }: { align?: "left" | "right" } = {}) {
+export function NotificationBell({ align = "end" }: { align?: "start" | "end" } = {}) {
+  const ownDir = useAutoDir();
+  const t = useT();
+  const dir = useDir();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -78,8 +84,8 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
     <div ref={wrapRef} className="titlebar-no-drag relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
-        title="Notifications"
+        aria-label={unread > 0 ? t("notifications.accessibility.notificationsUnreadUnread", { unread }) : t("common.heading.notifications")}
+        title={t("common.heading.notifications")}
         data-testid="open-notifications"
         className="relative flex items-center rounded-lg px-2.5 py-1 text-[var(--color-text-secondary)] transition-colors hover:bg-black/5"
       >
@@ -87,7 +93,7 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
         {unread > 0 && (
           <span
             data-testid="notification-badge"
-            className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 text-[9px] font-bold text-[var(--color-primary-fg)]"
+            className="absolute -inset-e-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 text-[9px] font-bold text-[var(--color-primary-fg)]"
             style={{ background: "var(--color-primary)" }}
           >
             {badgeLabel(unread)}
@@ -98,35 +104,35 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
       {open && (
         <div
           data-testid="notification-dropdown"
-          className={`anim-pop-in absolute ${align === "left" ? "left-0" : "right-0"} top-full z-50 mt-2 flex max-h-[70vh] w-80 flex-col overflow-hidden rounded-xl border shadow-xl`}
-          style={{ background: "var(--color-bg)", borderColor: "var(--color-border)", transformOrigin: align === "left" ? "top left" : "top right" }}
+          className={`anim-pop-in absolute ${align === "start" ? "inset-s-0" : "inset-e-0"} top-full z-50 mt-2 flex max-h-[70vh] w-80 flex-col overflow-hidden rounded-xl border shadow-xl`}
+          style={{ background: "var(--color-bg)", borderColor: "var(--color-border)", transformOrigin: (align === "start") === (dir === "ltr") ? "top left" : "top right" }}
         >
           <div className="flex items-center justify-between border-b px-3 py-2" style={{ borderColor: "var(--color-border)" }}>
-            <span className="text-sm font-semibold">Notifications</span>
+            <span className="text-sm font-semibold">{t("common.heading.notifications")}</span>
             {items.some(isUnread) && (
               <button
                 data-testid="mark-all-read"
                 onClick={() => void markAllRead().then(refresh).catch(() => {})}
                 className="inline-flex items-center gap-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
               >
-                <CheckCheck size={13} /> Mark all read
+                <CheckCheck size={13} /> {t("notifications.action.markAllRead")}
               </button>
             )}
           </div>
 
           <div className="flex-1 overflow-y-auto">
             {list.isLoading && (
-              <p className="px-3 py-6 text-center text-sm text-[var(--color-text-secondary)]">Loading…</p>
+              <p className="px-3 py-6 text-center text-sm text-[var(--color-text-secondary)]">{t("common.status.loading")}</p>
             )}
             {!list.isLoading && items.length === 0 && (
               <p data-testid="inbox-empty" className="px-3 py-6 text-center text-sm text-[var(--color-text-secondary)]">
-                You&rsquo;re all caught up.
+                {t("notifications.description.youReAllCaughtUp")}
               </p>
             )}
             {groups.map((g) => (
               <div key={g.label}>
                 <div className="px-3 pb-1 pt-2 text-[11px] uppercase tracking-wide text-[var(--color-text-secondary)]">
-                  {g.label}
+                  {dayGroupLabel(t, g.label)}
                 </div>
                 {g.items.map((item) => {
                   const actions = parseActions(item.actions);
@@ -144,9 +150,9 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
                         unread={isUnread(item)}
                         size={28}
                       />
-                      <button onClick={() => openItem(item)} className="min-w-0 flex-1 text-left">
+                      <button onClick={() => openItem(item)} className="min-w-0 flex-1 text-start">
                         <p className={`flex items-center gap-1.5 text-xs ${isUnread(item) ? "font-semibold" : ""}`}>
-                          <span className="truncate">{item.title}</span>
+                          <span dir={ownDir} className="truncate">{item.title}</span>
                           {/* Unread is a dot, not a tinted row: colouring every
                               unread row turns the whole list into an alert. */}
                           {isUnread(item) && (
@@ -158,11 +164,11 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
                           )}
                         </p>
                         {item.body && (
-                          <p className="mt-0.5 line-clamp-2 text-[11px] text-[var(--color-text-secondary)]">{item.body}</p>
+                          <p dir={ownDir} className="mt-0.5 line-clamp-2 text-[11px] text-[var(--color-text-secondary)]">{item.body}</p>
                         )}
                         <p className="mt-0.5 text-[10px] text-[var(--color-text-secondary)]">
-                          {relativeTime(item.created_at, now)}
-                          {item.actor_name ? ` · ${item.actor_name}` : ""}
+                          {notificationAge(t, item.created_at, now)}
+                          {item.actor_name ? <> · <Bdi>{item.actor_name}</Bdi></> : ""}
                         </p>
                         {actions.length > 0 && (
                           <span className="mt-1 flex gap-3">
@@ -192,7 +198,7 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
                       </button>
                       <button
                         data-testid={`dismiss-${item.id}`}
-                        aria-label={`Dismiss ${item.title}`}
+                        aria-label={t("notifications.accessibility.dismissTitle", { title: item.title })}
                         onClick={() => void dismiss(item.id).then(refresh).catch(() => {})}
                         className="shrink-0 self-start text-[var(--color-text-secondary)] hover:text-[var(--color-danger)]"
                       >
@@ -211,13 +217,13 @@ export function NotificationBell({ align = "right" }: { align?: "left" | "right"
               onClick={() => { setOpen(false); navigate("/notifications"); }}
               className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
             >
-              View all
+              {t("common.action.viewAll")}
             </button>
             <button
               onClick={() => { setOpen(false); navigate("/profile"); }}
               className="inline-flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
             >
-              <Settings size={13} /> Settings
+              <Settings size={13} /> {t("common.label.settings")}
             </button>
           </div>
         </div>

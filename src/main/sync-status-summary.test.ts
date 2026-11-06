@@ -1,7 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { summarizeSyncStatus } from "./sync-status-summary.ts";
+import { readFileSync } from "node:fs";
+import { summarizeSyncStatus as summarizeWith } from "./sync-status-summary.ts";
+import { makeT, type Messages } from "../i18n/translator.ts";
+
+const messages = (locale: string): Messages =>
+  JSON.parse(readFileSync(new URL(`../i18n/messages/${locale}.json`, import.meta.url), "utf8")) as Messages;
+const en = messages("en");
+const enT = makeT("en", en, en);
+const trT = makeT("tr", messages("tr"), en);
+
+/** The English summary, as every assertion below was written against. */
+const summarizeSyncStatus = (s: Parameters<typeof summarizeWith>[0]) => summarizeWith(s, enT);
 
 /**
  * Run with `npm run test:unit` - Node's own test runner, no Electron.
@@ -201,4 +212,25 @@ test("maintenance outranks everything", () => {
     ),
     "Sync paused · maintenance",
   );
+});
+
+test("a Turkish t summarizes in Turkish with the catalog's whole messages", () => {
+  const tr = (s: Parameters<typeof summarizeWith>[0]) => summarizeWith(s, trT);
+  assert.equal(tr(status({ pairs: [{ status: "idle" }] })), "Tümü senkronize edildi");
+  assert.equal(tr(status({ pairs: [{ status: "error" }, { status: "error" }] })), "2 hata");
+  assert.equal(tr(status({ pairs: [{ status: "syncing" }], activeTransfers: [{}, {}] })), "2 dosya senkronize ediliyor…");
+  assert.equal(tr(status({ pairs: [{ status: "offline" }, { status: "idle" }] })), "1 klasör çevrimdışı");
+  assert.equal(tr(status({ pairs: [{ status: "idle" }], globalPaused: true })), "Duraklatıldı");
+  assert.equal(tr(status({ pairs: [{ status: "idle" }], maintenance: true })), "Senkronizasyon duraklatıldı · bakım");
+});
+
+import { makeDirectionalT } from "../i18n/bidi.ts";
+
+test("a right-to-left summary uses the Arabic catalog and carries no stray isolates for counts", () => {
+  const ar = messages("ar");
+  const arT = makeDirectionalT("ar", ar, en);
+  const out = summarizeWith(status({ pairs: [] }), arT);
+  assert.equal(typeof out, "string");
+  assert.ok(out.length > 0);
+  assert.equal(summarizeWith(status({ pairs: [] }), enT), summarizeSyncStatus(status({ pairs: [] })));
 });

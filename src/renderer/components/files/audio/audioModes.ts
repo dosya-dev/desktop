@@ -1,3 +1,5 @@
+import type { MessageKey } from '../../../../i18n/keys';
+
 export interface Loop { a: number; b: number }
 
 export interface LoopState {
@@ -41,11 +43,12 @@ export function nextSpeed(current: number, dir: number): number {
   return SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, idx + dir))];
 }
 
-export const SLEEP_OPTIONS: { label: string; minutes: number | null }[] = [
-  { label: '5 minutes', minutes: 5 },
-  { label: '10 minutes', minutes: 10 },
-  { label: '15 minutes', minutes: 15 },
-  { label: '30 minutes', minutes: 30 },
-  { label: '1 hour', minutes: 60 },
-  { label: 'Off', minutes: null },
+/** Labels are catalog keys, translated where the menu renders. */
+export const SLEEP_OPTIONS: { label: MessageKey; minutes: number | null }[] = [
+  { label: 'common.label.fiveMinutes', minutes: 5 },
+  { label: 'common.label.tenMinutes', minutes: 10 },
+  { label: 'common.label.fifteenMinutes', minutes: 15 },
+  { label: 'common.label.thirtyMinutes', minutes: 30 },
+  { label: 'common.label.oneHour', minutes: 60 },
+  { label: 'common.status.off', minutes: null },
 ];

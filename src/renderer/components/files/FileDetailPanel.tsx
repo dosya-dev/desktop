@@ -7,8 +7,12 @@ import {
   MessageCircle, Send, CornerDownRight, Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
+import { autoDir, Bdi, Part, useAutoDir } from "@/lib/bidi-ui";
 import { api, ApiError, apiBase } from "@/lib/api-client";
-import { validateCommentBody } from "@dosya-dev/shared";
+import { LIMITS, validateCommentBody } from "@dosya-dev/shared";
+import { useT } from "@/lib/i18n";
+import type { T } from "../../../i18n/translator";
+import { richText } from "@/lib/rich-text";
 import { useAvatarVersion, userAvatarUrl } from "@/lib/avatar-version";
 import { usePermissions } from "@/lib/use-permissions";
 import { fileRawUrl } from "@/lib/file-url";
@@ -16,6 +20,8 @@ import { humanSize, timeAgo, extOf, isImage, isVideo, isText, isAudio, colorFor,
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { fileIconSrc } from "@/components/files/FileIcon";
 import { type ViewerFile, downloadViaDialog } from "@/components/files/FileViewer";
+import { DosyaVideo } from "@dosya-dev/video-player/react";
+import "@dosya-dev/video-player/skin.css";
 
 interface Version {
   id: string;
@@ -54,6 +60,8 @@ interface FileDetailPanelProps {
   file: ViewerFile;
   workspaceId: string;
   initialTab?: "info" | "comments";
+  /** Opened from "Version history": list versions even when there is only one. */
+  showVersions?: boolean;
   onClose: () => void;
   onCopy: (id: string) => void;
   onDelete: (id: string, name: string) => void;
@@ -62,14 +70,47 @@ interface FileDetailPanelProps {
   onRefresh: () => void;
 }
 
-export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClose, onCopy, onDelete, onShare, onView, onRefresh }: FileDetailPanelProps) {
+/**
+ * One file's comment thread, as the Comments tab reads it. Shared with the
+ * panel's prefetch so both name the same cache entry.
+ */
+function commentsQuery(fileId: string, workspaceId: string) {
+  return {
+    queryKey: ["comments", fileId],
+    queryFn: () =>
+      api.get<{ ok: boolean; comments: Comment[] }>(
+        `/api/comments?file_id=${fileId}&workspace_id=${workspaceId}`,
+      ),
+  };
+}
+
+/** How long the panel must stay on a file before its thread is fetched ahead. */
+const COMMENTS_PREFETCH_DELAY_MS = 400;
+
+export function FileDetailPanel({ file, workspaceId, initialTab = "info", showVersions = false, onClose, onCopy, onDelete, onShare, onView, onRefresh }: FileDetailPanelProps) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const [tab, setTab] = useState<"info" | "comments">(initialTab);
+  const panelQueryClient = useQueryClient();
+  // Fetch the thread while the Info tab is showing, so opening Comments is
+  // instant rather than a round trip after the click. Only once the panel has
+  // settled on a file: arrowing through a folder must not fire one request
+  // per file passed over.
+  useEffect(() => {
+    if (!workspaceId) return;
+    const timer = setTimeout(() => {
+      void panelQueryClient.prefetchQuery(commentsQuery(file.id, workspaceId));
+    }, COMMENTS_PREFETCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [file.id, workspaceId, panelQueryClient]);
   const [versions, setVersions] = useState<Version[]>([]);
   const [currentVersion, setCurrentVersion] = useState(1);
   const [restoringVer, setRestoringVer] = useState<number | null>(null);
   const [unlockToken, setUnlockToken] = useState<string | null>(null);
   const [lockPassword, setLockPassword] = useState("");
   const [lockError, setLockError] = useState("");
+  // The server's own sentence takes its own direction; a translation follows the page.
+  const [lockErrorRaw, setLockErrorRaw] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
   const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
   const [revokingLink, setRevokingLink] = useState<string | null>(null);
@@ -79,7 +120,8 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
       const data = await api.get<{ ok: boolean; current_version: number; versions: Version[] }>(
         `/api/files/${fileId}/versions`,
       );
-      if (data.ok && data.versions && data.versions.length > 1) {
+      // A lone version is noise in the panel, unless the user asked for the history.
+      if (data.ok && data.versions && data.versions.length > (showVersions ? 0 : 1)) {
         setVersions(data.versions);
         setCurrentVersion(data.current_version);
       } else {
@@ -88,7 +130,7 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
     } catch {
       setVersions([]);
     }
-  }, []);
+  }, [showVersions]);
 
   const loadShareLinks = useCallback(async (fileId: string) => {
     try {
@@ -101,10 +143,10 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
   const revokeShareLink = async (linkId: string) => {
     setRevokingLink(linkId);
     try {
-      await api.delete(`/api/shares/${linkId}/revoke`);
+      await api.post(`/api/shares/${linkId}/revoke`);
       loadShareLinks(file.id);
       onRefresh();
-    } catch { toast.error("Revoke failed", { description: "The share link could not be revoked." }); }
+    } catch { toast.error(t("common.error.revokeFailed"), { description: t("files.error.theShareLinkCouldNotBeRevoked") }); }
     setRevokingLink(null);
   };
 
@@ -128,14 +170,14 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
         version_number: versionNumber,
       });
       if (res.ok) {
-        toast.success("Restored", { description: `Restored to v${versionNumber}.` });
+        toast.success(t("files.status.restored"), { description: t("files.description.restoredToVVersionNumber", { versionNumber: String(versionNumber) }) });
         loadVersions(fileId);
         onRefresh();
       } else {
-        toast.error("Restore failed", { description: res.error ?? "Restore failed" });
+        toast.error(t("files.error.restoreFailed"), { description: res.error != null ? autoDir(res.error) : t("files.error.restoreFailed") });
       }
     } catch {
-      toast.error("Restore failed");
+      toast.error(t("files.error.restoreFailed"));
     }
     setRestoringVer(null);
   };
@@ -152,11 +194,11 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
         setUnlockToken(res.unlock_token);
         loadVersions(file.id);
       } else {
-        setLockError(res.error ?? "Incorrect password");
+        setLockError(res.error ?? t("files.error.incorrectPassword")); setLockErrorRaw(res.error != null);
         setLockPassword("");
       }
     } catch (err) {
-      setLockError(err instanceof ApiError ? err.message : "Can't reach the server. Check your connection and try again.");
+      setLockError(err instanceof ApiError ? err.message : t("common.error.canTReachTheServerCheckYourConnectionAnd")); setLockErrorRaw(err instanceof ApiError);
       if (err instanceof ApiError) setLockPassword("");
     }
     setUnlocking(false);
@@ -170,12 +212,13 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
     <div className="fixed inset-0 z-50 flex justify-end bg-black/20">
       <div className="fixed inset-0" onClick={onClose} />
       <div
-        className="relative z-10 flex h-full w-80 flex-col border-l bg-[var(--color-bg)] shadow-xl"
+        data-testid="file-detail-panel"
+        className="relative z-10 flex h-full w-80 flex-col border-s bg-[var(--color-bg)] shadow-xl"
         style={borderStyle}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b px-5 py-3" style={borderStyle}>
-          <span className="text-sm font-semibold">File details</span>
+          <span className="text-sm font-semibold">{t("files.label.fileDetails")}</span>
           <button onClick={onClose} className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]">
             <X size={14} />
           </button>
@@ -188,17 +231,17 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
               <Lock size={28} className="text-white" />
             </div>
             <div className="p-4">
-              <p className="mb-1 break-all text-sm font-semibold">{file.name}</p>
-              <p className="mb-4 text-xs text-[var(--color-text-muted)]">This file is locked</p>
+              <p dir={ownDir} className="mb-1 break-all text-sm font-semibold">{file.name}</p>
+              <p className="mb-4 text-xs text-[var(--color-text-muted)]">{t("files.label.thisFileIsLocked")}</p>
               <div className="space-y-2">
-                <p className="text-xs text-[var(--color-text-muted)]">Enter the lock password to access this file.</p>
-                {lockError && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-[var(--color-danger)]">{lockError}</div>}
+                <p className="text-xs text-[var(--color-text-muted)]">{t("files.description.enterTheLockPasswordToAccessThisFile")}</p>
+                {lockError && <div dir={lockErrorRaw ? ownDir : undefined} className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-[var(--color-danger)]">{lockError}</div>}
                 <input
                   type="password"
                   value={lockPassword}
                   onChange={(e) => setLockPassword(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleUnlock()}
-                  placeholder="Enter password"
+                  placeholder={t("files.placeholder.enterPassword")}
                   className="h-9 w-full rounded-md border px-3 text-sm outline-none focus:border-[var(--color-primary)]"
                   style={borderStyle}
                   autoFocus
@@ -210,7 +253,7 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                   disabled={unlocking}
                 >
                   {unlocking ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />}
-                  Unlock
+                  {t("common.action.unlock")}
                 </button>
               </div>
             </div>
@@ -223,17 +266,17 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
             {/* File name */}
             <div className="border-b px-5 py-3" style={borderStyle}>
               <div className="flex items-center gap-2">
-                <p className="break-all text-sm font-semibold">{file.name}</p>
+                <p dir={ownDir} className="break-all text-sm font-semibold">{file.name}</p>
                 {(file.current_version ?? 1) > 1 && (
-                  <span className="shrink-0 rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[9px] font-medium">v{file.current_version}</span>
+                  <span className="shrink-0 rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-[9px] font-medium">{t("common.label.vVersion", { version: String(file.current_version) })}</span>
                 )}
               </div>
               <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
-                {humanSize(file.size_bytes)} · {file.mime_type} · {timeAgo(file.created_at)}
+                <Part>{humanSize(file.size_bytes)}</Part> · <Part dir="ltr">{file.mime_type}</Part> · <Part>{timeAgo(file.created_at)}</Part>
               </p>
               {file.lock_mode === "view_only" && (
                 <span className="mt-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px]" style={borderStyle}>
-                  <Lock size={10} /> View only
+                  <Lock size={10} /> {t("common.status.viewOnly")}
                 </span>
               )}
             </div>
@@ -248,7 +291,7 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                     : "text-[var(--color-text-secondary)]"
                 }`}
               >
-                Details
+                {t("common.action.details")}
               </button>
               <button
                 onClick={() => setTab("comments")}
@@ -259,12 +302,13 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                 }`}
               >
                 <MessageCircle size={12} />
-                Comments
-                {file.comment_count > 0 && (
-                  <span className="rounded-full bg-[var(--color-bg-tertiary)] px-1.5 text-xs">
-                    {file.comment_count}
-                  </span>
-                )}
+                {richText(t, "files.action.commentsCommentCount", {}, {
+                  commentCount: file.comment_count > 0 && (
+                    <span className="rounded-full bg-[var(--color-bg-tertiary)] px-1.5 text-xs">
+                      {file.comment_count}
+                    </span>
+                  ),
+                })}
               </button>
             </div>
 
@@ -275,23 +319,23 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                   {versions.length > 0 && (
                     <div>
                       <div className="mb-2 flex items-center justify-between">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Versions</span>
-                        <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-medium text-blue-700">v{currentVersion}</span>
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">{t("common.label.versions")}</span>
+                        <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-medium text-blue-700">{t("common.label.vVersion", { version: String(currentVersion) })}</span>
                       </div>
                       <div className="max-h-40 space-y-0.5 overflow-y-auto">
                         {versions.map((v) => {
                           const isCurrent = v.version_number === currentVersion;
                           return (
                             <div key={v.id} className={`flex items-center gap-2 rounded px-2 py-1.5 text-[11px] ${isCurrent ? "bg-green-50" : "hover:bg-[var(--color-bg-secondary)]"}`}>
-                              <span className={`min-w-5 font-bold ${isCurrent ? "text-green-600" : ""}`}>v{v.version_number}</span>
+                              <span className={`min-w-5 font-bold ${isCurrent ? "text-green-600" : ""}`}>{t("common.label.vVersion", { version: String(v.version_number) })}</span>
                               <span className="min-w-0 flex-1 truncate text-[var(--color-text-muted)]">
-                                {humanSize(v.size_bytes)} · {v.uploader_name ?? "Unknown"} · {timeAgo(v.created_at)}
+                                <Part>{humanSize(v.size_bytes)}</Part> · {v.uploader_name != null ? <Bdi>{v.uploader_name}</Bdi> : t("files.label.unknown")} · <Part>{timeAgo(v.created_at)}</Part>
                               </span>
                               <div className="flex shrink-0 gap-1">
                                 <button
                                   className="flex h-5 items-center rounded border px-1.5 text-[9px] font-medium hover:bg-[var(--color-bg-tertiary)]"
                                   style={borderStyle}
-                                  title={`Download v${v.version_number}`}
+                                  title={t("files.tooltip.downloadVVersionNumber", { versionNumber: String(v.version_number) })}
                                   onClick={(e) => { e.stopPropagation(); downloadViaDialog(file, v.version_number); }}
                                 >
                                   <Download size={10} />
@@ -302,8 +346,8 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                                     onClick={() => handleRestore(file.id, v.version_number)}
                                     disabled={restoringVer === v.version_number}
                                   >
-                                    {restoringVer === v.version_number ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} className="mr-0.5" />}
-                                    Restore
+                                    {restoringVer === v.version_number ? <Loader2 size={10} className="animate-spin" /> : <RotateCcw size={10} className="me-0.5" />}
+                                    {t("files.action.restore")}
                                   </button>
                                 )}
                               </div>
@@ -311,25 +355,30 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                           );
                         })}
                       </div>
+                      {versions.length === 1 && (
+                        <p className="mt-1.5 px-2 text-[11px] text-[var(--color-text-muted)]">
+                          {t("files.description.onlyOneVersionSoFarUploadANewVersionToStart")}
+                        </p>
+                      )}
                     </div>
                   )}
 
                   {/* Properties */}
                   <div>
-                    <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Properties</span>
+                    <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">{t("files.label.properties")}</span>
                     <div className="space-y-1.5">
-                      <PropRow label="Uploaded by" value={file.uploader_name ?? "Unknown"} />
-                      <PropRow label="Region" value={regionLabel(file.region)} />
-                      <PropRow label="Created" value={timeAgo(file.created_at)} />
-                      <PropRow label="Extension" value={file.extension || extOf(file.name).toUpperCase() || "-"} />
-                      {file.origin != null && <PropRow label="Origin" value={originLabel(file.origin)} />}
+                      <PropRow label={t("files.label.uploadedBy")} value={file.uploader_name ?? t("files.label.unknown")} raw={file.uploader_name != null} />
+                      <PropRow label={t("files.label.region")} value={regionLabel(file.region)} />
+                      <PropRow label={t("files.label.created")} value={timeAgo(file.created_at)} />
+                      <PropRow label={t("files.label.extension")} value={file.extension || extOf(file.name).toUpperCase() || "-"} raw />
+                      {file.origin != null && <PropRow label={t("files.label.origin")} value={originLabel(file.origin)} />}
                     </div>
                   </div>
 
                   {/* Share links */}
                   {shareLinks.length > 0 && (
                     <div>
-                      <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Share links</span>
+                      <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">{t("files.label.shareLinks")}</span>
                       <div className="space-y-2">
                         {shareLinks.map((link) => {
                           const now = Math.floor(Date.now() / 1000);
@@ -337,25 +386,25 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
                           return (
                             <div key={link.id} className="space-y-1.5 rounded-md border bg-[var(--color-bg-secondary)] px-2.5 py-2" style={borderStyle}>
                               <div className="flex items-center gap-1.5">
-                                <span className="flex-1 truncate font-mono text-[10px] text-[var(--color-text-muted)]">{link.url}</span>
+                                <span dir="ltr" className="ltr-value flex-1 truncate font-mono text-[10px] text-[var(--color-text-muted)]">{link.url}</span>
                                 <button
                                   className="shrink-0 text-[10px] font-semibold text-[var(--color-primary)] hover:opacity-80"
-                                  onClick={() => { navigator.clipboard.writeText(link.url); toast.success("Link copied", { description: "Copied to clipboard." }); }}
-                                >Copy</button>
+                                  onClick={() => { navigator.clipboard.writeText(link.url); toast.success(t("common.label.linkCopied"), { description: t("common.description.copiedToClipboard") }); }}
+                                >{t("common.copy")}</button>
                               </div>
                               <div className="flex flex-wrap items-center gap-1.5 text-[8px]">
-                                <span className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5">{link.view_count} views</span>
+                                <span className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5">{t("files.label.viewcountViews", { viewCount: String(link.view_count) })}</span>
                                 <span className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5">
-                                  {expired ? "Expired" : link.expires_at ? `Expires ${timeAgo(link.expires_at)}` : "No expiry"}
+                                  {expired ? t("common.status.expired") : link.expires_at ? t("common.label.expiresDate", { date: timeAgo(link.expires_at) }) : t("files.label.noExpiry")}
                                 </span>
-                                {link.is_password_protected === 1 && <span className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5">Password</span>}
+                                {link.is_password_protected === 1 && <span className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5">{t("common.label.password")}</span>}
                               </div>
                               <button
                                 className="text-[10px] font-medium text-[var(--color-danger)] hover:underline"
                                 onClick={() => revokeShareLink(link.id)}
                                 disabled={revokingLink === link.id}
                               >
-                                {revokingLink === link.id ? "Revoking..." : "Revoke link"}
+                                {revokingLink === link.id ? t("files.status.revoking") : t("files.action.revokeLink")}
                               </button>
                             </div>
                           );
@@ -366,22 +415,22 @@ export function FileDetailPanel({ file, workspaceId, initialTab = "info", onClos
 
                   {/* Actions */}
                   <div className="space-y-1.5 pt-1">
-                    <ActionButton icon={<Eye size={14} className="text-[var(--color-text-muted)]" />} label="View file" onClick={() => onView(file)} />
+                    <ActionButton icon={<Eye size={14} className="text-[var(--color-text-muted)]" />} label={t("files.action.viewFile")} onClick={() => onView(file)} />
                     <button
                       className="flex h-10 w-full items-center justify-start gap-2 rounded-lg px-3 text-xs font-medium text-[var(--color-primary-fg)]"
                       style={{ background: "var(--color-primary)" }}
                       onClick={() => downloadViaDialog(file)}
                     >
-                      <Download size={14} /> Download
+                      <Download size={14} /> {t("common.action.download")}
                     </button>
-                    <ActionButton icon={<Share2 size={14} className="text-[var(--color-text-muted)]" />} label="Share" onClick={() => onShare(file.id, file.name)} />
-                    <ActionButton icon={<Copy size={14} className="text-[var(--color-text-muted)]" />} label="Copy file" onClick={() => onCopy(file.id)} />
+                    <ActionButton icon={<Share2 size={14} className="text-[var(--color-text-muted)]" />} label={t("files.action.share")} onClick={() => onShare(file.id, file.name)} />
+                    <ActionButton icon={<Copy size={14} className="text-[var(--color-text-muted)]" />} label={t("files.action.copyFile")} onClick={() => onCopy(file.id)} />
                     <button
                       className="flex h-10 w-full items-center justify-start gap-2 rounded-lg border px-3 text-xs font-medium text-[var(--color-danger)] hover:bg-red-50"
                       style={{ borderColor: "rgba(239,68,68,0.3)" }}
                       onClick={() => onDelete(file.id, file.name)}
                     >
-                      <Trash2 size={14} /> Delete file
+                      <Trash2 size={14} /> {t("files.action.deleteFile")}
                     </button>
                   </div>
                 </div>
@@ -410,7 +459,9 @@ function ActionButton({ icon, label, onClick }: { icon: React.ReactNode; label: 
 
 // ── thumbnail-scale preview ────────────────────────────────
 
-function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string }) {
+/** Exported for FileDetailPanel.test.tsx. */
+export function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string }) {
+  const t = useT();
   const [previewError, setPreviewError] = useState(false);
   const [textContent, setTextContent] = useState<string | null>(null);
 
@@ -420,7 +471,7 @@ function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string })
     if (isText(file.name)) {
       fetch(fileRawUrl({ fileId: file.id, query: utSuffix.replace(/^\?/, "") }), { credentials: "include" })
         .then((r) => (r.ok ? r.text() : Promise.reject()))
-        .then((t) => setTextContent(t.slice(0, 2000)))
+        .then((text) => setTextContent(text.slice(0, 2000)))
         .catch(() => setPreviewError(true));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -429,7 +480,7 @@ function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string })
   const rawWithUt = fileRawUrl({ fileId: file.id, query: utSuffix.replace(/^\?/, "") });
 
   if (previewError || (!isImage(file.name) && !isVideo(file.name) && !file.name.toLowerCase().endsWith(".pdf") && !isText(file.name) && !isAudio(file.name))) {
-    const ext = extOf(file.name).toUpperCase() || "FILE";
+    const ext = extOf(file.name).toUpperCase() || t("common.label.fileUppercase");
     return (
       <div className="flex h-28 w-full items-center justify-center" style={{ background: colorFor(file.name) + "18" }}>
         <img src={fileIconSrc(file.name)} alt={ext} className="h-16 w-16" />
@@ -449,7 +500,7 @@ function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string })
           alt={file.name}
           fallback={
             <div className="flex h-28 w-full items-center justify-center" style={{ background: colorFor(file.name) + "18" }}>
-              <img src={fileIconSrc(file.name)} alt={extOf(file.name).toUpperCase() || "FILE"} className="h-16 w-16" />
+              <img src={fileIconSrc(file.name)} alt={extOf(file.name).toUpperCase() || t("common.label.fileUppercase")} className="h-16 w-16" />
             </div>
           }
         />
@@ -460,12 +511,20 @@ function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string })
   if (isVideo(file.name)) {
     return (
       <div className="flex h-48 w-full items-center justify-center overflow-hidden bg-black">
-        <video
+        {/* The shared player in compact mode: keys only while it has focus, so
+            it never takes arrows or Space from the file list. A failure shows
+            the panel's own icon fallback below instead of the player's card. */}
+        <DosyaVideo
+          identity={`${file.id}:${utSuffix}`}
           src={rawWithUt}
-          controls
+          className="flex h-full w-full items-center justify-center"
+          compact
           preload="metadata"
-          className="h-full w-full object-contain"
-          onError={() => setPreviewError(true)}
+          autoplay={false}
+          failureText=""
+          downloadUrl={null}
+          title={file.name}
+          onFailed={() => setPreviewError(true)}
         />
       </div>
     );
@@ -477,7 +536,7 @@ function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string })
         <iframe
           src={`${rawWithUt}#toolbar=0&navpanes=0`}
           className="h-full w-full border-none"
-          title={`PDF preview of ${file.name}`}
+          title={t("files.tooltip.pdfPreviewOfFileName", { fileName: file.name })}
         />
       </div>
     );
@@ -495,7 +554,7 @@ function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string })
     return (
       <div className="h-40 w-full overflow-hidden bg-[#1e1e1e]">
         <pre className="m-0 h-full overflow-hidden whitespace-pre-wrap break-all p-3 font-mono text-[11px] leading-relaxed text-[#d4d4d4]">
-          {textContent ?? "Loading…"}
+          {textContent ?? t("common.status.loading")}
         </pre>
       </div>
     );
@@ -506,7 +565,20 @@ function FilePreview({ file, utSuffix }: { file: ViewerFile; utSuffix: string })
 
 // ── comments tab ───────────────────────────────────────────
 
+/**
+ * validateCommentBody's verdict in the chosen language. The shared rule
+ * decides; its two branches are told apart by its own documented condition,
+ * never by reading the English sentence.
+ */
+function commentError(t: T, body: string): string | null {
+  if (validateCommentBody(body) === null) return null;
+  return body.trim().length === 0
+    ? t("files.error.commentBodyIsRequired")
+    : t("files.error.commentTooLongMaxMaxCharacters", { max: String(LIMITS.COMMENT_BODY_MAX) });
+}
+
 function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: string }) {
+  const t = useT();
   const [newComment, setNewComment] = useState("");
   const [replyTo, setReplyTo] = useState<Comment | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
@@ -514,24 +586,18 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
   const { userId, roleName } = usePermissions();
   const queryClient = useQueryClient();
 
-  const { data: commentsData, isLoading: commentsLoading } = useQuery({
-    queryKey: ["comments", file.id],
-    queryFn: () =>
-      api.get<{ ok: boolean; comments: Comment[] }>(
-        `/api/comments?file_id=${file.id}&workspace_id=${workspaceId}`,
-      ),
-  });
+  const { data: commentsData, isLoading: commentsLoading } = useQuery(commentsQuery(file.id, workspaceId));
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["comments", file.id] });
   // Widened from ApiError: a local policy refusal is a plain Error carrying the
   // sentence the API would have returned, and "Failed" is not that sentence.
-  const failed = (e: unknown) => toast.error(e instanceof Error ? e.message : "Failed");
+  const failed = (e: unknown) => toast.error(e instanceof ApiError ? autoDir(e.message) : e instanceof Error ? e.message : t("common.error.failed"));
 
   const postMut = useMutation({
     mutationFn: (input: { body: string; parentId: string | null }) => {
       // 5000 characters, from the shared policy. A pasted essay used to upload
       // in full and come back refused.
-      const problem = validateCommentBody(input.body);
+      const problem = commentError(t, input.body);
       if (problem) throw new Error(problem);
       return api.post<{ ok: boolean; comment: Comment }>("/api/comments", {
         file_id: file.id,
@@ -543,13 +609,26 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
       });
     },
     // Cleared on success only, so a failed post leaves the typed text in place.
-    onSuccess: () => { invalidate(); setNewComment(""); setReplyTo(null); },
+    // The server answers with the stored comment, shaped as the list's rows
+    // are; it goes straight into the thread instead of costing a second round
+    // trip to read the whole thread again.
+    onSuccess: (res) => {
+      if (res?.comment) {
+        queryClient.setQueryData<{ ok: boolean; comments: Comment[] }>(["comments", file.id], (old) =>
+          old ? { ...old, comments: [...old.comments, res.comment] } : old);
+        if (!queryClient.getQueryData(["comments", file.id])) invalidate();
+      } else {
+        invalidate();
+      }
+      setNewComment("");
+      setReplyTo(null);
+    },
     onError: failed,
   });
 
   const editMut = useMutation({
     mutationFn: (v: { id: string; body: string }) => {
-      const problem = validateCommentBody(v.body);
+      const problem = commentError(t, v.body);
       if (problem) throw new Error(problem);
       return api.put(`/api/comments/${v.id}`, { body: v.body });
     },
@@ -561,7 +640,7 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.delete(`/api/comments/${id}`),
-    onSuccess: () => { invalidate(); toast.success("Comment deleted"); },
+    onSuccess: () => { invalidate(); toast.success(t("files.label.commentDeleted")); },
     onError: (e) => { failed(e); invalidate(); },
   });
 
@@ -638,8 +717,8 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
         ) : comments.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-10 text-center">
             <MessageCircle size={28} className="mb-2 text-[var(--color-text-muted)]" />
-            <p className="text-sm text-[var(--color-text-muted)]">No comments yet</p>
-            <p className="text-xs text-[var(--color-text-muted)]">Be the first to comment</p>
+            <p className="text-sm text-[var(--color-text-muted)]">{t("files.empty.noCommentsYet")}</p>
+            <p className="text-xs text-[var(--color-text-muted)]">{t("files.label.beTheFirstToComment")}</p>
           </div>
         ) : (
           <div className="space-y-3">
@@ -647,7 +726,7 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
               <div key={c.id}>
                 <CommentBubble {...bubbleProps(c)} />
                 {replies(c.id).map((r) => (
-                  <div key={r.id} className="ml-6 mt-2">
+                  <div key={r.id} className="ms-6 mt-2">
                     <CommentBubble {...bubbleProps(r)} />
                   </div>
                 ))}
@@ -663,15 +742,17 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
           className="flex items-center gap-2 border-t px-4 py-2 text-xs text-[var(--color-text-muted)]"
           style={{ borderColor: "var(--color-border)" }}
         >
-          <CornerDownRight size={12} className="shrink-0" />
+          <CornerDownRight size={12} className="shrink-0 rtl:-scale-x-100" />
           <span className="truncate">
-            Replying to <span className="font-medium text-[var(--color-text-primary)]">{replyTo.user_name}</span>
+            {richText(t, "files.label.replyingToUserName", {}, {
+              userName: <span className="font-medium text-[var(--color-text-primary)]">{replyTo.user_name}</span>,
+            })}
           </span>
           <button
             data-testid="comment-reply-cancel"
             onClick={() => setReplyTo(null)}
-            className="ml-auto shrink-0"
-            title="Cancel reply"
+            className="ms-auto shrink-0"
+            title={t("files.tooltip.cancelReply")}
           >
             <X size={12} />
           </button>
@@ -691,7 +772,7 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
                 submit();
               }
             }}
-            placeholder={replyTo ? `Reply to ${replyTo.user_name}...` : "Write a comment..."}
+            placeholder={replyTo ? t("files.placeholder.replyToUserName", { userName: replyTo.user_name }) : t("files.placeholder.writeAComment")}
             rows={1}
             className="flex-1 resize-none rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
             style={{ borderColor: "var(--color-border)" }}
@@ -703,7 +784,7 @@ function CommentsTab({ file, workspaceId }: { file: ViewerFile; workspaceId: str
             className="rounded-lg p-2 text-[var(--color-primary-fg)] disabled:opacity-50"
             style={{ background: "var(--color-primary)" }}
           >
-            <Send size={14} />
+            <Send size={14} className="rtl:-scale-x-100" />
           </button>
         </div>
       </div>
@@ -753,7 +834,9 @@ function CommentBubble(props: {
   onCancelEdit: () => void;
   onDelete: () => void;
 }) {
+  const ownDir = useAutoDir();
   const { comment } = props;
+  const t = useT();
   return (
     <div
       data-testid={`comment-${comment.id}`}
@@ -762,11 +845,11 @@ function CommentBubble(props: {
       <div className="mb-1 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <CommentAvatar comment={comment} />
-          <span className="text-xs font-medium">{comment.user_name}</span>
+          <span dir={ownDir} className="text-xs font-medium">{comment.user_name}</span>
           <span className="text-[10px] text-[var(--color-text-muted)]">
             {timeAgo(comment.created_at)}
             {comment.is_edited === 1 && (
-              <span data-testid={`comment-${comment.id}-edited`}> (edited)</span>
+              <span data-testid={`comment-${comment.id}-edited`}> {t("files.label.edited")}</span>
             )}
           </span>
         </div>
@@ -776,16 +859,16 @@ function CommentBubble(props: {
           <button
             data-testid={`comment-${comment.id}-reply`}
             onClick={props.onReply}
-            title="Reply"
+            title={t("files.tooltip.reply")}
             className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
           >
-            <CornerDownRight size={12} />
+            <CornerDownRight size={12} className="rtl:-scale-x-100" />
           </button>
           {props.canEdit && (
             <button
               data-testid={`comment-${comment.id}-edit`}
               onClick={props.onStartEdit}
-              title="Edit"
+              title={t("files.edit")}
               className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
             >
               <Pencil size={12} />
@@ -797,7 +880,7 @@ function CommentBubble(props: {
             <button
               data-testid={`comment-${comment.id}-delete`}
               onClick={props.onDelete}
-              title="Delete"
+              title={t("common.delete")}
               className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-danger)]"
             >
               <Trash2 size={12} />
@@ -823,7 +906,7 @@ function CommentBubble(props: {
               onClick={props.onCancelEdit}
               className="text-xs text-[var(--color-text-muted)]"
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               data-testid="comment-edit-save"
@@ -831,22 +914,24 @@ function CommentBubble(props: {
               disabled={!props.editBody.trim() || props.busy}
               className="text-xs font-medium text-[var(--color-primary)] disabled:opacity-50"
             >
-              Save
+              {t("common.save")}
             </button>
           </div>
         </div>
       ) : (
-        <p className="whitespace-pre-wrap text-sm">{comment.body}</p>
+        <p dir={ownDir} className="whitespace-pre-wrap text-sm">{comment.body}</p>
       )}
     </div>
   );
 }
 
-function PropRow({ label, value }: { label: string; value: string }) {
+/** `raw`: the value is user or server text and takes its own direction; otherwise it follows the page. */
+function PropRow({ label, value, raw = false }: { label: string; value: string; raw?: boolean }) {
+  const ownDir = useAutoDir();
   return (
     <div className="flex items-center justify-between">
       <span className="text-xs text-[var(--color-text-muted)]">{label}</span>
-      <span className="max-w-32 truncate text-right text-xs font-medium">{value}</span>
+      <span dir={raw ? ownDir : undefined} className="max-w-32 truncate text-end text-xs font-medium">{value}</span>
     </div>
   );
 }

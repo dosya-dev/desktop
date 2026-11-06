@@ -13,6 +13,8 @@
  * independently, and this repo vendors rather than cross-imports app code
  * (see apps/web/vendor). Fix bugs in both.
  */
+// Relative `.ts` path: node --test loads this module without a bundler.
+import { tl } from "./locale-state.ts";
 
 /** One file to upload, with the folder path it should land in. */
 export interface DroppedEntry {
@@ -221,7 +223,7 @@ export async function createFolderTree(
       plan.ids.set(path, await create(leaf(path), parent ? plan.ids.get(parent)! : rootId));
     } catch (err) {
       plan.failed.push(path);
-      plan.error ??= err instanceof Error ? err.message : "Could not create folder";
+      plan.error ??= err instanceof Error ? err.message : tl("common.error.couldNotCreateFolder");
     }
   }
   return plan;

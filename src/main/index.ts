@@ -18,9 +18,11 @@ initSentryMain();
 import { registerIpcHandlers } from "./ipc";
 import { makeIpcGate, rendererOrigin } from "./ipc-sender";
 import { installFileLogger } from "./file-logger";
-import { isQuitting, markQuitting } from "./quit-state";
+import { clearQuitting, isQuitting, markQuitting } from "./quit-state";
+import { createQuitGuard } from "./quit-guard";
 import { createWindowReclaimer } from "./window-reclaim";
 import { captureWindowState, readWindowState, resolveWindowState, writeWindowState } from "./window-state";
+import { readZoom, writeZoom } from "./zoom";
 import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
 import { linuxProtocolInstallPlan } from "./linux-protocol";
@@ -28,6 +30,8 @@ import { setupSession, appDocumentCsp } from "./session";
 import { isUnexpectedSessionLoss } from "./session-events";
 import { isSessionCookieName, HOST_SESSION_COOKIE, LEGACY_SESSION_COOKIE } from "./session-cookie";
 import { originAllowed } from "./trusted-origins";
+import { currentDir, initMainI18n, registerI18nIpc, tMain } from "./i18n";
+import { swipeToHistory } from "./swipe-direction";
 import { createMenu, parseMenuState, type AppMenu } from "./menu";
 import { openAboutWindow } from "./about-window";
 import { summarizeSyncStatus } from "./sync-status-summary";
@@ -37,7 +41,7 @@ import { SyncEngine } from "./sync";
 import { SyncEngineHost, type SyncEngineHandle } from "./sync/engine-host";
 import { registerSyncIpcHandlers } from "./sync/ipc-handlers";
 import { shouldRunEngineInProcess } from "./sync/engine-selection";
-import { initAutoUpdater, checkForUpdatesNow, installUpdateNow, openStoreUpdates, getUpdateStatus, onUpdateStatus } from "./updater";
+import { initAutoUpdater, checkForUpdatesNow, installUpdateNow, openStoreUpdates, getUpdateStatus, onUpdateStatus, setInstallQuitGate } from "./updater";
 import { installQuickAction } from "./macos-services";
 import { currentDistribution } from "./distribution";
 import { rendererLogLine, type RendererConsoleDetails } from "./renderer-log";
@@ -230,6 +234,29 @@ function showMainWindow(): void {
   }
   createWindow(); // ready-to-show will show and focus it
 }
+
+// ── Unsaved text-editor changes vs. quitting ────────────────────────
+// Closing the window hides it (the edits stay in the renderer); quitting
+// loses them. The renderer reports "editor:dirty"; a quit while dirty is held
+// and the renderer asks "Are you sure?". Decision logic and its no-deadlock
+// guarantees live in quit-guard.ts (unit-tested).
+const QUIT_PROMPT_ACK_MS = 5000;
+const editorQuitGuard = createQuitGuard({
+  ackTimeoutMs: QUIT_PROMPT_ACK_MS,
+  prompt: () => {
+    // A reclaimed window had its renderer, and the edits, torn down already.
+    const win = getWindow();
+    if (!win || win.webContents.isDestroyed() || win.webContents.isLoading()) return false;
+    if (win.isMinimized()) win.restore();
+    showMainWindow();
+    win.webContents.send("editor:confirm-quit");
+    return true;
+  },
+  // Keep editing: the close button goes back to hiding to the tray (the tray's
+  // Quit marks the quit before asking for it).
+  onCancel: clearQuitting,
+});
+setInstallQuitGate((proceed) => editorQuitGuard.request("update", proceed));
 
 /**
  * Send to the renderer, queueing until did-finish-load when the window was
@@ -504,6 +531,8 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
       // Chromium's built-in PDF viewer is plugin-gated in Electron; the in-app
       // file viewer renders PDFs in an <iframe> and needs it enabled.
       plugins: true,
+      // The interface zoom the user left it at (main/zoom.ts).
+      zoomFactor: readZoom(stateDir),
     },
   });
 
@@ -529,15 +558,32 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
     if (boundsTimer) clearTimeout(boundsTimer);
     boundsTimer = setTimeout(persistBounds, 500);
   };
+  // macOS three-finger "Swipe between pages". The two-finger setting never
+  // reaches this event; the renderer reads that one from wheel events
+  // (renderer/lib/swipe-nav.ts). Both end up as the Go menu's Back/Forward.
+  win.on("swipe", (_e, direction) => {
+    const way = swipeToHistory(direction, currentDir());
+    const id = way === "back" ? "go-back" : way === "forward" ? "go-forward" : null;
+    if (id && !win.isDestroyed()) win.webContents.send("menu:action", { kind: "simple", id });
+  });
   win.on("resize", persistBoundsSoon);
   win.on("move", persistBoundsSoon);
   win.on("close", persistBounds);
+  // View > Zoom In / Zoom Out are menu roles that change the zoom without
+  // telling us; whatever it is when the window goes away is what comes back.
+  win.on("close", () => { if (!win.webContents.isDestroyed()) writeZoom(stateDir, win.webContents.getZoomFactor()); });
 
   // Hide window instead of closing - app keeps running in tray
   win.on("close", (e) => {
     if (!isQuitting()) {
       e.preventDefault();
       win.hide();
+      // Closing to the tray keeps the renderer alive, so a half-typed sign-in
+      // form (password included) and its last error used to be sitting there
+      // when the app was "reopened" (QA TC-004/TC-010). Tell the renderer so
+      // the auth screens can drop them. Not sent for minimize.
+      const wc = win.webContents;
+      if (!wc.isDestroyed()) wc.send("window:closed-to-tray");
     }
   });
 
@@ -617,6 +663,7 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
   });
 
   win.on("closed", () => {
+    editorQuitGuard.rendererGone();
     if (boundsTimer) clearTimeout(boundsTimer);
     // A window closed for ANY reason must not leave a live timer behind, and
     // stale references must read as "no window" from here on.
@@ -657,7 +704,16 @@ function createWindow(opts: { showOnReady?: boolean } = {}): void {
   // taking sync with it (the 2026-08-20 blank-screen symptom). Recreate it
   // instead, reusing the reclaim flag so the quit path knows this is
   // intentional.
+  // A reload (or a crash, below) takes the editor's unsaved text with it, so
+  // there is nothing left to ask about on quit.
+  win.webContents.on("did-navigate", () => editorQuitGuard.rendererGone());
+
+  // Windows ends the session without before-quit; never hold it up.
+  win.on("query-session-end", () => editorQuitGuard.systemEnding());
+  win.on("session-end", () => editorQuitGuard.systemEnding());
+
   win.webContents.on("render-process-gone", (_event, details) => {
+    editorQuitGuard.rendererGone();
     // Destroying a window kills its renderer, so this fires for INTENTIONAL
     // teardown too - memory reclaim and quit both land here. Recreating the
     // window then would undo the reclaim the moment it happened, which is the
@@ -774,7 +830,7 @@ if (!gotTheLock) {
     // echoes this exact nonce back (see handleDosyaUrl).
     handle("auth:begin-oauth", (_e, provider: string) => {
       if (provider !== "google" && provider !== "github" && provider !== "apple") {
-        throw new Error("Unknown OAuth provider");
+        throw new Error(tMain("native.error.unknownOAuthProvider"));
       }
       pendingOAuthNonce = randomUUID();
       return `${API_BASE}/api/auth/${provider}?desktop=1&state=${encodeURIComponent(pendingOAuthNonce)}`;
@@ -806,6 +862,7 @@ if (!gotTheLock) {
       showMainWindow();
       sendToWindow(channel, ...args);
     };
+    await initMainI18n(app.getPath("userData"));
     appMenu = createMenu(
       {
         distribution: currentDistribution(),
@@ -815,7 +872,7 @@ if (!gotTheLock) {
           if (!engine) return null;
           const status = engine.getStatus();
           return {
-            summary: summarizeSyncStatus(status),
+            summary: summarizeSyncStatus(status, tMain),
             globalPaused: status.globalPaused,
             unresolvedConflicts: status.unresolvedConflictCount,
             pairs: status.pairs.map((p) => ({ pairId: p.pairId, name: p.remoteFolderName, localPath: p.localPath })),
@@ -847,10 +904,10 @@ if (!gotTheLock) {
             openAboutWindow({ rendererUrl: rendererBaseUrl(), preloadPath: join(__dirname, "../preload/index.js"), parent: getWindow() });
             return;
           case "check-for-updates":
-            // The Settings card shows the outcome (checking, downloading,
+            // Profile > About shows the outcome (checking, downloading,
             // ready, up to date, error) - land the user on it.
             void checkForUpdatesNow();
-            toRenderer("navigate", "/settings?tab=updates");
+            toRenderer("navigate", "/profile?tab=about");
             return;
           case "install-update":
             installUpdateNow();
@@ -887,6 +944,14 @@ if (!gotTheLock) {
     onUpdateStatus(() => appMenu?.rebuild());
     // The renderer tells the menu which route it is on, what is selected and
     // which checkmarks are on. Validated: only a known shape is accepted.
+    registerI18nIpc(handle);
+    // The text editor's unsaved state, and its answer to "Are you sure?" on quit.
+    on("editor:dirty", (_event, dirty: unknown) => {
+      editorQuitGuard.setDirty(dirty === true);
+    });
+    on("editor:quit-answer", (_event, answer: unknown) => {
+      if (answer === "shown" || answer === "quit" || answer === "cancel") editorQuitGuard.answer(answer);
+    });
     on("menu:state", (_event, raw: unknown) => {
       const state = parseMenuState(raw);
       if (state) appMenu?.setState(state);
@@ -1076,8 +1141,8 @@ if (!gotTheLock) {
         // only other signal is a "sync stopped" email up to 72 hours later.
         if (isUnexpectedSessionLoss(removed, cause)) {
           new Notification({
-            title: "Signed out of dosya",
-            body: "Your session ended and sync has stopped. Open dosya to sign in again.",
+            title: tMain("native.notificationTitle.signedOutOfDosya"),
+            body: tMain("native.message.yourSessionEndedAndSyncHasStoppedOpenDosya"),
           }).show();
         }
       } else if (!syncEngine.isRunning()) {
@@ -1119,6 +1184,9 @@ if (!gotTheLock) {
         syncEngine.resumeAllTransient().catch(() => {});
       }
     };
+    // macOS and Linux: the OS is shutting down, restarting or logging out.
+    // Unsaved editor changes must not hold that up (the draft keeps them).
+    powerMonitor.on("shutdown", () => editorQuitGuard.systemEnding());
     powerMonitor.on("on-battery", () => applyBatteryState(true));
     powerMonitor.on("on-ac", () => applyBatteryState(false));
 
@@ -1183,6 +1251,14 @@ if (!gotTheLock) {
   // Clean shutdown: prevent quit until sync state is persisted.
   let isShuttingDown = false;
   app.on("before-quit", (e) => {
+    // Unsaved text-editor changes: hold the quit and ask in the window. The
+    // quit is retried by the guard if the user chooses Quit anyway; nothing
+    // has been torn down yet, so Keep editing leaves the app as it was.
+    if (!isShuttingDown && !editorQuitGuard.request("user", () => app.quit())) {
+      e.preventDefault();
+      clearQuitting();
+      return;
+    }
     markQuitting();
 
     if (isShuttingDown) return;

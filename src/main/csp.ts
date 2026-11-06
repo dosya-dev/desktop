@@ -31,6 +31,9 @@ export type CspInputs = {
   chunkOrigins: readonly string[];
 };
 
+/** The socket form of the API origin (live chat), e.g. wss://api.dosya.dev. */
+const socketOrigin = (apiBase: string): string => apiBase.replace(/^http/, "ws");
+
 /** Strict policy for packaged builds served from app://bundle. */
 export function packagedCsp({ apiBase, docsBase, chunkOrigins }: CspInputs): string {
   return [
@@ -52,7 +55,8 @@ export function packagedCsp({ apiBase, docsBase, chunkOrigins }: CspInputs): str
     // sentry-ipc: is the crash reporter's renderer-to-main fallback (a fetch
     // to a privileged in-process scheme, never the network) used only if the
     // preload's IPC bridge is unavailable.
-    `connect-src 'self' sentry-ipc: ${apiBase} ${docsBase} ${chunkOrigins.join(" ")}`,
+    // The socket origin is for the live chat room (support-chat); http(s) sources do not cover ws(s) everywhere.
+    `connect-src 'self' sentry-ipc: ${apiBase} ${socketOrigin(apiBase)} ${docsBase} ${chunkOrigins.join(" ")}`,
     // In-app file viewer: <video>/<audio> stream from the API, and the PDF
     // preview loads /raw in an <iframe>. Without these, media falls back to
     // default-src 'self' and gets blocked.
@@ -73,7 +77,7 @@ export function devCsp({ apiBase, docsBase, chunkOrigins }: CspInputs): string {
     "worker-src 'self' blob: http://localhost:*",
     "style-src 'self' 'unsafe-inline' blob:",
     `img-src 'self' data: blob: http://localhost:* ${apiBase} ${docsBase}`,
-    `connect-src 'self' sentry-ipc: http://localhost:* ws://localhost:* ${apiBase} ${docsBase} ${chunkOrigins.join(" ")}`,
+    `connect-src 'self' sentry-ipc: http://localhost:* ws://localhost:* ${apiBase} ${socketOrigin(apiBase)} ${docsBase} ${chunkOrigins.join(" ")}`,
     `media-src 'self' blob: data: http://localhost:* ${apiBase}`,
     `frame-src 'self' blob: http://localhost:* ${apiBase} ${docsBase}`,
     "font-src 'self' data: blob:",

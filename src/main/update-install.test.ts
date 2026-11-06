@@ -39,6 +39,32 @@ test("on Linux the downloaded AppImage is shown and the app keeps running", () =
   assert.deepEqual(calls, ["showDownloadedFile"]);
 });
 
+test("unsaved editor changes hold the install until the user answers, with nothing marked meanwhile", () => {
+  const { calls, deps } = recorder();
+  let held: (() => void) | null = null;
+  installDownloadedUpdate("darwin", { ...deps, confirmQuit: (proceed) => { held = proceed; return false; } });
+  // Keep editing must leave the app as it was: no "installing" status, and
+  // the close button still hides to the tray.
+  assert.deepEqual(calls, []);
+  assert.ok(held);
+  (held as () => void)();
+  assert.deepEqual(calls, ["announceInstalling", "markQuitting", "quitAndInstall"]);
+});
+
+test("nothing unsaved: the install goes ahead at once", () => {
+  const { calls, deps } = recorder();
+  installDownloadedUpdate("win32", { ...deps, confirmQuit: () => true });
+  assert.deepEqual(calls, ["announceInstalling", "markQuitting", "quitAndInstall"]);
+});
+
+test("on Linux there is no quit, so nothing is asked", () => {
+  const { calls, deps } = recorder();
+  let asked = false;
+  installDownloadedUpdate("linux", { ...deps, confirmQuit: () => { asked = true; return false; } });
+  assert.equal(asked, false);
+  assert.deepEqual(calls, ["showDownloadedFile"]);
+});
+
 // The other doors into quitAndInstall (electron-updater calls the native one
 // itself) bypass installDownloadedUpdate, so the native event must mark the
 // quit too.

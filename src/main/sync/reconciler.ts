@@ -1,3 +1,4 @@
+import { findCaseCollisions, FOLDS_CASE } from "./case-collisions";
 import { join } from "path";
 import { readdir, stat } from "fs/promises";
 import { shouldIgnoreEntry } from "./local-watcher";
@@ -172,6 +173,10 @@ export async function reconcile(
   /** Records proven absent on both sides by a complete scan. The engine
    *  removes these through its durable index before paths can be reused. */
   onStaleRecords?: (remoteIds: string[]) => void,
+  /** Remote files whose paths collapse to one local path on this filesystem.
+   *  They are left out of both views this cycle; the engine records them so
+   *  the user can rename one. */
+  onCaseCollisions?: (groups: { remoteId: string; relPath: string }[][]) => void,
 ): Promise<SyncAction[]> {
   const actions: SyncAction[] = [];
   const { files: localFiles, dirs: localDirs, incomplete: localScanIncomplete, skippedTooLarge } = await scanLocal(pair.localPath, pair.excludedPatterns, onScanProgress);
@@ -193,6 +198,24 @@ export async function reconcile(
   for (const [id, path] of filePathMap) {
     pathToRemoteFile.set(path, id);
   }
+  const collisions = findCaseCollisions(
+    [...filePathMap].map(([remoteId, relPath]) => ({ remoteId, relPath })),
+    FOLDS_CASE,
+  );
+  const collidedKeys = new Set<string>();
+  if (collisions.size > 0) {
+    for (const [key, group] of collisions) {
+      collidedKeys.add(key);
+      for (const member of group) {
+        filePathMap.delete(member.remoteId);
+        pathToRemoteFile.delete(member.relPath);
+      }
+    }
+    onCaseCollisions?.([...collisions.values()]);
+  }
+  const collidedLocal = (relPath: string): boolean =>
+    collidedKeys.has(FOLDS_CASE ? relPath.normalize("NFC").toLowerCase() : relPath.normalize("NFC"));
+
   const pathToRemoteFolder = new Map<string, string>();
   for (const [id, path] of folderPathMap) {
     pathToRemoteFolder.set(path, id);
@@ -254,7 +277,9 @@ export async function reconcile(
 
   const plannerLocal: PlannerLocalView = {
     files: new Map(
-      [...localFiles].map(([relPath, s]) => [relPath, { relPath, sizeBytes: s.sizeBytes, mtimeMs: s.mtimeMs }]),
+      [...localFiles]
+        .filter(([relPath]) => !collidedLocal(relPath))
+        .map(([relPath, s]) => [relPath, { relPath, sizeBytes: s.sizeBytes, mtimeMs: s.mtimeMs }]),
     ),
     folders: localDirs,
   };
@@ -289,6 +314,7 @@ export async function reconcile(
     const stale: string[] = [];
     for (const record of base.files()) {
       const key = normalizeRel(record.localPath);
+      if (collidedLocal(key)) continue;
       if (!remote.files.has(record.remoteId) && !localFiles.has(key) && !skipped.has(key)) {
         stale.push(record.remoteId);
       }
@@ -368,7 +394,13 @@ export async function reconcile(
           raiseConflict(op.relPath, op.remoteId, info.name, op.sizeBytes, op.sizeBytes, info.updated_at, info.size_bytes);
           break;
         }
-        actions.push({ type: "download-update", remoteFile: info, localPath: abs(op.relPath), existingRecord: record });
+        // The scan's view of the local file is what the plan weighed. The
+        // executor refuses the rename only if the file changed after it.
+        const scanned = localFiles.get(op.relPath);
+        actions.push({
+          type: "download-update", remoteFile: info, localPath: abs(op.relPath), existingRecord: record,
+          ...(scanned ? { expectedLocal: { sizeBytes: scanned.sizeBytes, mtimeMs: scanned.mtimeMs } } : {}),
+        });
         break;
       }
 
@@ -499,6 +531,8 @@ export async function reconcileRemoteOnly(
   base: PlannerBaseView,
   onUnknownParent?: (files: RemoteFileInfo[]) => void,
   onDeletionsSuppressed?: (count: number, reason: SuppressionReason) => void,
+  /** See reconcile(): case-colliding remote files are left out and reported. */
+  onCaseCollisions?: (groups: { remoteId: string; relPath: string }[][]) => void,
 ): Promise<SyncAction[]> {
   const actions: SyncAction[] = [];
   const { filePathMap, folderPathMap, unresolved: unplaceable } = resolveRemotePaths({
@@ -514,9 +548,20 @@ export async function reconcileRemoteOnly(
   const livePaths = new Set(filePathMap.values());
   for (const previous of base.files()) {
     if (!remote.files.has(previous.remoteId) && livePaths.has(normalizeRel(previous.localPath))) {
-      return reconcile(pair, remote, base, undefined, undefined, onUnknownParent, onDeletionsSuppressed);
+      return reconcile(pair, remote, base, undefined, undefined, onUnknownParent, onDeletionsSuppressed, undefined, onCaseCollisions);
     }
   }
+
+  // Names that fold to one local path (macOS, Windows) are left out entirely:
+  // a new twin must not download over its already-synced sibling. Both names
+  // are reported so the user sees the whole group.
+  const collisions = findCaseCollisions(
+    [...filePathMap].map(([remoteId, relPath]) => ({ remoteId, relPath })),
+    FOLDS_CASE,
+  );
+  const collidedIds = new Set<string>();
+  for (const group of collisions.values()) for (const m of group) collidedIds.add(m.remoteId);
+  if (collisions.size > 0) onCaseCollisions?.([...collisions.values()]);
 
   // New remote folders → create locally
   for (const [folderId] of remote.folders) {
@@ -529,6 +574,7 @@ export async function reconcileRemoteOnly(
 
   // Check each remote file against stored state
   for (const [remoteId, remoteFile] of remote.files) {
+    if (collidedIds.has(remoteId)) continue;
     const stored = base.fileById(remoteId);
     const relPath = filePathMap.get(remoteId);
 
@@ -558,7 +604,10 @@ export async function reconcileRemoteOnly(
       remoteFile.size_bytes !== stored.remoteSizeBytes ||
       remoteFile.current_version !== stored.remoteVersion
     ) {
-      // Remote file changed → download update
+      // Remote file changed → download update. No `expectedLocal`: this
+      // path never scanned the local file, so it assumed the record still
+      // describes it, and the record is the executor's baseline. Statting
+      // here would let a stale unsynced edit be overwritten silently.
       actions.push({
         type: "download-update", remoteFile,
         localPath: join(pair.localPath, stored.localPath),

@@ -1,0 +1,5 @@
+What's new in 3.1.7
+
+• Personas: find people in your photos. The app reads faces on this computer and groups photos of the same person, so you can name someone once and find their photos. Your people and names are encrypted with your own Vault key, so dosya can never see them, and your other devices share them. Free on every plan.
+• Vault, hidden and locked photos are never read, and you can skip any folder.
+• Rename, merge, "Not this person" and Remove person work from the persona page and from "In this photo" in the viewer.

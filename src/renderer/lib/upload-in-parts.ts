@@ -10,9 +10,13 @@
 // died with a bare "Network error" at roughly 10%. Parts never approach that
 // ceiling.
 //
-// This module is deliberately import-free and framework-free so it runs
-// under `node --test` (see upload-in-parts.test.ts); the XHR-backed
-// transport lives in upload-transport.ts.
+// This module is deliberately framework-free so it runs under `node --test`
+// (see upload-in-parts.test.ts); its one import is the node-safe translator,
+// by relative `.ts` path. The XHR-backed transport lives in
+// upload-transport.ts. Its fallback error sentences are shown to the user,
+// so they are translated when thrown; "Cancelled" is a stable value that
+// isUploadCancelled() tests for, and is never shown.
+import { tl } from "./locale-state.ts";
 
 export interface ResumableInfo {
   part_size: number;
@@ -113,7 +117,7 @@ function sourceMtimeHeaders(lastModifiedMs?: number): Record<string, string> {
 
 function failureMessage(res: HttpResult, fallback: string): string {
   const msg = res.data && typeof res.data.error === "string" ? res.data.error : null;
-  return msg || `${fallback} (${res.status})`;
+  return msg || tl("common.error.messageStatus", { message: fallback, status: String(res.status) });
 }
 
 function accepted(res: HttpResult): boolean {
@@ -161,7 +165,7 @@ export async function uploadFileInParts(req: UploadRequest, transport: Transport
     ...(req.folderId !== undefined ? { folder_id: req.folderId } : {}),
     ...(req.fileId ? { file_id: req.fileId } : {}),
   });
-  if (!init.ok || !init.session_id) throw new Error(init.error || "Upload init failed");
+  if (!init.ok || !init.session_id) throw new Error(init.error || tl("common.error.uploadInitFailed"));
   throwIfAborted(req.signal);
 
   if (init.resumable) return uploadParts(req, init.session_id, init.resumable, transport);
@@ -176,7 +180,7 @@ async function uploadSingle(req: UploadRequest, path: string, transport: Transpo
     signal: req.signal,
     onProgress: req.onProgress,
   });
-  if (!accepted(res)) throw new Error(failureMessage(res, "Upload failed"));
+  if (!accepted(res)) throw new Error(failureMessage(res, tl("common.error.uploadFailed")));
   req.onProgress?.(req.file.size);
   return { fileId: res.data?.file?.id ?? null, version: res.data?.file?.current_version };
 }
@@ -215,7 +219,7 @@ async function uploadParts(
           onProgress: (loaded) => { inFlight.set(n, Math.min(loaded, chunk.size)); report(); },
         });
       },
-      `Part ${n} failed`,
+      tl("common.error.partCountFailed", { count: String(n) }),
       transport,
       req.signal,
     );
@@ -252,7 +256,7 @@ async function uploadParts(
 
   const res = await withRetry(
     () => transport.post(info.complete_url, sourceMtimeHeaders(req.lastModifiedMs), req.signal),
-    "Upload complete failed",
+    tl("common.error.uploadCompleteFailed"),
     transport,
     req.signal,
   );

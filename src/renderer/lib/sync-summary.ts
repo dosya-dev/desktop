@@ -98,6 +98,33 @@ export function syncSummaryKey(pairs: SyncSummaryPair[]): string {
     .join(",");
 }
 
+/**
+ * What the sidebar's Sync nav row shows for the active workspace.
+ *
+ *   start    no folder pairs yet ("Start now")
+ *   error    a pair is in error or waiting on the user (red, pinging)
+ *   paused   a pair is paused, or sync is paused globally (neutral grey)
+ *   running  everything else
+ *
+ * TC-055: the row used to pick its WORD from the global pause flag alone,
+ * while the red dot fired for any paused pair. The Sync page's "Pause all"
+ * pauses each pair of the workspace one by one, which leaves the global
+ * flag false, so a deliberate pause rendered as a red "Error". A pause is
+ * never a failure: it gets its own neutral state, and only a real error or a
+ * folder waiting on the user turns the row red.
+ */
+export type SyncNavBadge = "start" | "error" | "paused" | "running";
+
+export function syncNavBadge(
+  summary: WorkspaceSyncSummary | undefined,
+  globalPaused: boolean,
+): SyncNavBadge {
+  if (!summary || summary.count === 0) return "start";
+  if (summary.error) return "error";
+  if (summary.paused || globalPaused) return "paused";
+  return "running";
+}
+
 // ── The dashboard's Sync card ───────────────────────────────────────
 
 /** Just the parts of a pair the dashboard's Sync card renders. */

@@ -49,7 +49,7 @@ export function VaultCard({ children, className = "" }: { children: ReactNode; c
 }
 
 /** A framed sentence: warn (amber), danger (red) or muted (neutral). */
-export function Notice({ tone, icon, children }: { tone: "warn" | "danger" | "muted"; icon?: ReactNode; children: ReactNode }) {
+export function Notice({ tone, icon, dir, children }: { tone: "warn" | "danger" | "muted"; icon?: ReactNode; dir?: "auto"; children: ReactNode }) {
   const tones = {
     warn: "border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 text-[var(--color-text)]",
     danger: "border-[var(--color-danger)]/30 bg-[var(--color-danger)]/5 text-[var(--color-danger)]",
@@ -58,7 +58,7 @@ export function Notice({ tone, icon, children }: { tone: "warn" | "danger" | "mu
   return (
     <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${tones}`}>
       {icon && <span className="mt-0.5 shrink-0">{icon}</span>}
-      <div className="flex-1">{children}</div>
+      <div dir={dir} className="flex-1">{children}</div>
     </div>
   );
 }

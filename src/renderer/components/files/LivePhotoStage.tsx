@@ -5,6 +5,7 @@ import { FilePreviewImage } from './FilePreviewImage';
 import { fileRawUrl } from '@/lib/file-url';
 import { fileIconSrc } from '@/components/files/FileIcon';
 import { LiveBadge } from './LiveBadge';
+import { useT } from '@/lib/i18n';
 import type { ViewerFile } from './FileViewer';
 
 /**
@@ -16,6 +17,7 @@ import type { ViewerFile } from './FileViewer';
  * fails to load leaves the still exactly as it was.
  */
 export function LivePhotoStage({ file, twinId, version }: { file: ViewerFile; twinId: string; version?: number }) {
+  const t = useT();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
   const [broken, setBroken] = useState(false);
@@ -79,11 +81,11 @@ export function LivePhotoStage({ file, twinId, version }: { file: ViewerFile; tw
       />
       <button
         type="button"
-        aria-label="Play Live Photo"
-        title={broken ? 'Video unavailable' : 'Play Live Photo'}
+        aria-label={t('common.accessibility.playLivePhoto')}
+        title={broken ? t('common.tooltip.videoUnavailable') : t('common.accessibility.playLivePhoto')}
         disabled={broken}
         onClick={(e) => { e.stopPropagation(); play(); }}
-        className="absolute top-3 left-3 z-10 rounded-full focus-visible:ring-2 focus-visible:ring-white disabled:opacity-50"
+        className="absolute top-3 inset-s-3 z-10 rounded-full focus-visible:ring-2 focus-visible:ring-white disabled:opacity-50"
       >
         <LiveBadge size="tile" style={playing ? { background: 'var(--brand)', color: 'var(--brand-foreground)' } : undefined} />
       </button>

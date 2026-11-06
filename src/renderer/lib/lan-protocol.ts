@@ -12,6 +12,8 @@
  * them. `lan-peer.ts` owns the connection that carries it.
  */
 
+import { tl } from "./locale-state.ts";
+
 export const PROTOCOL_VERSION = 1;
 
 /**
@@ -257,7 +259,7 @@ export class ReceiveAssembler {
 
   async handleBinary(bytes: Uint8Array): Promise<void> {
     const open = this.current;
-    if (!open) throw new Error("LAN transfer: bytes arrived when no file is open");
+    if (!open) throw new Error(tl("lan-transfer.error.lanTransferBytesArrivedWhenNoFileIsOpen"));
     // Declined: the sender was already streaming when the user said no, so
     // its bytes keep arriving for a moment. Dropping them is the whole
     // handling - it is not an error on either side.
@@ -267,7 +269,7 @@ export class ReceiveAssembler {
       const sinkId = open.sinkId;
       this.current = null;
       await this.sink.abort(sinkId);
-      throw new Error("LAN transfer: peer sent more bytes than declared");
+      throw new Error(tl("lan-transfer.error.lanTransferPeerSentMoreBytesThanDeclared"));
     }
 
     await this.sink.write(open.sinkId, bytes);

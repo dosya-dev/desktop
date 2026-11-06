@@ -14,13 +14,17 @@
  * import, because this module is shared with the preload and renderer type
  * graphs (tsconfig.web.json), which do not admit the rest of src/main.
  */
+import type { MessageKey } from "../i18n/keys";
+import type { T } from "../i18n/translator";
+import { isolatePairName } from "./sync-pair-label.ts";
+
 export type MenuDistribution = "direct" | "ms-store" | "snap" | "mas";
 
 // Mirrors distribution.ts's storeDisplayName, for the same reason.
-const STORE_NAMES: Record<Exclude<MenuDistribution, "direct">, string> = {
-  "ms-store": "Microsoft Store",
-  snap: "Snap Store",
-  mas: "Mac App Store",
+const STORE_NAMES: Record<Exclude<MenuDistribution, "direct">, MessageKey> = {
+  "ms-store": "common.label.microsoftStore",
+  snap: "common.label.snapStore",
+  mas: "common.label.macAppStore",
 };
 
 export type MenuPlatform = "darwin" | "win32" | "linux";
@@ -79,6 +83,10 @@ export interface MenuContext {
   updateState: MenuUpdateState;
   sync: MenuSyncInfo | null;
   state: MenuState;
+  /** Labels in the chosen language. Only `role` items are left to the OS. */
+  t: T;
+  /** Layout direction of the chosen language; absent means left to right. */
+  dir?: "ltr" | "rtl";
 }
 
 export type SimpleActionId =
@@ -124,7 +132,20 @@ export interface TemplateItem {
 }
 
 const SEP: TemplateItem = { type: "separator" };
-const role = (r: string): TemplateItem => ({ role: r });
+/**
+ * Electron hard-codes English labels for role items, and the OS does not
+ * translate them, so every role carries its own label. The role still does
+ * the work and supplies the accelerator.
+ */
+const role = (r: string, label: string): TemplateItem => ({ role: r, label });
+
+/** The quit item's label, which Electron spells differently per platform. */
+const quitLabel = (ctx: MenuContext): string =>
+  ctx.t(ctx.platform === "darwin" ? "menus.action.quitDosya" : ctx.platform === "win32" ? "menus.action.exit" : "menus.action.quit");
+
+/** The close item's label: "Close Window" on macOS, "Close" elsewhere. */
+const closeLabel = (ctx: MenuContext): string =>
+  ctx.t(ctx.platform === "darwin" ? "menus.action.closeWindow" : "menus.action.close");
 const nav = (label: string, path: string, extra: Partial<TemplateItem> = {}): TemplateItem =>
   ({ label, action: { kind: "navigate", path }, ...extra });
 const simple = (label: string, id: SimpleActionId, extra: Partial<TemplateItem> = {}): TemplateItem =>
@@ -140,36 +161,38 @@ export const CHANGELOG_URL = "https://dosya.dev/changelog/";
  * store; the Snap Store has no page to open, so the snap build gets nothing.
  */
 function updateItem(ctx: MenuContext): TemplateItem | null {
+  const { t } = ctx;
   if (ctx.distribution === "snap") return null;
   if (ctx.distribution !== "direct") {
-    return simple(`Open ${STORE_NAMES[ctx.distribution]}…`, "open-store");
+    return simple(t("menus.action.openStore", { store: t(STORE_NAMES[ctx.distribution]) }), "open-store");
   }
-  if (ctx.updateState === "ready") return simple("Restart to Update…", "install-update");
+  if (ctx.updateState === "ready") return simple(t("menus.action.restartToUpdate"), "install-update");
   // The quit is under way; the windows close in a moment, nothing to click.
-  if (ctx.updateState === "installing") return simple("Installing Update…", "install-update", { enabled: false });
+  if (ctx.updateState === "installing") return simple(t("menus.status.installingUpdate"), "install-update", { enabled: false });
   const busy = ctx.updateState === "checking" || ctx.updateState === "downloading";
-  return simple("Check for Updates…", "check-for-updates", { enabled: !busy });
+  return simple(t("menus.action.checkForUpdates"), "check-for-updates", { enabled: !busy });
 }
 
 function appMenu(ctx: MenuContext): TemplateItem {
+  const { t } = ctx;
   const update = updateItem(ctx);
   return {
     label: "dosya",
     submenu: [
-      simple("About dosya", "about"),
+      simple(t("about.window.aboutDosya"), "about"),
       ...(update ? [update] : []),
       SEP,
-      nav("Settings…", "/settings", { accelerator: "CmdOrCtrl+,", enabled: ctx.state.signedIn }),
+      nav(t("menus.action.settings"), "/settings", { accelerator: "CmdOrCtrl+,", enabled: ctx.state.signedIn }),
       SEP,
-      simple("Sign Out…", "sign-out", { enabled: ctx.state.signedIn }),
+      simple(t("menus.action.signOut"), "sign-out", { enabled: ctx.state.signedIn }),
       SEP,
-      role("services"),
+      role("services", t("menus.label.services")),
       SEP,
-      role("hide"),
-      role("hideOthers"),
-      role("unhide"),
+      role("hide", t("menus.action.hideDosya")),
+      role("hideOthers", t("menus.action.hideOthers")),
+      role("unhide", t("menus.action.showAll")),
       SEP,
-      role("quit"),
+      role("quit", quitLabel(ctx)),
     ],
   };
 }
@@ -179,48 +202,57 @@ function fileMenu(ctx: MenuContext): TemplateItem {
   const onFiles = ctx.state.route === "/files";
   const hasSelection = onFiles && ctx.state.selectionCount > 0;
   const signedIn = ctx.state.signedIn;
+  const { t } = ctx;
   return {
-    label: "File",
+    label: t("menus.label.file.menu"),
     submenu: [
-      simple("New Folder…", "new-folder", { accelerator: "CmdOrCtrl+Shift+N", enabled: onFiles }),
+      simple(t("menus.action.newFolder"), "new-folder", { accelerator: "CmdOrCtrl+Shift+N", enabled: onFiles }),
       SEP,
       // No "Upload Folder…": Chromium only opens a file picker from a user
       // gesture inside the page, which a menu click is not. The Upload page
       // has a "Select folder" button and takes dropped folders, both of which
       // keep the subfolders.
-      nav("Upload Files…", "/upload", { accelerator: "CmdOrCtrl+U", enabled: signedIn }),
+      nav(t("menus.action.uploadFiles"), "/upload", { accelerator: "CmdOrCtrl+U", enabled: signedIn }),
       SEP,
-      simple("Download Selected…", "download-selected", { enabled: hasSelection }),
-      simple("Share Selected…", "share-selected", { enabled: hasSelection }),
+      simple(t("menus.action.downloadSelected"), "download-selected", { enabled: hasSelection }),
+      simple(t("menus.action.shareSelected"), "share-selected", { enabled: hasSelection }),
       SEP,
-      role("close"),
-      ...(mac ? [] : [simple("Sign Out…", "sign-out", { enabled: signedIn }), SEP, role("quit")]),
+      role("close", closeLabel(ctx)),
+      ...(mac ? [] : [simple(t("menus.action.signOut"), "sign-out", { enabled: signedIn }), SEP, role("quit", quitLabel(ctx))]),
     ],
   };
 }
 
+/**
+ * The text editor binds ⌘K (link) and ⌘I (italic). A menu accelerator wins
+ * over the page on macOS - the key never reaches the renderer - so on that
+ * route the two items stay in the menu without their keys.
+ */
+const editorKeys = (ctx: MenuContext): boolean => ctx.state.route.startsWith("/text-editor/");
+
 function editMenu(ctx: MenuContext): TemplateItem {
   const mac = ctx.platform === "darwin";
+  const { t } = ctx;
   return {
-    label: "Edit",
+    label: t("menus.heading.edit.menu"),
     submenu: [
-      role("undo"),
-      role("redo"),
+      role("undo", t("menus.action.undo")),
+      role("redo", t("menus.action.redo")),
       SEP,
-      role("cut"),
-      role("copy"),
-      role("paste"),
-      role("selectAll"),
+      role("cut", t("menus.action.cut")),
+      role("copy", t("menus.action.copy")),
+      role("paste", t("menus.action.paste")),
+      role("selectAll", t("menus.action.selectAll")),
       SEP,
-      simple("Find…", "find", { accelerator: "CmdOrCtrl+F" }),
-      nav("Search dosya…", "/search", { accelerator: "CmdOrCtrl+K", enabled: ctx.state.signedIn }),
-      ...(mac ? [] : [SEP, nav("Settings…", "/settings", { accelerator: "Ctrl+,", enabled: ctx.state.signedIn })]),
+      simple(t("menus.action.find"), "find", { accelerator: "CmdOrCtrl+F" }),
+      nav(t("menus.action.searchDosya"), "/search", { accelerator: editorKeys(ctx) ? undefined : "CmdOrCtrl+K", enabled: ctx.state.signedIn }),
+      ...(mac ? [] : [SEP, nav(t("menus.action.settings"), "/settings", { accelerator: "Ctrl+,", enabled: ctx.state.signedIn })]),
     ],
   };
 }
 
 function viewMenu(ctx: MenuContext): TemplateItem {
-  const { state } = ctx;
+  const { state, t } = ctx;
   const onFiles = state.route === "/files";
   const appearance = (label: string, mode: MenuState["appearance"]): TemplateItem => ({
     label,
@@ -229,118 +261,135 @@ function viewMenu(ctx: MenuContext): TemplateItem {
     action: { kind: "appearance", mode },
   });
   return {
-    label: "View",
+    label: t("menus.heading.view.menu"),
     submenu: [
-      { label: "as List", type: "checkbox", checked: state.viewMode === "table", enabled: onFiles, action: { kind: "view", mode: "table" } },
-      { label: "as Grid", type: "checkbox", checked: state.viewMode === "card", enabled: onFiles, action: { kind: "view", mode: "card" } },
+      { label: t("menus.label.asList"), type: "checkbox", checked: state.viewMode === "table", enabled: onFiles, action: { kind: "view", mode: "table" } },
+      { label: t("menus.label.asGrid"), type: "checkbox", checked: state.viewMode === "card", enabled: onFiles, action: { kind: "view", mode: "card" } },
       SEP,
-      { label: "Show Sidebar", type: "checkbox", checked: state.sidebarVisible, accelerator: "CmdOrCtrl+Alt+S", enabled: state.signedIn, action: { kind: "simple", id: "toggle-sidebar" } },
-      simple("Show File Details", "toggle-details", { accelerator: "CmdOrCtrl+I", enabled: onFiles && state.selectionCount === 1 }),
+      { label: t("menus.action.showSidebar"), type: "checkbox", checked: state.sidebarVisible, accelerator: "CmdOrCtrl+Alt+S", enabled: state.signedIn, action: { kind: "simple", id: "toggle-sidebar" } },
+      simple(t("menus.action.showFileDetails"), "toggle-details", { accelerator: editorKeys(ctx) ? undefined : "CmdOrCtrl+I", enabled: onFiles && state.selectionCount === 1 }),
       SEP,
-      { label: "Appearance", submenu: [appearance("Light", "light"), appearance("Dark", "dark"), appearance("System", "system")] },
+      {
+        label: t("common.label.appearance"),
+        submenu: [
+          appearance(t("common.option.light"), "light"),
+          appearance(t("common.option.dark"), "dark"),
+          appearance(t("common.option.system"), "system"),
+        ],
+      },
       SEP,
-      role("resetZoom"),
-      role("zoomIn"),
-      role("zoomOut"),
+      role("resetZoom", t("menus.action.actualSize")),
+      role("zoomIn", t("menus.action.zoomIn")),
+      role("zoomOut", t("menus.action.zoomOut")),
       SEP,
-      role("togglefullscreen"),
-      ...(ctx.isDev ? [SEP, role("reload"), role("forceReload"), role("toggleDevTools")] : []),
+      role("togglefullscreen", t("menus.action.toggleFullScreen")),
+      ...(ctx.isDev
+        ? [SEP, role("reload", t("menus.action.reload")), role("forceReload", t("menus.action.forceReload")), role("toggleDevTools", t("menus.action.toggleDeveloperTools"))]
+        : []),
     ],
   };
 }
 
 /** The sections Go numbers ⌘1 to ⌘9, in sidebar order. */
-export const GO_SECTIONS: { label: string; path: string }[] = [
-  { label: "Dashboard", path: "/dashboard" },
-  { label: "Files", path: "/files" },
-  { label: "Upload", path: "/upload" },
-  { label: "Shared", path: "/shared" },
-  { label: "Vault", path: "/vault" },
-  { label: "Sync", path: "/sync" },
-  { label: "Workspaces", path: "/workspaces" },
-  { label: "Team", path: "/team" },
-  { label: "Settings", path: "/settings" },
+export const GO_SECTIONS: { label: MessageKey | null; path: string }[] = [
+  { label: "common.label.dashboard", path: "/dashboard" },
+  { label: "common.label.files", path: "/files" },
+  { label: "common.action.upload", path: "/upload" },
+  { label: "common.label.shared", path: "/shared" },
+  // The product name, never translated: the catalog has no entry for it.
+  { label: null, path: "/vault" },
+  { label: "common.label.sync", path: "/sync" },
+  { label: "menus.label.workspaces", path: "/workspaces" },
+  { label: "common.label.team", path: "/team" },
+  { label: "common.label.settings", path: "/settings" },
 ];
 
 function goMenu(ctx: MenuContext): TemplateItem {
-  const { state } = ctx;
+  const { state, t } = ctx;
   const enabled = state.signedIn;
   return {
-    label: "Go",
+    label: t("menus.label.go"),
     submenu: [
-      simple("Back", "go-back", { accelerator: "CmdOrCtrl+[", enabled: state.canGoBack }),
-      simple("Forward", "go-forward", { accelerator: "CmdOrCtrl+]", enabled: state.canGoForward }),
+      simple(t("common.back"), "go-back", { accelerator: "CmdOrCtrl+[", enabled: state.canGoBack }),
+      simple(t("menus.action.forward"), "go-forward", { accelerator: "CmdOrCtrl+]", enabled: state.canGoForward }),
       SEP,
-      ...GO_SECTIONS.map((s, i) => nav(s.label, s.path, { accelerator: `CmdOrCtrl+${i + 1}`, enabled })),
+      ...GO_SECTIONS.map((s, i) => nav(s.label ? t(s.label) : "Vault", s.path, { accelerator: `CmdOrCtrl+${i + 1}`, enabled })),
       SEP,
-      nav("Favourites", "/files?filter=favourites", { enabled }),
-      nav("Deleted", "/files?filter=deleted", { enabled }),
+      nav(t("common.label.favourites"), "/files?filter=favourites", { enabled }),
+      nav(t("common.label.deleted"), "/files?filter=deleted", { enabled }),
       SEP,
-      nav("LAN Transfer", "/lan-transfer", { enabled }),
-      nav("Notifications", "/notifications", { enabled }),
+      nav(t("lan-transfer.heading.lanTransfer"), "/lan-transfer", { enabled }),
+      nav(t("common.heading.notifications"), "/notifications", { enabled }),
     ],
   };
 }
 
 function syncMenu(ctx: MenuContext): TemplateItem {
-  const sync = ctx.sync;
+  const { sync, t } = ctx;
   if (!sync || sync.pairs.length === 0) {
     return {
-      label: "Sync",
+      label: t("common.label.sync"),
       submenu: [
-        { label: "No folders syncing", enabled: false },
+        { label: t("menus.label.noFoldersSyncing"), enabled: false },
         SEP,
-        nav("Add Folder to Sync…", "/sync?add=1", { enabled: ctx.state.signedIn }),
+        nav(t("menus.action.addFolderToSync"), "/sync?add=1", { enabled: ctx.state.signedIn }),
       ],
     };
   }
   const n = sync.pairs.length;
   const open: TemplateItem = n === 1
-    ? { label: "Open Sync Folder", action: { kind: "open-sync-folder", pairId: sync.pairs[0].pairId } }
-    : { label: "Open Sync Folder", submenu: sync.pairs.map((p) => ({ label: p.name, action: { kind: "open-sync-folder" as const, pairId: p.pairId } })) };
+    ? { label: t("common.action.openSyncFolder"), action: { kind: "open-sync-folder", pairId: sync.pairs[0].pairId } }
+    : { label: t("common.action.openSyncFolder"), submenu: sync.pairs.map((p) => ({ label: isolatePairName(p.name, ctx.dir ?? "ltr"), action: { kind: "open-sync-folder" as const, pairId: p.pairId } })) };
   const conflicts = sync.unresolvedConflicts;
   return {
-    label: "Sync",
+    label: t("common.label.sync"),
     submenu: [
-      { label: `${sync.summary} · ${n} folder${n === 1 ? "" : "s"}`, enabled: false },
+      { label: t("menus.label.summaryFolder", { summary: sync.summary, count: n }), enabled: false },
       SEP,
-      simple("Sync All Now", "sync-now-all", { enabled: !sync.globalPaused }),
+      simple(t("common.action.syncAllNow"), "sync-now-all", { enabled: !sync.globalPaused }),
       ...(sync.globalPaused
-        ? [simple("Resume Sync", "sync-resume")]
-        : [simple("Pause Sync", "sync-pause"), simple("Pause for 1 Hour", "sync-pause-hour")]),
+        ? [simple(t("common.action.resumeSync"), "sync-resume")]
+        : [simple(t("common.action.pauseSync"), "sync-pause"), simple(t("menus.action.pauseFor1Hour"), "sync-pause-hour")]),
       SEP,
       open,
-      ...(conflicts > 0 ? [nav(`Resolve ${conflicts} Conflict${conflicts === 1 ? "" : "s"}…`, "/sync")] : []),
+      ...(conflicts > 0 ? [nav(t("menus.action.resolveConflict", { conflicts }), "/sync")] : []),
       SEP,
-      nav("Add Folder to Sync…", "/sync?add=1"),
-      nav("Sync Settings…", "/sync"),
+      nav(t("menus.action.addFolderToSync"), "/sync?add=1"),
+      nav(t("menus.action.syncSettings"), "/sync"),
     ],
   };
 }
 
 function windowMenu(ctx: MenuContext): TemplateItem {
   const mac = ctx.platform === "darwin";
+  const { t } = ctx;
   return {
-    label: "Window",
-    submenu: [role("minimize"), role("zoom"), ...(mac ? [SEP, role("front")] : [role("close")])],
+    label: t("menus.label.window"),
+    submenu: [
+      role("minimize", t("menus.action.minimize")),
+      role("zoom", t("menus.action.zoom")),
+      ...(mac ? [SEP, role("front", t("menus.action.bringAllToFront"))] : [role("close", closeLabel(ctx))]),
+    ],
   };
 }
 
 function helpMenu(ctx: MenuContext): TemplateItem {
   const mac = ctx.platform === "darwin";
   const update = mac ? null : updateItem(ctx);
+  const { t } = ctx;
   return {
     // `role: "help"` puts it last on every platform (macOS gives it the
-    // search field).
+    // search field); the label keeps it in the chosen language.
     role: "help",
+    label: t("menus.label.help"),
     submenu: [
-      external("dosya Help", HELP_URL),
-      simple("Keyboard Shortcuts", "shortcuts", { accelerator: "CmdOrCtrl+/" }),
-      external("What's New", CHANGELOG_URL),
+      external(t("menus.label.dosyaHelp"), HELP_URL),
+      simple(t("menus.label.keyboardShortcuts"), "shortcuts", { accelerator: "CmdOrCtrl+/" }),
+      external(t("menus.label.whatSNew"), CHANGELOG_URL),
       SEP,
-      simple("Open Log Folder", "open-log-folder"),
-      simple("Report a Problem…", "report-problem", { accelerator: "CmdOrCtrl+Shift+B" }),
-      ...(mac ? [] : [SEP, ...(update ? [update] : []), simple("About dosya", "about")]),
+      simple(t("menus.action.openLogFolder"), "open-log-folder"),
+      simple(t("menus.action.reportAProblem"), "report-problem", { accelerator: "CmdOrCtrl+Shift+B" }),
+      ...(mac ? [] : [SEP, ...(update ? [update] : []), simple(t("about.window.aboutDosya"), "about")]),
     ],
   };
 }

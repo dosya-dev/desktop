@@ -14,6 +14,8 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, Eye } from 'lucide-react';
 import { api, ApiError } from "@/lib/api-client";
+import { t as translate, useT } from "@/lib/i18n";
+import { useAutoDir } from "@/lib/bidi-ui";
 
 interface EditorConfigResponse {
   ok: boolean;
@@ -64,7 +66,7 @@ function loadDocsApi(serverUrl: string): Promise<void> {
       script.removeEventListener('load', onLoad);
       script.removeEventListener('error', onError);
       script.remove();
-      reject(new Error('Document server unreachable'));
+      reject(new Error(translate("editor.error.documentServerUnreachable")));
     };
     script.addEventListener('load', onLoad);
     script.addEventListener('error', onError);
@@ -78,6 +80,8 @@ function loadDocsApi(serverUrl: string): Promise<void> {
 }
 
 export function EditorPage() {
+  const ownDir = useAutoDir();
+  const t = useT();
   const { fileId } = useParams();
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
@@ -107,7 +111,9 @@ export function EditorPage() {
         setState('ready');
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof ApiError ? e.message : "The document editor could not be loaded.");
+          // Server text as sent; our own fallback is chosen at render, so it
+          // follows a language switch.
+          setError(e instanceof ApiError ? e.message : '');
           setState('error');
         }
       }
@@ -119,44 +125,47 @@ export function EditorPage() {
   }, [fileId, attempt]);
 
   return (
-    <div className="h-screen flex flex-col bg-background">
+    <div className="h-screen flex flex-col bg-background" data-testid="editor-page">
       {/* Same reason as the file viewer: this page renders without the app
           shell, so its header owns the top-left corner the traffic lights
           occupy. */}
-      <header className="titlebar-inset flex items-center gap-3 pr-4 py-2 border-b shrink-0">
+      <header className="titlebar-inset flex items-center gap-3 pe-4 py-2 border-b shrink-0">
         <Link to="/files" className="inline-flex items-center gap-1.5 text-sm text-[var(--color-text-muted)] hover:text-foreground">
-          <ArrowLeft className="size-4" /> Files
+          <ArrowLeft className="size-4 rtl:-scale-x-100" /> {t("common.label.files")}
         </Link>
         <span className="text-sm font-medium truncate">{title ?? ''}</span>
         {mode === 'view' && (
           <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-muted text-[var(--color-text-muted)]">
-            <Eye className="size-3" /> Read-only
+            <Eye className="size-3" /> {t("editor.status.readOnly")}
           </span>
         )}
       </header>
       <div className="flex-1 min-h-0 relative">
         {state === 'loading' && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-[var(--color-text-muted)]">
-            Loading editor...
+            {t("editor.status.loadingEditor")}
           </div>
         )}
         {state === 'error' && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="bg-background border rounded-xl p-8 text-center max-w-sm">
-              <p className="text-sm text-[var(--color-text-muted)] mb-4">
-                {error || 'The document editor could not be loaded.'}
+              <p dir={error ? ownDir : undefined} className="text-sm text-[var(--color-text-muted)] mb-4">
+                {error || t("editor.error.theDocumentEditorCouldNotBeLoaded")}
               </p>
               <button
                 type="button"
                 onClick={() => setAttempt((a) => a + 1)}
                 className="px-4 py-2 rounded-lg bg-foreground text-background text-sm font-semibold hover:opacity-90"
               >
-                Try again
+                {t("common.action.tryAgain")}
               </button>
             </div>
           </div>
         )}
-        <div id="oo-editor" className="w-full h-full" />
+        {/* The ONLYOFFICE frame lays itself out; the page direction must not reach it. */}
+        <div dir="ltr" className="w-full h-full">
+          <div id="oo-editor" className="w-full h-full" />
+        </div>
       </div>
     </div>
   );

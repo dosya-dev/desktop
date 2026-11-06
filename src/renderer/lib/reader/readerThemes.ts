@@ -6,9 +6,12 @@
  * read for a long time in one sitting, and sepia on a bright screen at night is
  * a different decision from which accent colour the file browser uses.
  */
+import type { MessageKey } from "../../../i18n/keys";
+
 export interface ReaderTheme {
   id: string;
-  label: string;
+  /** Catalog key, translated where the theme is shown. */
+  label: MessageKey;
   bg: string;
   fg: string;
 }
@@ -23,10 +26,10 @@ export interface ReaderTheme {
  * is a choice people make about a book, not about an app.
  */
 export const READER_THEMES: ReaderTheme[] = [
-  { id: "app", label: "Match app", bg: "", fg: "" },
-  { id: "light", label: "Light", bg: "#ffffff", fg: "#1a1a1a" },
-  { id: "sepia", label: "Sepia", bg: "#f4ecd8", fg: "#5b4636" },
-  { id: "dark", label: "Dark", bg: "#121212", fg: "#c8c8c8" },
+  { id: "app", label: "common.option.matchApp", bg: "", fg: "" },
+  { id: "light", label: "common.option.light", bg: "#ffffff", fg: "#1a1a1a" },
+  { id: "sepia", label: "common.option.sepia", bg: "#f4ecd8", fg: "#5b4636" },
+  { id: "dark", label: "common.option.dark", bg: "#121212", fg: "#c8c8c8" },
 ];
 
 export const DEFAULT_THEME_ID = "app";

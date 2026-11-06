@@ -101,6 +101,9 @@ export const NOTIFICATION_ICON_COMPONENTS: Record<NotificationIconKey, LucideIco
 
 export const KNOWN_ICON_KEYS = NOTIFICATION_ICON_KEYS;
 
+/** Glyphs that point along the line of text, so they mirror in a right-to-left language. */
+const DIRECTIONAL_KEYS: ReadonlySet<string> = new Set(["log-out", "undo-2", "send", "message-square-reply"]);
+
 /**
  * The inbox row's glyph: a hairline ring around a 16px line icon. Same rules as
  * the web component: unread sharpens the ring to the text colour, important
@@ -138,7 +141,11 @@ export function NotificationIcon({
         borderColor: emphasised ? `color-mix(in srgb, ${color} 45%, transparent)` : "var(--color-border)",
       }}
     >
-      <Glyph size={Math.round(size / 2)} strokeWidth={1.75} />
+      <Glyph
+        size={Math.round(size / 2)}
+        strokeWidth={1.75}
+        className={DIRECTIONAL_KEYS.has(key) ? "rtl:-scale-x-100" : undefined}
+      />
     </span>
   );
 }

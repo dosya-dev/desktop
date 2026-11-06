@@ -53,3 +53,13 @@ test("after memory clears, the same id restores again instead of being swallowed
   const again = restoreTarget(new URLSearchParams("view=file_2"), null);
   assert.deepEqual(again, { type: "restore", id: "file_2", action: "view" });
 });
+
+test("?panel=X&versions=1 opens the detail panel on its version list", () => {
+  const params = new URLSearchParams("panel=file_2&versions=1");
+  assert.deepEqual(restoreTarget(params, null), { type: "restore", id: "file_2", action: "versions" });
+});
+
+test("versions=1 means nothing next to ?view=", () => {
+  const params = new URLSearchParams("view=file_2&versions=1");
+  assert.deepEqual(restoreTarget(params, null), { type: "restore", id: "file_2", action: "view" });
+});

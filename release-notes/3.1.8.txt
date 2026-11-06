@@ -1,0 +1,4 @@
+What's new in 3.1.8
+
+• Personas reads your photos several times faster. On computers with a modern graphics chip, a photo of a group now takes a tenth of a second instead of about a third.
+• Faces read by this version and by earlier ones group together as before. Nothing needs to be read again.

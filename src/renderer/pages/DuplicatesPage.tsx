@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CopyX, Folder, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { autoDir, useAutoDir } from "@/lib/bidi-ui";
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
@@ -11,11 +12,14 @@ import {
   allButNewest, chunk, duplicatesQueryKey, fetchDuplicates,
   fullySelectedGroups, selectedBytes, type DuplicatesResponse,
 } from "@/lib/duplicates";
+import { useT } from "@/lib/i18n";
 
 /** Poll while the scanner is still draining this workspace's candidates. */
 const SCAN_POLL_MS = 15_000;
 
 export function DuplicatesPage() {
+  const ownDir = useAutoDir();
+  const t = useT();
   const { active } = useWorkspace();
   const wsId = active?.id ?? "";
   const navigate = useNavigate();
@@ -66,11 +70,11 @@ export function DuplicatesPage() {
       for (const ids of chunk(Array.from(selected))) {
         await api.post("/api/files/batch-delete", { workspace_id: wsId, file_ids: ids });
       }
-      toast.success("Moved to trash", { description: `${count} file${count === 1 ? "" : "s"} moved to trash.` });
+      toast.success(t("duplicates.label.movedToTrash"), { description: t("duplicates.description.fileMovedToTrash", { count }) });
       setSelected(new Set());
     } catch (err) {
-      toast.error("Delete failed", {
-        description: err instanceof ApiError ? err.message : "The selected files could not be moved to trash.",
+      toast.error(t("common.error.deleteFailed"), {
+        description: err instanceof ApiError ? autoDir(err.message) : t("duplicates.error.theSelectedFilesCouldNotBeMovedToTrash"),
       });
     }
     // Refresh both this page and the file listing - a soft delete changes both.
@@ -81,12 +85,12 @@ export function DuplicatesPage() {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-testid="duplicates-page">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Duplicates</h1>
+          <h1 className="text-2xl font-semibold">{t("duplicates.heading.duplicates")}</h1>
           <p className="text-sm text-[var(--color-text-muted)]">
-            Identical files, by content - not by name
+            {t("duplicates.description.identicalFilesByContentNotByName")}
           </p>
         </div>
         {groups.length > 0 && (
@@ -97,7 +101,7 @@ export function DuplicatesPage() {
               className="rounded-lg border px-3 py-2 text-sm"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Select all but newest
+              {t("duplicates.action.selectAllButNewest")}
             </button>
             <button
               data-testid="dup-clear"
@@ -106,7 +110,7 @@ export function DuplicatesPage() {
               className="rounded-lg border px-3 py-2 text-sm disabled:opacity-40"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Clear
+              {t("common.action.clear")}
             </button>
             {canDelete && (
               <button
@@ -117,7 +121,7 @@ export function DuplicatesPage() {
                 style={{ background: "var(--color-danger)" }}
               >
                 {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                Delete {selected.size > 0 ? selected.size : ""}
+                {selected.size > 0 ? t("duplicates.action.deleteCount", { count: selected.size }) : t("common.delete")}
               </button>
             )}
           </div>
@@ -126,9 +130,13 @@ export function DuplicatesPage() {
 
       {data && data.total_groups > 0 && (
         <p data-testid="dup-summary" className="text-sm text-[var(--color-text-muted)]">
-          {data.total_groups} duplicate group{data.total_groups === 1 ? "" : "s"}
-          {" · "}{humanSize(data.total_wasted_bytes)} reclaimable
-          {selected.size > 0 && ` · ${humanSize(bytesSelected)} selected`}
+          {selected.size > 0
+            ? t("duplicates.description.duplicateGroupReclaimableReclaimableSelectedSizeSelected", {
+                totalGroups: data.total_groups, reclaimable: humanSize(data.total_wasted_bytes), selectedSize: humanSize(bytesSelected),
+              })
+            : t("duplicates.description.duplicateGroupReclaimableReclaimable", {
+                totalGroups: data.total_groups, reclaimable: humanSize(data.total_wasted_bytes),
+              })}
         </p>
       )}
 
@@ -136,7 +144,7 @@ export function DuplicatesPage() {
         // Without this an incomplete answer is indistinguishable from a complete
         // one, and "no duplicates" would be a lie told confidently.
         <p data-testid="dup-scanning" className="rounded-lg border px-3 py-2 text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
-          Still scanning {pending} file{pending === 1 ? "" : "s"}. This list will fill in as it goes.
+          {t("duplicates.description.stillScanningFileThisListWillFillInAs", { pending })}
         </p>
       )}
 
@@ -146,17 +154,17 @@ export function DuplicatesPage() {
         </div>
       ) : query.isError ? (
         <div className="flex flex-col items-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }} data-testid="dup-error">
-          <p className="text-sm">Couldn't check for duplicates.</p>
+          <p className="text-sm">{t("duplicates.error.couldnTCheckForDuplicates")}</p>
           <button data-testid="dup-retry" onClick={() => query.refetch()} className="mt-2 text-xs font-medium text-[var(--color-primary)]">
-            Retry
+            {t("common.retry")}
           </button>
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }} data-testid="dup-empty">
           <CopyX size={36} className="mb-3 text-[var(--color-text-muted)]" />
-          <p className="text-sm font-medium">No duplicates</p>
+          <p className="text-sm font-medium">{t("duplicates.empty.noDuplicates")}</p>
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-            Nothing in this workspace is stored twice.
+            {t("duplicates.description.nothingInThisWorkspaceIsStoredTwice")}
           </p>
         </div>
       ) : (
@@ -164,9 +172,9 @@ export function DuplicatesPage() {
           {groups.map((g) => (
             <div key={g.content_hash} data-testid={`dup-group-${g.content_hash}`} className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
               <div className="mb-2 flex items-center justify-between">
-                <p className="truncate text-sm font-semibold">{g.files[0]?.name ?? "Unnamed"}</p>
+                <p dir={g.files[0]?.name != null ? ownDir : undefined} className="truncate text-sm font-semibold">{g.files[0]?.name ?? t("duplicates.label.unnamed")}</p>
                 <span className="text-xs text-[var(--color-text-muted)]">
-                  {g.count} copies · {humanSize(g.wasted_bytes)} reclaimable
+                  {t("duplicates.label.countCopiesReclaimableReclaimable", { count: g.count, reclaimable: humanSize(g.wasted_bytes) })}
                 </span>
               </div>
               <div className="space-y-1.5">
@@ -185,13 +193,14 @@ export function DuplicatesPage() {
                     <Folder size={11} className="shrink-0 text-[var(--color-text-muted)]" />
                     <button
                       onClick={(e) => { e.preventDefault(); navigate(`/files?panel=${f.id}`); }}
-                      className="flex-1 truncate text-left hover:underline"
+                      dir={f.folder_path != null ? ownDir : undefined}
+                      className="flex-1 truncate text-start hover:underline"
                     >
-                      {f.folder_path ?? "Workspace root"}
+                      {f.folder_path ?? t("file-requests.label.workspaceRoot")}
                     </button>
                     {i === 0 && (
                       <span data-testid={`dup-newest-${f.id}`} className="rounded-full bg-[var(--color-bg-tertiary)] px-1.5 text-xs">
-                        newest
+                        {t("duplicates.label.newest")}
                       </span>
                     )}
                     <span className="text-[var(--color-text-muted)]">{timeAgo(f.created_at)}</span>
@@ -206,21 +215,20 @@ export function DuplicatesPage() {
       {confirming && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl">
-            <h3 className="text-lg font-semibold">Move {selected.size} file{selected.size === 1 ? "" : "s"} to trash?</h3>
+            <h3 className="text-lg font-semibold">{t("duplicates.heading.moveFileToTrash", { count: selected.size })}</h3>
             <p className="mt-2 text-sm text-[var(--color-text-muted)]">
-              This reclaims {humanSize(bytesSelected)}. They go to trash, not straight out.
+              {t("duplicates.description.thisReclaimsSizeTheyGoToTrashNotStraight", { size: humanSize(bytesSelected) })}
             </p>
             {fullGroups > 0 && (
               // Allowed, but never silently: this is the one selection that
               // leaves no copy of the file behind.
               <p data-testid="dup-full-group-warning" className="mt-3 rounded-lg border px-3 py-2 text-xs text-[var(--color-danger)]" style={{ borderColor: "var(--color-danger)" }}>
-                {fullGroups} group{fullGroups === 1 ? " has" : "s have"} every copy selected. No copy of
-                {fullGroups === 1 ? " that file" : " those files"} will be left.
+                {t("duplicates.description.groupHasEveryCopySelectedNoCopyOfThat", { count: fullGroups })}
               </p>
             )}
             <div className="mt-5 flex justify-end gap-2">
               <button data-testid="dup-confirm-cancel" onClick={() => setConfirming(false)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 data-testid="dup-confirm"
@@ -228,7 +236,7 @@ export function DuplicatesPage() {
                 className="rounded-lg px-4 py-2 text-sm font-medium text-white"
                 style={{ background: "var(--color-danger)" }}
               >
-                Move to trash
+                {t("duplicates.action.moveToTrash")}
               </button>
             </div>
           </div>

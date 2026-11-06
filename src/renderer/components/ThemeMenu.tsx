@@ -2,30 +2,49 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Palette } from "lucide-react";
 import { THEMES, type Mode } from "@/lib/themes";
 import { useThemePref } from "@/lib/use-theme-pref";
+import { useDir, useT } from "@/lib/i18n";
+import { useExitPresence } from "@/lib/use-exit-presence";
+import type { MessageKey } from "../../i18n/keys";
 
-const MODES: { value: Mode; label: string }[] = [
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-  { value: "system", label: "System" },
+const MODES: { value: Mode; label: MessageKey }[] = [
+  { value: "light", label: "common.option.light" },
+  { value: "dark", label: "common.option.dark" },
+  { value: "system", label: "common.option.system" },
 ];
+
+/**
+ * During the theme wipe (withThemeSweep in lib/theme.ts) the view-transition
+ * overlay can swallow hit-testing, so a click on the next swatch arrives with
+ * <html> as its target. That is not a click outside the menu: picking themes
+ * quickly used to close the panel after a few changes.
+ */
+export function isSweepClick(e: Pick<MouseEvent, "target">): boolean {
+  const root = document.documentElement;
+  return e.target === root && root.hasAttribute("data-theme-sweep");
+}
 
 /**
  * Titlebar theme control: the same mode + theme options as Profile >
  * Appearance, one click from anywhere instead of a trip through Profile.
  * Same `align` contract as NotificationBell: the titlebar puts this in the
- * right cluster on macOS (panel grows leftward) and the left cluster on
- * Windows/Linux (panel must grow rightward, or most of it hangs off-screen).
+ * end cluster on macOS (panel grows toward the start) and the start cluster on
+ * Windows/Linux (panel must grow toward the end, or most of it hangs off-screen).
  */
-export function ThemeMenu({ align = "right" }: { align?: "left" | "right" } = {}) {
+export function ThemeMenu({ align = "end" }: { align?: "start" | "end" } = {}) {
+  const t = useT();
+  const dir = useDir();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const { pref, save } = useThemePref();
+  // Matches the 120ms exit in .anim-popover[data-closing] (index.css).
+  const { mounted, closing } = useExitPresence(open, 120);
 
   // Outside click and Escape, matching NotificationBell. Registered only
   // while open so it is not a permanent listener.
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
+      if (isSweepClick(e)) return;
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
@@ -42,20 +61,21 @@ export function ThemeMenu({ align = "right" }: { align?: "left" | "right" } = {}
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-text-secondary)] hover:bg-black/5 transition-colors"
-        title="Theme"
-        aria-label="Theme"
+        title={t("profile.label.theme")}
+        aria-label={t("profile.label.theme")}
       >
         <Palette size={13} />
       </button>
 
-      {open && (
+      {mounted && (
         <div
-          className={`anim-pop-in absolute top-full z-50 mt-1 w-60 rounded-lg border bg-[var(--color-bg)] p-3 shadow-lg ${
-            align === "right" ? "right-0" : "left-0"
+          data-closing={closing ? "" : undefined}
+          className={`anim-popover absolute top-full z-50 mt-1 w-60 rounded-lg border bg-[var(--color-bg)] p-3 shadow-lg ${
+            align === "end" ? "inset-e-0" : "inset-s-0"
           }`}
           style={{
             borderColor: "var(--color-border)",
-            transformOrigin: align === "right" ? "top right" : "top left",
+            transformOrigin: (align === "start") === (dir === "ltr") ? "top left" : "top right",
           }}
         >
           {/* Mode */}
@@ -78,34 +98,34 @@ export function ThemeMenu({ align = "right" }: { align?: "left" | "right" } = {}
                     : undefined
                 }
               >
-                {m.label}
+                {t(m.label)}
               </button>
             ))}
           </div>
 
           {/* Theme swatches */}
           <div className="grid grid-cols-4 gap-2">
-            {THEMES.map((t) => {
-              const active = pref.theme === t.id;
+            {THEMES.map((theme) => {
+              const active = pref.theme === theme.id;
               return (
                 <button
-                  key={t.id}
-                  onClick={() => save({ ...pref, theme: t.id })}
-                  title={t.label}
-                  aria-label={t.label}
+                  key={theme.id}
+                  onClick={() => save({ ...pref, theme: theme.id })}
+                  title={t(theme.labelKey)}
+                  aria-label={t(theme.labelKey)}
                   className={`relative flex h-9 items-center justify-center rounded-md border transition-all ${
                     active ? "ring-2 ring-[var(--color-primary)]" : "hover:scale-105"
                   }`}
-                  style={{ background: t.swatch.bg, borderColor: "var(--color-border)" }}
+                  style={{ background: theme.swatch.bg, borderColor: "var(--color-border)" }}
                 >
                   <span
                     className="h-4 w-4 rounded-full"
-                    style={{ background: t.swatch.primary }}
+                    style={{ background: theme.swatch.primary }}
                   />
                   {active && (
                     <Check
                       size={10}
-                      className="absolute right-0.5 top-0.5 text-[var(--color-primary)]"
+                      className="absolute inset-e-0.5 top-0.5 text-[var(--color-primary)]"
                     />
                   )}
                 </button>

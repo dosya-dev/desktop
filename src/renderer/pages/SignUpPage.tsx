@@ -1,14 +1,19 @@
 import { useState, useRef, useEffect, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Eye, EyeOff } from "lucide-react";
-import { api, ApiError } from "@/lib/api-client";
+import { api, ApiError, isEdgeChallengeError } from "@/lib/api-client";
+import { authErrorMessage } from "@/lib/auth-error";
 import { useAuth } from "@/lib/auth-context";
-import { isValidEmail, validatePassword } from "@dosya-dev/shared";
+import { isValidEmail } from "@dosya-dev/shared";
 import { Logo } from "@/components/Logo";
-import { LegalLinks, LegalNotice } from "@/components/LegalNotice";
+import { LegalConsent, LegalNotice } from "@/components/LegalNotice";
 import { useAuthDirection } from "@/lib/auth-direction";
+import { useT } from "@/lib/i18n";
+import { passwordError as checkPassword } from "@/lib/password-error";
+import { useOnClosedToTray } from "@/lib/use-closed-to-tray";
 
 export function SignUpPage() {
+  const t = useT();
   const { refreshUser } = useAuth();
   const navigate = useNavigate();
   const [name, setName] = useState("");
@@ -17,7 +22,19 @@ export function SignUpPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [terms, setTerms] = useState(false);
   const [error, setError] = useState("");
+  // The address already has an account: offer the sign-in screen with it.
+  const [accountExists, setAccountExists] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // Closing the window hides it to the tray and keeps this form alive. Drop
+  // the password and any stale error so reopening the app starts clean (QA
+  // TC-010); nothing here is ever written to disk.
+  useOnClosedToTray(() => {
+    setPassword("");
+    setShowPassword(false);
+    setError("");
+    setAccountExists(false);
+  });
 
   // Pending OAuth teardown (IPC listener + 2-min timeout). Held in a ref so we
   // can tear it down when the flow completes AND if the page unmounts first -
@@ -48,9 +65,11 @@ export function SignUpPage() {
       const oauthUrl = await window.electronAPI.beginOAuth(provider);
       // Open in system browser (Chrome, Firefox, etc.)
       window.open(oauthUrl, "_blank");
-    } catch (err: any) {
+    } catch (err) {
+      // Technical main-process text stays in the log, not on the form.
+      console.error("OAuth start failed:", err);
       setLoading(false);
-      setError(err?.message || `Could not start ${provider} sign-up. Please try again.`);
+      setError(t("sign-up.error.couldNotStartProviderSignUpPleaseTryAgain", { provider }));
       return;
     }
 
@@ -64,8 +83,9 @@ export function SignUpPage() {
         await window.electronAPI.waitForSession();
         await refreshUser(true);
         navigate("/dashboard");
-      } catch (err: any) {
-        setError(err.message || "Sign up failed");
+      } catch (err) {
+        console.error("OAuth completion failed:", err);
+        setError(t("sign-up.error.couldNotCreateYourAccount"));
       } finally {
         setLoading(false);
       }
@@ -76,7 +96,7 @@ export function SignUpPage() {
       oauthCleanup.current?.();
       oauthCleanup.current = null;
       setLoading(false);
-      setError("Sign up timed out. Please try again.");
+      setError(t("sign-up.error.browserSignUpDidNotFinish"));
     }, 120_000);
 
     // One combined teardown for both the listener and the timer.
@@ -89,18 +109,19 @@ export function SignUpPage() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
+    setAccountExists(false);
 
     if (!terms) {
-      setError("Please accept the Terms of Service to continue.");
+      setError(t("sign-up.error.acceptTheTermsToCreateAnAccount"));
       return;
     }
 
     if (!isValidEmail(email)) {
-      setError("Please enter a valid email address");
+      setError(t("common.error.pleaseEnterAValidEmailAddress"));
       return;
     }
 
-    const passwordError = validatePassword(password);
+    const passwordError = checkPassword(password);
     if (passwordError) {
       setError(passwordError);
       return;
@@ -113,10 +134,16 @@ export function SignUpPage() {
       await api.post("/api/auth/signup", { name, email, password, terms: true });
       navigate("/verify", { state: { email } });
     } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message);
+      // QA TC-009: a request that never got a readable answer used to land in
+      // the generic branch as "An unexpected error occurred".
+      if (isEdgeChallengeError(err)) {
+        // Cloudflare's leaked-credential rule, on the password field alone.
+        setError(t("sign-up.error.passwordOnLeakedList"));
       } else {
-        setError("An unexpected error occurred");
+        // 409 is the API's "An account with this email already exists" - the
+        // same answer the web sign-up shows, so no new enumeration surface.
+        setError(authErrorMessage(err, t("sign-up.error.couldNotCreateYourAccount")));
+        setAccountExists(err instanceof ApiError && err.status === 409);
       }
     } finally {
       setLoading(false);
@@ -136,21 +163,33 @@ export function SignUpPage() {
       </div>
       <div className="auth-step w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-8 shadow-sm border" style={{ borderColor: "var(--color-border)" }}>
         <div className="mb-6 text-center">
-          <h1 className="text-2xl font-semibold">Create an account</h1>
+          <h1 className="text-2xl font-semibold">{t("sign-up.heading.createAnAccount")}</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-            Get started with dosya
+            {t("sign-up.label.getStartedWithDosya")}
           </p>
         </div>
 
         {error && (
-          <div className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">
+          <div role="alert" className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">
             {error}
+            {accountExists && (
+              <>
+                {" "}
+                <Link
+                  to="/login"
+                  state={{ email }}
+                  className="font-medium underline"
+                >
+                  {t("sign-up.action.signInInstead")}
+                </Link>
+              </>
+            )}
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium">Name</label>
+            <label className="mb-1 block text-sm font-medium">{t("sign-up.label.name.person")}</label>
             <input
               type="text"
               value={name}
@@ -158,12 +197,12 @@ export function SignUpPage() {
               required
               className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
               style={{ borderColor: "var(--color-border)" }}
-              placeholder="Your name"
+              placeholder={t("sign-up.placeholder.yourName")}
             />
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium">Email</label>
+            <label className="mb-1 block text-sm font-medium">{t("common.label.email")}</label>
             <input
               type="email"
               value={email}
@@ -171,12 +210,12 @@ export function SignUpPage() {
               required
               className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
               style={{ borderColor: "var(--color-border)" }}
-              placeholder="you@example.com"
+              placeholder={t("common.placeholder.youExampleCom")}
             />
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium">Password</label>
+            <label className="mb-1 block text-sm font-medium">{t("common.label.password")}</label>
             {/* Reveal toggle, same as the login form. A signup field enforcing
                 four character classes is the one most worth being able to read
                 back before submitting. */}
@@ -186,22 +225,22 @@ export function SignUpPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="w-full rounded-lg border px-3 py-2 pr-10 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
+                className="w-full rounded-lg border px-3 py-2 pe-10 text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                 style={{ borderColor: "var(--color-border)" }}
-                placeholder="Min. 8 characters"
+                placeholder={t("common.placeholder.min8Characters")}
               />
               <button
                 type="button"
                 onClick={() => setShowPassword((v) => !v)}
-                aria-label={showPassword ? "Hide password" : "Show password"}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text-secondary)]"
+                aria-label={showPassword ? t("common.accessibility.hidePassword") : t("common.accessibility.showPassword")}
+                className="absolute inset-e-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text-secondary)]"
                 tabIndex={-1}
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </div>
             <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-              At least 8 characters. A memorable passphrase works well.
+              {t("common.description.atLeast8CharactersAMemorablePassphraseWorksWell")}
             </p>
           </div>
 
@@ -216,7 +255,7 @@ export function SignUpPage() {
               className="mt-0.5 size-4 shrink-0 accent-[var(--color-primary)]"
             />
             <span>
-              I agree to the <LegalLinks />
+              <LegalConsent />
             </span>
           </label>
 
@@ -230,13 +269,13 @@ export function SignUpPage() {
                 : "var(--color-primary)",
             }}
           >
-            {loading ? "Creating account..." : "Create account"}
+            {loading ? t("sign-up.status.creatingAccount") : t("sign-up.action.createAccount")}
           </button>
         </form>
 
         <div className="my-5 flex items-center gap-3">
           <div className="h-px flex-1 bg-[var(--color-border)]" />
-          <span className="text-xs text-[var(--color-text-muted)]">or</span>
+          <span className="text-xs text-[var(--color-text-muted)]">{t("common.label.or")}</span>
           <div className="h-px flex-1 bg-[var(--color-border)]" />
         </div>
 
@@ -253,7 +292,7 @@ export function SignUpPage() {
               <path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.997 8.997 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05" />
               <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335" />
             </svg>
-            Continue with Google
+            {t("common.action.continueWithGoogle")}
           </button>
           <button
             onClick={() => runOAuth("github")}
@@ -264,7 +303,7 @@ export function SignUpPage() {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
             </svg>
-            Continue with GitHub
+            {t("common.action.continueWithGitHub")}
           </button>
           {/* Bordered like its neighbours rather than web's filled black
               button: this app ships eight themes, and a hardcoded black
@@ -278,7 +317,7 @@ export function SignUpPage() {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
               <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 14.25 3.51 5.88 9.05 5.6c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.1l.01-.31zM12.03 5.5C11.88 3.24 13.71 1.38 15.82 1.2c.29 2.58-2.34 4.5-3.79 4.3z" />
             </svg>
-            Continue with Apple
+            {t("common.action.continueWithApple")}
           </button>
         </div>
 
@@ -287,12 +326,12 @@ export function SignUpPage() {
         <LegalNotice className="mt-6" />
 
         <p className="mt-4 text-center text-sm text-[var(--color-text-secondary)]">
-          Already have an account?{" "}
+          {t("sign-up.description.alreadyHaveAnAccount")}{" "}
           <Link
             to="/login"
             className="font-medium text-[var(--color-primary)] hover:underline"
           >
-            Sign in
+            {t("common.action.signIn")}
           </Link>
         </p>
       </div>

@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
+import { ipcErrorText, useAutoDir } from "@/lib/bidi-ui";
 import type { SyncConflict } from "@/lib/sync-store";
 import { formatBytes, formatRelative } from "@/lib/format";
+import { formatters, useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
+import type { MessageKey } from "../../../i18n/keys";
 
 /** Cards per page. A folder can pile up thousands of conflicts, and one card
  *  per conflict all at once froze the window and cost gigabytes of RAM. */
@@ -10,10 +14,10 @@ export const CONFLICTS_PER_PAGE = 50;
 
 type Resolution = "keep-local" | "keep-remote" | "keep-both";
 
-const BULK_LABELS: Record<Resolution, { button: string; confirm: string }> = {
-  "keep-local": { button: "Keep all local", confirm: "Upload this device's version of every file over the cloud copy." },
-  "keep-remote": { button: "Keep all remote", confirm: "Move this device's versions to the Trash and download the cloud copies." },
-  "keep-both": { button: "Keep both for all", confirm: "Rename this device's versions to conflict copies and keep the cloud copies too." },
+const BULK_LABELS: Record<Resolution, { button: MessageKey; confirm: MessageKey }> = {
+  "keep-local": { button: "sync.label.keepAllLocal", confirm: "sync.label.uploadThisDeviceSVersionOfEveryFileOver" },
+  "keep-remote": { button: "sync.label.keepAllRemote", confirm: "sync.label.moveThisDeviceSVersionsToTheTrashAnd" },
+  "keep-both": { button: "sync.label.keepBothForAll", confirm: "sync.label.renameThisDeviceSVersionsToConflictCopiesAnd" },
 };
 
 /**
@@ -23,6 +27,7 @@ const BULK_LABELS: Record<Resolution, { button: string; confirm: string }> = {
  * draining, a new conflict) re-reads the current page.
  */
 export function ConflictList({ pairIds, total }: { pairIds: string[]; total: number }) {
+  const t = useT();
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<SyncConflict[]>([]);
   const [confirming, setConfirming] = useState<Resolution | null>(null);
@@ -53,9 +58,9 @@ export function ConflictList({ pairIds, total }: { pairIds: string[]; total: num
     setBulkBusy(true);
     try {
       const { queued } = await window.electronAPI.resolveSyncConflicts(pairIds, resolution);
-      toast.success(queued > 0 ? `Resolving ${queued.toLocaleString()} conflicts in the background` : "Already resolving - give it a moment");
+      toast.success(queued > 0 ? t("sync.label.resolvingQueuedConflictsInTheBackground", { queued }) : t("sync.label.alreadyResolvingGiveItAMoment"));
     } catch (e: any) {
-      toast.error(e?.message || "Could not start resolving - try again");
+      toast.error(ipcErrorText(e?.message, t("sync.error.couldNotStartResolvingTryAgain")));
     } finally {
       setBulkBusy(false);
       setConfirming(null);
@@ -71,8 +76,8 @@ export function ConflictList({ pairIds, total }: { pairIds: string[]; total: num
           {confirming ? (
             <div className="flex flex-wrap items-center gap-2">
               <p className="min-w-0 flex-1 text-xs">
-                <span className="font-medium">{BULK_LABELS[confirming].button} ({total.toLocaleString()})?</span>{" "}
-                <span className="text-[var(--color-text-muted)]">{BULK_LABELS[confirming].confirm}</span>
+                <span className="font-medium">{t(BULK_LABELS[confirming].button)} ({formatters().formatNumber(total)})?</span>{" "}
+                <span className="text-[var(--color-text-muted)]">{t(BULK_LABELS[confirming].confirm)}</span>
               </p>
               <button
                 onClick={() => setConfirming(null)}
@@ -80,20 +85,20 @@ export function ConflictList({ pairIds, total }: { pairIds: string[]; total: num
                 className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => void resolveAll(confirming)}
                 disabled={bulkBusy}
                 className="rounded-lg border border-[var(--color-text)] bg-[var(--color-text)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
               >
-                Resolve all
+                {t("sync.action.resolveAll")}
               </button>
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               <p className="min-w-0 flex-1 text-xs text-[var(--color-text-muted)]">
-                Resolve all {total.toLocaleString()} conflicts the same way
+                {t("sync.description.resolveAllTotalConflictsTheSameWay", { total })}
               </p>
               {(Object.keys(BULK_LABELS) as Resolution[]).map((r) => (
                 <button
@@ -102,7 +107,7 @@ export function ConflictList({ pairIds, total }: { pairIds: string[]; total: num
                   className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
                   style={{ borderColor: "var(--color-border)" }}
                 >
-                  {BULK_LABELS[r].button}
+                  {t(BULK_LABELS[r].button)}
                 </button>
               ))}
             </div>
@@ -117,20 +122,21 @@ export function ConflictList({ pairIds, total }: { pairIds: string[]; total: num
       {totalPages > 1 && (
         <div className="flex items-center justify-between pt-1">
           <p className="text-xs text-[var(--color-text-muted)]">
-            <span className="font-medium text-[var(--color-text)]">
-              {start + 1} to {Math.min(start + CONFLICTS_PER_PAGE, total)}
-            </span>{" "}
-            of <span className="font-medium text-[var(--color-text)]">{total.toLocaleString()}</span> conflicts
+            {richText(t, "sync.description.startToEndOfTotalConflicts", {}, {
+              start: <span className="font-medium text-[var(--color-text)]">{start + 1}</span>,
+              end: <span className="font-medium text-[var(--color-text)]">{Math.min(start + CONFLICTS_PER_PAGE, total)}</span>,
+              total: <span className="font-medium text-[var(--color-text)]">{formatters().formatNumber(total)}</span>,
+            })}
           </p>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setPage(Math.max(1, current - 1))}
               disabled={current <= 1}
-              aria-label="Previous page"
+              aria-label={t("common.tooltip.previousPage")}
               className="flex h-8 w-8 items-center justify-center rounded-lg border text-sm disabled:opacity-30"
               style={{ borderColor: "var(--color-border)" }}
             >
-              <ChevronLeft size={14} />
+              <ChevronLeft size={14} className="rtl:-scale-x-100" />
             </button>
             {buildPageNumbers(current, totalPages).map((p, i) =>
               p === "..." ? (
@@ -156,11 +162,11 @@ export function ConflictList({ pairIds, total }: { pairIds: string[]; total: num
             <button
               onClick={() => setPage(Math.min(totalPages, current + 1))}
               disabled={current >= totalPages}
-              aria-label="Next page"
+              aria-label={t("common.tooltip.nextPage")}
               className="flex h-8 w-8 items-center justify-center rounded-lg border text-sm disabled:opacity-30"
               style={{ borderColor: "var(--color-border)" }}
             >
-              <ChevronRight size={14} />
+              <ChevronRight size={14} className="rtl:-scale-x-100" />
             </button>
           </div>
         </div>
@@ -180,42 +186,44 @@ function buildPageNumbers(current: number, total: number): (number | "...")[] {
 }
 
 function ConflictCard({ conflict }: { conflict: SyncConflict }) {
+  const ownDir = useAutoDir();
+  const t = useT();
   // No refresh needed afterwards: the resolution changes the count on the
   // next status tick, and that re-reads this page.
   const resolve = async (resolution: string) => {
     try {
       await window.electronAPI.resolveConflict(conflict.id, resolution);
-      toast.success("Conflict resolved");
+      toast.success(t("sync.label.conflictResolved"));
     } catch (error: any) {
-      toast.error(error?.message || "Could not resolve this conflict. Fix the cause and try again.");
+      toast.error(ipcErrorText(error?.message, t("sync.error.couldNotResolveThisConflictFixTheCauseAnd")));
     }
   };
 
   return (
     <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-      <p className="text-sm font-semibold">{conflict.remoteName}</p>
-      <p className="mt-1 text-xs text-[var(--color-text-muted)] font-mono">{conflict.localPath}</p>
+      <p dir={ownDir} className="text-sm font-semibold">{conflict.remoteName}</p>
+      <p dir="ltr" className="ltr-value mt-1 text-xs text-[var(--color-text-muted)] font-mono">{conflict.localPath}</p>
       <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
         <div className="rounded-lg bg-[var(--color-bg-secondary)] p-2.5">
-          <p className="font-medium">Local</p>
+          <p className="font-medium">{t("sync.label.local")}</p>
           <p className="text-[var(--color-text-muted)]">{formatBytes(conflict.localSizeBytes)}</p>
           <p className="text-[var(--color-text-muted)]">{formatRelative(conflict.localMtimeMs)}</p>
         </div>
         <div className="rounded-lg bg-[var(--color-bg-secondary)] p-2.5">
-          <p className="font-medium">Remote</p>
+          <p className="font-medium">{t("sync.label.remote")}</p>
           <p className="text-[var(--color-text-muted)]">{formatBytes(conflict.remoteSizeBytes)}</p>
           <p className="text-[var(--color-text-muted)]">{formatRelative(conflict.remoteUpdatedAt)}</p>
         </div>
       </div>
       <div className="mt-3 flex gap-2">
         <button onClick={() => resolve("keep-local")} className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
-          Keep local
+          {t("sync.action.keepLocal")}
         </button>
         <button onClick={() => resolve("keep-remote")} className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
-          Keep remote
+          {t("sync.action.keepRemote")}
         </button>
         <button onClick={() => resolve("keep-both")} className="flex-1 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
-          Keep both
+          {t("sync.action.keepBoth")}
         </button>
       </div>
     </div>

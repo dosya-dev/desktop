@@ -1,4 +1,5 @@
 // File type icon SVGs - matches the web app's icon set exactly
+import { useT } from "@/lib/i18n";
 
 const icons = import.meta.glob("../../assets/file-icons/*.svg", {
   eager: true,
@@ -100,6 +101,7 @@ export function FileIconWithSync({
   className?: string;
   synced?: boolean;
 }) {
+  const t = useT();
   if (!synced) {
     return <FileIcon name={name} size={size} className={className} />;
   }
@@ -116,11 +118,11 @@ export function FileIconWithSync({
       />
       <img
         src={syncIconSrc()}
-        alt="Synced"
+        alt={t("common.status.synced")}
         width={badgeSize}
         height={badgeSize}
         className="absolute"
-        style={{ bottom: -2, right: -3 }}
+        style={{ bottom: -2, insetInlineEnd: -3 }}
         draggable={false}
       />
     </span>

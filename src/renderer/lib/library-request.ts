@@ -1,3 +1,5 @@
+import { intlLocale, tl } from "./locale-state.ts";
+import type { MessageKey } from "../../i18n/keys.ts";
 // Ported from apps/web/src/lib/library-request.ts - keep in sync with the web copy.
 // No `@/` imports here on purpose: `npm run test:unit` runs this file under
 // plain `node --test`, which cannot resolve path aliases.
@@ -16,27 +18,31 @@ export function kindForFilter(filter: string): LibraryKind | null {
   return null;
 }
 
+/**
+ * Each kind's words. The text fields hold catalog keys, translated where they
+ * are shown (`tl(KIND_COPY[kind].title)`), so a language switch reaches them.
+ * `noun`/`nounPlural` stay English: they are `data-kind` values, not text.
+ */
 export const KIND_COPY: Record<LibraryKind, {
-  title: string; noun: string; nounPlural: string; searchPlaceholder: string; emptyTitle: string; emptyDescription: string; primaryDateLabel: string;
+  title: MessageKey; noun: string; nounPlural: string; searchPlaceholder: MessageKey; emptyTitle: MessageKey; emptyDescription: MessageKey; primaryDateLabel: MessageKey;
 }> = {
-  photos: { title: "Photos", noun: "photo", nounPlural: "photos", searchPlaceholder: "Search photos...", emptyTitle: "No photos yet", emptyDescription: "Photos you upload or sync to any folder will show up here, by month.", primaryDateLabel: "Date taken" },
-  videos: { title: "Videos", noun: "video", nounPlural: "videos", searchPlaceholder: "Search videos...", emptyTitle: "No videos yet", emptyDescription: "Videos you upload or sync to any folder will show up here, by month.", primaryDateLabel: "Date created" },
-  documents: { title: "Documents", noun: "document", nounPlural: "documents", searchPlaceholder: "Search documents...", emptyTitle: "No documents yet", emptyDescription: "Documents you upload or sync to any folder will show up here, by month.", primaryDateLabel: "Date created" },
+  photos: { title: "files.heading.photos", noun: "photo", nounPlural: "photos", searchPlaceholder: "files.status.searchPhotos", emptyTitle: "files.empty.noPhotosYet", emptyDescription: "files.label.photosYouUploadOrSyncToAnyFolderWill", primaryDateLabel: "files.label.dateTaken" },
+  videos: { title: "files.heading.videos", noun: "video", nounPlural: "videos", searchPlaceholder: "files.status.searchVideos", emptyTitle: "files.empty.noVideosYet", emptyDescription: "files.label.videosYouUploadOrSyncToAnyFolderWill", primaryDateLabel: "files.label.dateCreated" },
+  documents: { title: "common.label.documents", noun: "document", nounPlural: "documents", searchPlaceholder: "files.status.searchDocuments", emptyTitle: "files.empty.noDocumentsYet", emptyDescription: "files.label.documentsYouUploadOrSyncToAnyFolderWill", primaryDateLabel: "files.label.dateCreated" },
 };
 
 /** The wire sort values are the same for every kind; only the label of the primary date differs. */
 export function sortOptionsFor(kind: LibraryKind): { value: LibrarySort; label: string }[] {
-  const d = KIND_COPY[kind].primaryDateLabel;
   return [
-    { value: "taken_desc", label: `${d} · newest` },
-    { value: "taken_asc", label: `${d} · oldest` },
-    { value: "uploaded_desc", label: "Date uploaded · newest" },
+    { value: "taken_desc", label: tl("files.option.dateTakenNewest", { kind }) },
+    { value: "taken_asc", label: tl("files.option.dateTakenOldest", { kind }) },
+    { value: "uploaded_desc", label: tl("files.label.dateUploadedNewest") },
   ];
 }
 
+/** "1 photo", "23 videos": the count with the kind's noun, in the current language. */
 export function plural(kind: LibraryKind, n: number): string {
-  const c = KIND_COPY[kind];
-  return `${n.toLocaleString()} ${n === 1 ? c.noun : c.nounPlural}`;
+  return tl("files.label.kindCount", { kind, count: n });
 }
 
 /** A /api/files row plus what the library feed adds. Structurally assignable to FileBrowserPage's FileRow. */
@@ -144,7 +150,7 @@ export function mergeLibraryPages(pages: LibraryPage[]): Library {
 
 /** "Jun 15, 2024" - the hover caption under a tile. */
 export function formatItemDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  return new Date(unixSeconds * 1000).toLocaleDateString(intlLocale("en-US"), { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
 
 // ── Per-kind layout preference (grid vs. table) ─────────────

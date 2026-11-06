@@ -12,6 +12,8 @@ import { pinsToFeatures, buildClusterIndex, clustersInView, viewportBboxes } fro
 import { buildMapStyle, checkBasemapAvailable } from "@/lib/map/map-style";
 import { fileThumbUrl, fileRawUrl } from '@/lib/file-url';
 import { FileViewer, type ViewerFile } from "@/components/files/FileViewer";
+import { t as tNow, useDir, useT } from "@/lib/i18n";
+import type { T } from "../../i18n/translator";
 
 let pmtilesRegistered = false;
 function ensurePmtiles() {
@@ -51,7 +53,20 @@ function pinImageUrl(p: FilePin): string {
 const isRasterFile = (p: MapPin): p is FilePin =>
   p.kind === 'file' && RASTER_THUMB.has((p.extension || '').toLowerCase());
 
+/** MapLibre's UI strings for what this page shows, in the current language. */
+function mapLibreLocale(t: T): Record<string, string> {
+  return {
+    "Map.Title": t("navigation.label.map"),
+    "NavigationControl.ZoomIn": t("map.accessibility.zoomIn"),
+    "NavigationControl.ZoomOut": t("map.accessibility.zoomOut"),
+    "AttributionControl.ToggleAttribution": t("map.accessibility.toggleAttribution"),
+    "AttributionControl.MapFeedback": t("map.accessibility.mapFeedback"),
+    "Marker.Title": t("map.accessibility.mapMarker"),
+  };
+}
+
 export function MapPage() {
+  const t = useT();
   const navigate = useNavigate();
   const { active } = useWorkspace();
   const wsId = active?.id ?? "";
@@ -240,6 +255,10 @@ export function MapPage() {
           });
         }
       }
+      // Set before addTo(): MapLibre only fills in its English "Map marker"
+      // when the element has no label of its own. The module t, read now:
+      // this callback is memoised without the hook's t and runs on moveend.
+      el.setAttribute('aria-label', tNow('map.accessibility.mapMarker'));
       live.set(key, new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([item.lon, item.lat]).addTo(map));
     }
 
@@ -271,9 +290,13 @@ export function MapPage() {
       style: buildMapStyle(document.documentElement.classList.contains('dark'), false),
       center: [0, 20],
       zoom: 1.5,
-      attributionControl: { compact: true },
+      // Added by the direction effect below, which owns where it sits.
+      attributionControl: false,
+      // MapLibre's own UI text for the controls this page shows. (This
+      // MapLibre build defines AttributionControl.MapFeedback but never
+      // renders it, so the relabel effect below has nothing to update for it.)
+      locale: mapLibreLocale(t),
     });
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
     // Use the ref, not the captured closure: this handler is registered once on
     // mount, so a bare renderMarkers() would forever call the first render's
     // version (when pins were empty) and wipe markers on every pan/zoom.
@@ -285,6 +308,44 @@ export function MapPage() {
     return () => { map.remove(); mapRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Zoom and attribution sit at the end corner of the page: bottom-right, or
+  // bottom-left in a right-to-left language. Re-added when the direction flips;
+  // the canvas and the pins are not touched.
+  const dir = useDir();
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const pos = dir === 'rtl' ? 'bottom-left' : 'bottom-right';
+    const nav = new maplibregl.NavigationControl({ showCompass: false });
+    const attribution = new maplibregl.AttributionControl({ compact: true });
+    map.addControl(nav, pos);
+    map.addControl(attribution, pos);
+    return () => {
+      if (mapRef.current !== map) return;
+      map.removeControl(nav);
+      map.removeControl(attribution);
+    };
+  }, [dir]);
+
+  // MapLibre reads its locale once, at construction: after a switch, say the
+  // canvas, control and marker labels again in the chosen language.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.getCanvas().setAttribute("aria-label", t("navigation.label.map"));
+    const root = map.getContainer();
+    const relabel = (selector: string, label: string, title: boolean) => {
+      root.querySelectorAll(selector).forEach((el) => {
+        el.setAttribute("aria-label", label);
+        if (title) el.setAttribute("title", label);
+      });
+    };
+    relabel(".maplibregl-ctrl-zoom-in", t("map.accessibility.zoomIn"), true);
+    relabel(".maplibregl-ctrl-zoom-out", t("map.accessibility.zoomOut"), true);
+    relabel(".maplibregl-ctrl-attrib-button", t("map.accessibility.toggleAttribution"), true);
+    relabel(".maplibregl-marker", t("map.accessibility.mapMarker"), false);
+  }, [t]);
 
   // Re-render markers when data/index changes and once the map is ready.
   useEffect(() => {
@@ -309,12 +370,12 @@ export function MapPage() {
     map.once('styledata', () => renderMarkersRef.current());
   }, [dark, hasBasemap]);
 
-  const countParts = [`${counts.gps} located`];
-  if (counts.approximate > 0) countParts.push(`${counts.approximate} approximate`);
-  if (counts.pending > 0) countParts.push(`${counts.pending} scanning…`);
+  const countParts = [t("map.label.gpsLocated", { gps: counts.gps })];
+  if (counts.approximate > 0) countParts.push(t("map.label.approximateApproximate", { approximate: counts.approximate }));
+  if (counts.pending > 0) countParts.push(t("map.label.pendingScanning", { pending: counts.pending }));
 
   return (
-    <div className="absolute inset-0 flex overflow-hidden">
+    <div className="absolute inset-0 flex overflow-hidden" data-testid="map-page">
       {/* Map area fills the remaining space. `relative` is the positioning
           context for the overlays below; `flex-1 min-w-0` gives the map a real
           size. MapLibre forces `.maplibregl-map { position: relative }`, so the
@@ -322,7 +383,7 @@ export function MapPage() {
       <div className="relative flex-1 min-w-0 h-full overflow-hidden">
         <div ref={containerRef} className="h-full w-full" />
 
-      <div className="absolute top-4 left-4 z-10 flex flex-col items-start gap-2">
+      <div className="absolute top-4 inset-s-4 z-10 flex flex-col items-start gap-2">
         {/* Count chip */}
         <div className="rounded-full bg-background/90 backdrop-blur px-3 py-1.5 text-sm shadow flex items-center gap-2">
           <MapPinIcon className="size-4 text-muted-foreground" />
@@ -344,9 +405,9 @@ export function MapPage() {
           className="rounded-full bg-background/90 backdrop-blur px-3 py-1.5 text-xs shadow flex items-center gap-2 hover:bg-muted/60"
         >
           <span className={`relative w-8 h-4.5 rounded-full transition-colors ${showApprox ? 'bg-green-600' : 'bg-muted'}`}>
-            <span className={`absolute top-0.5 size-3.5 bg-white rounded-full shadow transition-all ${showApprox ? 'left-4' : 'left-0.5'}`} />
+            <span className={`absolute top-0.5 size-3.5 bg-white rounded-full shadow transition-all ${showApprox ? 'inset-s-4' : 'inset-s-0.5'}`} />
           </span>
-          Show approximate locations
+          {t("map.action.showApproximateLocations")}
         </button>
       </div>
 
@@ -357,8 +418,8 @@ export function MapPage() {
       )}
 
       {!loading && !hasBasemap && (
-        <div className="absolute bottom-4 left-4 z-10 rounded-lg border bg-[var(--color-bg)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] shadow-sm" style={{ borderColor: "var(--color-border)" }}>
-          Map background unavailable right now. Your pins still work.
+        <div className="absolute bottom-4 inset-s-4 z-10 rounded-lg border bg-[var(--color-bg)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] shadow-sm" style={{ borderColor: "var(--color-border)" }}>
+          {t("map.error.mapBackgroundUnavailableRightNowYourPinsStillWork")}
         </div>
       )}
 
@@ -370,17 +431,16 @@ export function MapPage() {
           <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
             <div className="pointer-events-auto flex flex-col items-center text-center" data-testid="map-empty">
               <MapPinIcon className="mb-3 size-10 text-[var(--color-text-muted)]" />
-              <p className="text-sm font-medium">No geotagged photos yet</p>
+              <p className="text-sm font-medium">{t("map.empty.noGeotaggedPhotosYet")}</p>
               <p className="mt-1 max-w-xs text-xs text-[var(--color-text-muted)]">
-                Photos taken on a phone usually carry GPS coordinates. Upload some and they
-                will appear here, on the spot they were taken.
+                {t("map.description.photosTakenOnAPhoneUsuallyCarryGPSCoordinates")}
               </p>
               <Link
                 to="/files"
                 className="mt-3 rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
-                Go to Files
+                {t("map.action.goToFiles")}
               </Link>
             </div>
           </div>
@@ -388,12 +448,12 @@ export function MapPage() {
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center text-center pointer-events-none">
             <MapPinIcon className="size-12 text-muted-foreground/30 mb-4" />
             <p className="text-sm font-medium text-muted-foreground mb-1">
-              {pins.length > 0 ? 'No pins to show' : 'No files or folders with a location yet'}
+              {pins.length > 0 ? t("map.label.noPinsToShow") : t("map.empty.noFilesOrFoldersWithALocationYet")}
             </p>
             <p className="text-xs text-muted-foreground">
               {pins.length > 0
-                ? 'All located items are approximate - enable the toggle above to see them.'
-                : 'Scanning your files for location…'}
+                ? t("map.description.allLocatedItemsAreApproximateEnableTheToggleAbove")
+                : t("map.status.scanningYourFilesForLocation")}
             </p>
           </div>
         )

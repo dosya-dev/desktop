@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { canGrantRole, permissionsBeyondGrantor } from "./role-grant.ts";
 
 /**
- * The registry as the API serves it: 35 keys. Every /api/roles payload carries
+ * The registry as the API serves it: 36 keys. Every /api/roles payload carries
  * the whole map for every role, built-in tiers included, which is what lets
  * the subset rule below apply to Admin and Viewer exactly as it does to a
  * custom role.
@@ -15,7 +15,7 @@ const REGISTRY = [
   "invite_members", "view_team_members", "manage_roles", "change_workspace_name", "change_workspace_icon",
   "change_max_file_size", "change_storage_per_member", "change_total_storage_cap",
   "change_max_concurrent_uploads", "change_allowed_file_types", "change_blocked_file_types",
-  "change_duplicate_scan", "manage_settings", "view_activity", "lock_files", "hide_files",
+  "change_duplicate_scan", "change_ai_search", "manage_settings", "view_activity", "lock_files", "hide_files",
   "access_dashboard", "access_files", "access_upload", "access_shared", "access_team",
   "access_settings", "access_webdav", "access_s3", "access_sftp",
 ] as const;
@@ -28,7 +28,7 @@ function only(...granted: string[]): Record<string, boolean> {
 
 /** The seeded owner: every key true. */
 const OWNER_PERMS = only(...REGISTRY);
-/** The seeded admin: 33 true, lock_files and hide_files false (migrations 0021/0023). */
+/** The seeded admin: 34 true, lock_files and hide_files false (migrations 0021/0023). */
 const ADMIN_PERMS = only(...REGISTRY.filter((k) => k !== "lock_files" && k !== "hide_files"));
 const MEMBER_PERMS = only(
   "upload_files", "download_files", "delete_own_files", "rename_files", "create_folders",

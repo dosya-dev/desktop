@@ -2,6 +2,7 @@
 import { useCallback, useMemo } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api-client";
+import { t } from "@/lib/i18n";
 import {
   mergeLibraryPages, libraryQueryKey, libraryRequestPath, LIBRARY_QUERY_ROOT,
   type Library, type LibraryPage, type LibraryView,
@@ -18,7 +19,7 @@ export interface LibraryResult extends Library {
 
 async function fetchLibraryPage(path: string): Promise<LibraryPage> {
   const data = await api.get<LibraryPage>(path);
-  if (!data.ok) throw new Error("Your library could not be loaded.");
+  if (!data.ok) throw new Error(t("files.error.yourLibraryCouldNotBeLoaded"));
   return data;
 }
 
@@ -74,7 +75,7 @@ export function useLibrary(view: LibraryView | null): LibraryResult {
     isLoading: query.isLoading,
     isPlaceholder: query.isPlaceholderData,
     isLoadingMore: query.isFetchingNextPage,
-    error: query.isError ? (query.error instanceof ApiError ? query.error.message : "Your library could not be loaded.") : null,
+    error: query.isError ? (query.error instanceof ApiError ? query.error.message : t("files.error.yourLibraryCouldNotBeLoaded")) : null,
     loadMore,
     refresh,
   };

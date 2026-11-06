@@ -82,6 +82,21 @@ describe("reconciliation with persisted sync history", () => {
     expect(actions[0]).toMatchObject({ conflict: { remoteId: "file", localSizeBytes: 23, remoteSizeBytes: 40 } });
   });
 
+  it("last-write-wins carries the scanned local state on a download-update over an edit", async () => {
+    await writeFile(join(root, "notes.txt"), "a longer local revision");
+    const scanned = await stat(join(root, "notes.txt"));
+    const lww = { ...pair, conflictStrategy: "last-write-wins" as const };
+    const actions = await reconcile(lww, snapshot({ ...file, current_version: 2, updated_at: Date.now() + 3_600_000, size_bytes: 40 }), base());
+    expect(actions.map(action => action.type)).toEqual(["download-update"]);
+    expect(actions[0]).toMatchObject({ expectedLocal: { sizeBytes: scanned.size, mtimeMs: scanned.mtimeMs } });
+  });
+
+  it("the remote-only path leaves expectedLocal unset so the base record is the baseline", async () => {
+    const actions = await reconcileRemoteOnly(pair, snapshot({ ...file, current_version: 2, updated_at: 200 }), base());
+    expect(actions[0]).toMatchObject({ type: "download-update" });
+    expect((actions[0] as { expectedLocal?: unknown }).expectedLocal).toBeUndefined();
+  });
+
   it("does not redownload an unchanged tracked file on the remote-only path", async () => {
     const actions = await reconcileRemoteOnly(pair, snapshot(file), base());
     expect(actions).toEqual([]);
@@ -114,6 +129,81 @@ describe("reconciliation with persisted sync history", () => {
     await writeFile(join(root, "renamed.txt"), "a longer local revision");
     expect((await reconcile(pair, snapshot(moved), base())).map(action => action.type)).toEqual(["upload-update"]);
   });
+
+  it("leaves case-colliding remote files out of the plan and reports them", async () => {
+    const upper: RemoteFileInfo = { ...file, id: "upper", name: "Notes.txt", size_bytes: 5 };
+    const lower: RemoteFileInfo = { ...file, id: "lower", name: "notes.txt", size_bytes: 7 };
+    const reported: { remoteId: string; relPath: string }[][] = [];
+    // A base row at the collided key whose remote id is absent from the
+    // snapshot: the stale sweep would drop it if it did not skip collided keys.
+    index.upsertFile(pair.id, {
+      remoteId: "gone", remoteName: "Notes.txt", remoteFolderId: "folder",
+      remoteSizeBytes: 5, remoteUpdatedAt: 1, remoteVersion: 1,
+      localPath: "Notes.txt", localSizeBytes: 5, localMtimeMs: 1, syncedAt: 1,
+    });
+    const stale: string[] = [];
+    const actions = await reconcile(
+      pair, { files: new Map([[upper.id, upper], [lower.id, lower]]), folders: new Map() }, base(),
+      undefined, undefined, undefined, undefined, (ids) => stale.push(...ids),
+      (groups) => reported.push(...groups),
+    );
+    const folds = process.platform === "darwin" || process.platform === "win32";
+    if (folds) {
+      expect(stale).not.toContain("gone");
+      expect(stale).not.toContain("upper");
+      expect(stale).not.toContain("lower");
+      expect(actions.filter((a) => a.type !== "create-local-folder")).toEqual([]);
+      expect(reported.map((g) => g.map((m) => m.remoteId).sort())).toEqual([["lower", "upper"]]);
+    } else {
+      expect(reported).toEqual([]);
+    }
+  });
+
+  it("reconcileRemoteOnly does not download a new case twin over a synced file", async () => {
+    const twin: RemoteFileInfo = { ...file, id: "twin", name: "Notes.txt", size_bytes: 9 };
+    const reported: { remoteId: string; relPath: string }[][] = [];
+    const actions = await reconcileRemoteOnly(
+      pair, { files: new Map([[file.id, file], [twin.id, twin]]), folders: new Map() }, base(),
+      undefined, undefined, (groups) => reported.push(...groups),
+    );
+    const downloads = actions.filter((a) => a.type === "download-new");
+    if (process.platform === "darwin" || process.platform === "win32") {
+      expect(downloads).toEqual([]);
+      expect(reported.map((g) => g.map((m) => m.remoteId).sort())).toEqual([["file", "twin"]]);
+    } else {
+      expect(downloads).toHaveLength(1);
+      expect(reported).toEqual([]);
+    }
+  });
+
+  it.skipIf(process.platform !== "darwin" && process.platform !== "win32")(
+    "a renamed twin is no longer blocked by the previous cycle's collision rows", async () => {
+      const upper: RemoteFileInfo = { ...file, id: "upper", name: "Report.txt", size_bytes: 5 };
+      const lower: RemoteFileInfo = { ...file, id: "lower", name: "report.txt", size_bytes: 7 };
+      const engine = new SyncEngine("https://example.test", { ...NULL_ENV, userDataDir: join(directory, "appdata") }) as any;
+      Object.defineProperty(engine, "index", { value: index });
+      engine.started = true;
+      engine.emitStatus = () => {};
+      engine.log = () => {};
+      engine.flushSyncFlags = async () => {};
+      const planned: string[][] = [];
+      engine.executeActions = async (_rt: unknown, actions: { type: string }[]) => { planned.push(actions.map((a) => a.type)); };
+      const rt = {
+        pair, state: EMPTY_PAIR_STATE(pair.id), status: "idle", notices: new Map(), syncing: false,
+        localDirty: true, lastFullLocalScanAt: 0,
+        poller: new RemotePoller({ fetchSnapshotFast: async () => ({ files: [], folders: [], deleted: { files: [], folders: [] } }) } as any, pair),
+      };
+      engine.runtimes.set(pair.id, rt);
+      await engine.runReconcile(pair.id, { files: new Map([[upper.id, upper], [lower.id, lower]]), folders: new Map() });
+      expect(index.getError(pair.id, "Report.txt")?.permanent).toBe(true);
+      expect(index.getError(pair.id, "report.txt")?.permanent).toBe(true);
+      // The user renamed "Report.txt" on the web: only the survivor remains.
+      rt.localDirty = true;
+      await engine.runReconcile(pair.id, { files: new Map([[lower.id, lower]]), folders: new Map() });
+      expect(index.getError(pair.id, "report.txt")).toBeUndefined();
+      expect(index.getError(pair.id, "Report.txt")).toBeUndefined();
+      expect(planned[1]).toContain("download-new");
+    });
 
   it("prunes confirmed records absent on both sides before their path is reused", async () => {
     await rm(join(root, "notes.txt"));

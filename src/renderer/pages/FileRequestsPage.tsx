@@ -16,8 +16,11 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
-import { formatDate, formatRelative } from "@/lib/format";
+import { formatBytes, formatDate, formatRelative } from "@/lib/format";
 import { toast } from "sonner";
+import { autoDir, useAutoDir } from "@/lib/bidi-ui";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "../../i18n/keys";
 
 interface FileRequest {
   id: string;
@@ -78,22 +81,18 @@ const STATUS_STYLE: Record<RequestStatus, string> = {
   closed: "bg-[var(--color-bg-tertiary)] text-[var(--color-text-muted)]",
 };
 
-const STATUS_LABEL: Record<RequestStatus, string> = {
-  active: "Active", full: "Full", expired: "Expired", closed: "Closed",
+const STATUS_LABEL: Record<RequestStatus, MessageKey> = {
+  active: "file-requests.status.active",
+  full: "file-requests.status.full",
+  expired: "common.status.expired",
+  closed: "file-requests.status.closed",
 };
 
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let i = 0;
-  while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
-  return `${value.toFixed(1)} ${units[i]}`;
-}
-
 export function FileRequestsPage() {
+  const ownDir = useAutoDir();
   const { active } = useWorkspace();
   const queryClient = useQueryClient();
+  const t = useT();
   const [showCreate, setShowCreate] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [closeTarget, setCloseTarget] = useState<FileRequest | null>(null);
@@ -129,9 +128,9 @@ export function FileRequestsPage() {
       queryClient.invalidateQueries({ queryKey: ["file-requests"] });
       setShowCreate(false);
       setTitle(""); setEmail(""); setMessage(""); setMaxFiles(""); setExpiryDays("7");
-      toast.success(email.trim() ? "File request sent" : "File request created");
+      toast.success(email.trim() ? t("file-requests.label.fileRequestSent") : t("file-requests.label.fileRequestCreated"));
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed")),
   });
 
   const closeMut = useMutation({
@@ -140,9 +139,9 @@ export function FileRequestsPage() {
       queryClient.invalidateQueries({ queryKey: ["file-requests"] });
       // DELETE sets is_revoked = 1 and keeps the row. Calling it a delete made
       // the request's continued presence in this list look like a bug.
-      toast.success("Request closed");
+      toast.success(t("file-requests.label.requestClosed"));
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed")),
   });
 
   const requests = data?.requests ?? [];
@@ -150,12 +149,12 @@ export function FileRequestsPage() {
   const detail = requests.find((r) => r.id === detailId) ?? null;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-testid="file-requests-page">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">File Requests</h1>
+          <h1 className="text-2xl font-semibold">{t("file-requests.heading.fileRequests")}</h1>
           <p className="text-sm text-[var(--color-text-muted)]">
-            Request files from anyone - they don't need an account
+            {t("file-requests.description.requestFilesFromAnyoneTheyDonTNeedAn")}
           </p>
         </div>
         <button
@@ -164,7 +163,7 @@ export function FileRequestsPage() {
           className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
-          <Plus size={14} /> New request
+          <Plus size={14} /> {t("file-requests.action.newRequest")}
         </button>
       </div>
 
@@ -173,8 +172,8 @@ export function FileRequestsPage() {
       ) : requests.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }} data-testid="requests-empty">
           <FileUp size={36} className="mb-3 text-[var(--color-text-muted)]" />
-          <p className="text-sm font-medium">No file requests yet</p>
-          <p className="mt-1 text-xs text-[var(--color-text-muted)]">Create a request to receive files from anyone</p>
+          <p className="text-sm font-medium">{t("file-requests.empty.noFileRequestsYet")}</p>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">{t("file-requests.description.createARequestToReceiveFilesFromAnyone")}</p>
         </div>
       ) : (
         // One bordered card of rows, matching apps/web's file requests list.
@@ -184,7 +183,7 @@ export function FileRequestsPage() {
           {requests.map((req) => {
             const status = requestStatus(req, now);
             const revoked = req.is_revoked === 1;
-            const title = req.title || "Untitled request";
+            const title = req.title || t("file-requests.label.untitledRequest");
             return (
               <div
                 key={req.id}
@@ -197,31 +196,31 @@ export function FileRequestsPage() {
                 </div>
 
                 <div className="min-w-0 flex-1">
-                  <p className={`truncate text-sm font-medium ${revoked ? "line-through" : ""}`} title={title}>
+                  <p dir={req.title ? ownDir : undefined} className={`truncate text-sm font-medium ${revoked ? "line-through" : ""}`} title={title}>
                     {title}
                   </p>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_STYLE[status]}`}>
-                      {STATUS_LABEL[status]}
+                      {t(STATUS_LABEL[status])}
                     </span>
                     <span className="rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)]">
-                      {req.upload_count} file{req.upload_count === 1 ? "" : "s"}
+                      {t("common.label.fileSentenceCase", { fileCount: req.upload_count })}
                     </span>
                     {req.is_password_protected === 1 && (
                       <span className="flex items-center gap-1 rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-[10px] font-medium text-[var(--color-text-secondary)]">
-                        <Lock size={9} /> Password
+                        <Lock size={9} /> {t("common.label.password")}
                       </span>
                     )}
-                    <span className="truncate text-[11px] text-[var(--color-text-muted)]">
-                      {req.folder_name ?? (req.folder_id ? "Unknown folder" : "Workspace root")}
+                    <span dir={req.folder_name != null ? ownDir : undefined} className="truncate text-[11px] text-[var(--color-text-muted)]">
+                      {req.folder_name ?? (req.folder_id ? t("file-requests.label.unknownFolder") : t("file-requests.label.workspaceRoot"))}
                     </span>
                     {req.expires_at && (
                       <span className="flex items-center gap-1 text-[11px] text-[var(--color-text-muted)]">
-                        <Clock size={10} /> Expires {formatDate(req.expires_at)}
+                        <Clock size={10} /> {t("common.label.expiresDate", { date: formatDate(req.expires_at) })}
                       </span>
                     )}
                     <span className="text-[11px] text-[var(--color-text-muted)]">
-                      Created {formatRelative(req.created_at)}
+                      {t("file-requests.label.createdDate", { date: formatRelative(req.created_at) })}
                     </span>
                   </div>
                 </div>
@@ -233,16 +232,16 @@ export function FileRequestsPage() {
                     className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs hover:bg-[var(--color-bg-tertiary)]"
                     style={{ borderColor: "var(--color-border)" }}
                   >
-                    Details <ChevronRight size={11} />
+                    {t("common.action.details")} <ChevronRight size={11} className="rtl:-scale-x-100" />
                   </button>
                   {!revoked && (
                     <button
                       data-testid={`request-${req.id}-copy`}
-                      onClick={() => { navigator.clipboard.writeText(req.url); toast.success("Link copied"); }}
+                      onClick={() => { navigator.clipboard.writeText(req.url); toast.success(t("common.label.linkCopied")); }}
                       className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs hover:bg-[var(--color-bg-tertiary)]"
                       style={{ borderColor: "var(--color-border)" }}
                     >
-                      <Copy size={11} /> Copy link
+                      <Copy size={11} /> {t("common.action.copyLink")}
                     </button>
                   )}
                   {!revoked && (
@@ -252,7 +251,7 @@ export function FileRequestsPage() {
                       className="flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10"
                       style={{ borderColor: "color-mix(in oklab, var(--color-danger) 30%, transparent)" }}
                     >
-                      <Lock size={11} /> Close
+                      <Lock size={11} /> {t("file-requests.action.close.request")}
                     </button>
                   )}
                 </div>
@@ -266,35 +265,35 @@ export function FileRequestsPage() {
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-md rounded-xl bg-[var(--color-bg)] p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-4 text-lg font-semibold">New file request</h3>
+            <h3 className="mb-4 text-lg font-semibold">{t("file-requests.heading.newFileRequest")}</h3>
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block text-sm font-medium">Title *</label>
-                <input data-testid="create-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder="e.g. Brand assets for Q2 campaign" className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
+                <label className="mb-1 block text-sm font-medium">{t("file-requests.label.title")}</label>
+                <input data-testid="create-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder={t("file-requests.placeholder.eGBrandAssetsForQ2Campaign")} className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium">Invite by email (optional)</label>
-                <input data-testid="create-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="recipient@example.com" className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
+                <label className="mb-1 block text-sm font-medium">{t("file-requests.label.inviteByEmailOptional")}</label>
+                <input data-testid="create-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t("file-requests.placeholder.recipientExampleCom")} className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium">Message (optional)</label>
-                <textarea data-testid="create-message" value={message} onChange={(e) => setMessage(e.target.value)} rows={2} placeholder="Any instructions for the uploader..." className="w-full resize-none rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
+                <label className="mb-1 block text-sm font-medium">{t("common.label.messageOptional")}</label>
+                <textarea data-testid="create-message" value={message} onChange={(e) => setMessage(e.target.value)} rows={2} placeholder={t("file-requests.placeholder.anyInstructionsForTheUploader")} className="w-full resize-none rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-sm font-medium">Expires in (days)</label>
+                  <label className="mb-1 block text-sm font-medium">{t("file-requests.label.expiresInDays")}</label>
                   <input data-testid="create-expiry" type="number" value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)} min={1} max={90} className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-medium">Max files</label>
-                  <input data-testid="create-max-files" type="number" value={maxFiles} onChange={(e) => setMaxFiles(e.target.value)} min={1} placeholder="Unlimited" className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
+                  <label className="mb-1 block text-sm font-medium">{t("file-requests.label.maxFiles")}</label>
+                  <input data-testid="create-max-files" type="number" value={maxFiles} onChange={(e) => setMaxFiles(e.target.value)} min={1} placeholder={t("file-requests.placeholder.unlimited")} className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]" style={{ borderColor: "var(--color-border)" }} />
                 </div>
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
-              <button data-testid="create-cancel" onClick={() => setShowCreate(false)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>Cancel</button>
+              <button data-testid="create-cancel" onClick={() => setShowCreate(false)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>{t("common.cancel")}</button>
               <button data-testid="create-submit" onClick={() => createMut.mutate()} disabled={!title.trim() || createMut.isPending} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50" style={{ background: "var(--color-primary)" }}>
-                {createMut.isPending ? "Creating..." : "Create request"}
+                {createMut.isPending ? t("common.status.creating") : t("file-requests.action.createRequest")}
               </button>
             </div>
           </div>
@@ -305,20 +304,19 @@ export function FileRequestsPage() {
       {closeTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl">
-            <h3 className="text-lg font-semibold">Close this request?</h3>
+            <h3 className="text-lg font-semibold">{t("file-requests.heading.closeThisRequest")}</h3>
             <p className="mt-2 text-sm text-[var(--color-text-muted)]">
-              It stops accepting uploads. Files already received are kept, and the
-              request stays in this list marked Closed.
+              {t("file-requests.description.itStopsAcceptingUploadsFilesAlreadyReceivedAreKept")}
             </p>
             <div className="mt-5 flex justify-end gap-2">
-              <button data-testid="close-cancel" onClick={() => setCloseTarget(null)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>Cancel</button>
+              <button data-testid="close-cancel" onClick={() => setCloseTarget(null)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>{t("common.cancel")}</button>
               <button
                 data-testid="close-confirm"
-                onClick={() => { const t = closeTarget; setCloseTarget(null); closeMut.mutate(t.id); }}
+                onClick={() => { const target = closeTarget; setCloseTarget(null); closeMut.mutate(target.id); }}
                 className="rounded-lg px-4 py-2 text-sm font-medium text-white"
                 style={{ background: "var(--color-danger)" }}
               >
-                Close request
+                {t("file-requests.action.closeRequest")}
               </button>
             </div>
           </div>
@@ -337,9 +335,15 @@ export function FileRequestsPage() {
  * desktop's shell has no nested routing for it.
  */
 function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClose: () => void }) {
+  const ownDir = useAutoDir();
   const queryClient = useQueryClient();
+  const t = useT();
   const [newEmail, setNewEmail] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
+  // The server's own sentence takes its own direction; the fallback follows the page.
+  const [addErrorRaw, setAddErrorRaw] = useState(false);
+  // The client's own check, translated at render so it follows a switch.
+  const [addInvalid, setAddInvalid] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(request.title ?? "");
   const [editMessage, setEditMessage] = useState(request.message ?? "");
@@ -365,27 +369,27 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
     onSuccess: () => { setNewEmail(""); setAddError(null); invalidate(); },
     // 409 (already a recipient) and 410 (request closed) are both about the
     // address just typed, so they belong beside the field.
-    onError: (e) => setAddError(e instanceof ApiError ? e.message : "Could not add that address"),
+    onError: (e) => { setAddError(e instanceof ApiError ? e.message : t("file-requests.error.couldNotAddThatAddress")); setAddErrorRaw(e instanceof ApiError); },
   });
 
   const removeMut = useMutation({
     mutationFn: (recipientId: string) =>
       api.delete(`/api/file-requests/${request.id}/recipients?recipient_id=${recipientId}`),
     onSuccess: invalidate,
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed")),
   });
 
   const resendMut = useMutation({
     mutationFn: (recipientId: string) =>
       api.post(`/api/file-requests/${request.id}/resend`, { recipient_id: recipientId }),
-    onSuccess: () => toast.success("Invite resent"),
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
+    onSuccess: () => toast.success(t("file-requests.label.inviteResent")),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed")),
   });
 
   const editMut = useMutation({
     mutationFn: (body: Record<string, unknown>) => api.patch(`/api/file-requests/${request.id}`, body),
-    onSuccess: () => { setEditing(false); invalidate(); toast.success("Request updated"); },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
+    onSuccess: () => { setEditing(false); invalidate(); toast.success(t("file-requests.label.requestUpdated")); },
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed")),
   });
 
   const uploads = uploadsQ.data?.uploads ?? [];
@@ -406,48 +410,48 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
       <aside
         data-testid="request-detail"
         onClick={(e) => e.stopPropagation()}
-        className="flex h-full w-[420px] flex-col overflow-y-auto border-l bg-[var(--color-bg)]"
+        className="flex h-full w-[420px] flex-col overflow-y-auto border-s bg-[var(--color-bg)]"
         style={{ borderColor: "var(--color-border)" }}
       >
         <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
-          <p className="truncate text-sm font-semibold">{request.title || "Untitled request"}</p>
+          <p dir={request.title ? ownDir : undefined} className="truncate text-sm font-semibold">{request.title || t("file-requests.label.untitledRequest")}</p>
           <button data-testid="request-detail-close" onClick={onClose} className="text-[var(--color-text-muted)]">
             <X size={16} />
           </button>
         </div>
 
         <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
-          <p data-testid="request-detail-url" className="break-all font-mono text-xs text-[var(--color-text-muted)]">
+          <p data-testid="request-detail-url" dir="ltr" className="ltr-value break-all font-mono text-xs text-[var(--color-text-muted)]">
             {request.url}
           </p>
           <button
             data-testid="request-detail-copy"
-            onClick={() => { navigator.clipboard.writeText(request.url); toast.success("Link copied"); }}
+            onClick={() => { navigator.clipboard.writeText(request.url); toast.success(t("common.label.linkCopied")); }}
             className="mt-2 flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs"
             style={{ borderColor: "var(--color-border)" }}
           >
-            <Copy size={11} /> Copy link
+            <Copy size={11} /> {t("common.action.copyLink")}
           </button>
         </div>
 
         {/* Uploads */}
         <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
-            Uploads ({uploads.length})
+            {t("file-requests.description.uploadsUploadCount", { uploadCount: uploads.length })}
           </p>
           {uploadsQ.isLoading ? (
             <Loader2 size={14} className="animate-spin text-[var(--color-text-muted)]" />
           ) : uploads.length === 0 ? (
             <p data-testid="request-uploads-empty" className="text-xs text-[var(--color-text-muted)]">
-              Nothing uploaded yet.
+              {t("file-requests.empty.nothingUploadedYet")}
             </p>
           ) : (
             <div className="space-y-2">
               {uploads.map((u) => (
                 <div key={u.id} data-testid={`upload-${u.id}`} className="flex items-center gap-2 text-xs">
                   <FileUp size={12} className="shrink-0 text-[var(--color-text-muted)]" />
-                  <span className="flex-1 truncate">{u.file_name}</span>
-                  <span className="text-[var(--color-text-muted)]">{humanSize(u.size_bytes)}</span>
+                  <span dir={ownDir} className="flex-1 truncate">{u.file_name}</span>
+                  <span className="text-[var(--color-text-muted)]">{formatBytes(u.size_bytes)}</span>
                 </div>
               ))}
             </div>
@@ -458,7 +462,7 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
         <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
           <div className="mb-2 flex items-center justify-between">
             <p className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
-              Recipients ({recipients.length})
+              {t("file-requests.description.recipientsRecipientCount", { recipientCount: recipients.length })}
             </p>
             {pending.length > 0 && !closed && (
               <button
@@ -466,37 +470,37 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                 onClick={() => pending.forEach((r) => resendMut.mutate(r.id))}
                 className="text-xs font-medium text-[var(--color-primary)]"
               >
-                Resend all ({pending.length})
+                {t("file-requests.action.resendAllPendingCount", { pendingCount: pending.length })}
               </button>
             )}
           </div>
           {recipients.length === 0 ? (
             <p data-testid="request-recipients-empty" className="text-xs text-[var(--color-text-muted)]">
-              Nobody invited. The link works on its own.
+              {t("file-requests.description.nobodyInvitedTheLinkWorksOnItsOwn")}
             </p>
           ) : (
             <div className="space-y-2">
               {recipients.map((r) => (
                 <div key={r.id} data-testid={`recipient-${r.id}`} className="flex items-center gap-2 text-xs">
                   <Mail size={12} className="shrink-0 text-[var(--color-text-muted)]" />
-                  <span className="flex-1 truncate">{r.email}</span>
+                  <span dir="ltr" className="ltr-value flex-1 truncate">{r.email}</span>
                   <span className="text-[var(--color-text-muted)]">
-                    {r.uploaded_at ? "Uploaded" : r.sent_at ? "Invited" : "Not sent"}
+                    {r.uploaded_at ? t("common.status.uploaded") : r.sent_at ? t("common.status.invited") : t("file-requests.label.notSent")}
                   </span>
                   {!r.uploaded_at && !closed && (
                     <button
                       data-testid={`recipient-${r.id}-resend`}
                       onClick={() => resendMut.mutate(r.id)}
-                      title="Resend invite"
+                      title={t("file-requests.tooltip.resendInvite")}
                       className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
                     >
-                      <Send size={12} />
+                      <Send size={12} className="rtl:-scale-x-100" />
                     </button>
                   )}
                   <button
                     data-testid={`recipient-${r.id}-remove`}
                     onClick={() => removeMut.mutate(r.id)}
-                    title="Remove recipient"
+                    title={t("file-requests.tooltip.removeRecipient")}
                     className="text-[var(--color-text-muted)] hover:text-[var(--color-danger)]"
                   >
                     <Trash2 size={12} />
@@ -514,8 +518,8 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                   data-testid="recipient-add-input"
                   type="email"
                   value={newEmail}
-                  onChange={(e) => { setNewEmail(e.target.value); if (addError) setAddError(null); }}
-                  placeholder="Invite another address"
+                  onChange={(e) => { setNewEmail(e.target.value); if (addError) setAddError(null); setAddInvalid(false); }}
+                  placeholder={t("file-requests.placeholder.inviteAnotherAddress")}
                   className="flex-1 rounded-lg border px-2.5 py-1.5 text-xs outline-none focus:border-[var(--color-primary)]"
                   style={{ borderColor: "var(--color-border)" }}
                 />
@@ -523,7 +527,8 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                   data-testid="recipient-add"
                   onClick={() => {
                     const value = newEmail.trim().toLowerCase();
-                    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) { setAddError("Enter a valid email address"); return; }
+                    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) { setAddError(null); setAddInvalid(true); return; }
+                    setAddInvalid(false);
                     addMut.mutate(value);
                   }}
                   disabled={addMut.isPending}
@@ -533,8 +538,8 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                   <Plus size={12} />
                 </button>
               </div>
-              {addError && (
-                <p data-testid="recipient-add-error" className="mt-1 text-xs text-[var(--color-danger)]">{addError}</p>
+              {(addInvalid || addError) && (
+                <p data-testid="recipient-add-error" dir={!addInvalid && addErrorRaw ? ownDir : undefined} className="mt-1 text-xs text-[var(--color-danger)]">{addInvalid ? t("file-requests.error.enterAValidEmailAddress") : addError}</p>
               )}
             </div>
           )}
@@ -548,7 +553,7 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                 data-testid="request-edit-title"
                 value={editTitle}
                 onChange={(e) => setEditTitle(e.target.value)}
-                placeholder="Title"
+                placeholder={t("file-requests.placeholder.title")}
                 className="w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none focus:border-[var(--color-primary)]"
                 style={{ borderColor: "var(--color-border)" }}
               />
@@ -557,13 +562,13 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                 value={editMessage}
                 onChange={(e) => setEditMessage(e.target.value)}
                 rows={2}
-                placeholder="Message"
+                placeholder={t("file-requests.placeholder.message")}
                 className="w-full resize-none rounded-lg border px-2.5 py-1.5 text-xs outline-none focus:border-[var(--color-primary)]"
                 style={{ borderColor: "var(--color-border)" }}
               />
               <div className="flex justify-end gap-2">
                 <button data-testid="request-edit-cancel" onClick={() => setEditing(false)} className="text-xs text-[var(--color-text-muted)]">
-                  Cancel
+                  {t("common.cancel")}
                 </button>
                 <button
                   data-testid="request-edit-save"
@@ -571,7 +576,7 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
                   disabled={editMut.isPending}
                   className="text-xs font-medium text-[var(--color-primary)] disabled:opacity-50"
                 >
-                  Save
+                  {t("common.save")}
                 </button>
               </div>
             </div>
@@ -581,7 +586,7 @@ function RequestDetailPanel({ request, onClose }: { request: FileRequest; onClos
               onClick={() => setEditing(true)}
               className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
             >
-              <Pencil size={12} /> Edit title and message
+              <Pencil size={12} /> {t("file-requests.label.editTitleAndMessage")}
             </button>
           )}
         </div>

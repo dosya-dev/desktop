@@ -5,7 +5,9 @@ import { useAuth } from "@/lib/auth-context";
 import { useWorkspace } from "@/lib/workspace-context";
 import { useAvatarVersion, avatarUrl } from "@/lib/avatar-version";
 import { formatRelative } from "@/lib/format";
-import { actionLabel, actionColor } from "@/lib/activity-labels";
+import { actionLabel, actionColor, actionSentenceKey } from "@/lib/activity-labels";
+import { formatters, useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
@@ -50,6 +52,9 @@ export function ActivityPage() {
   const { active } = useWorkspace();
   const { user } = useAuth();
   const avatarVersion = useAvatarVersion((s) => s.version);
+  const t = useT();
+  // Same grouping as the header's ICU total, so "1,234" reads alike in both.
+  const { formatNumber } = formatters();
   const [page, setPage] = useState(1);
   const [apiBase, setApiBase] = useState("");
   const perPage = 50;
@@ -71,20 +76,20 @@ export function ActivityPage() {
   const pagination = data?.pagination;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-testid="activity-page">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-semibold">Activity log</h1>
+        <h1 className="text-2xl font-semibold">{t("activity.heading.activityLog")}</h1>
         <p className="text-sm text-[var(--color-text-muted)]">
           {isLoading
-            ? "Loading..."
+            ? t("activity.status.loading")
             : isError
-              ? "Couldn't load activity. Check your connection and try again."
+              ? t("activity.error.couldnTLoadActivityCheckYourConnectionAndTry")
               : pagination
-                ? `${pagination.total} activities in this workspace`
+                ? t("activity.description.totalActivitiesInThisWorkspace", { total: pagination.total })
                 : activities.length > 0
-                  ? `${activities.length} activities`
-                  : "No activity yet"}
+                  ? t("activity.description.activitiecountActivities", { activitieCount: activities.length })
+                  : t("activity.empty.noActivityYet")}
         </p>
       </div>
 
@@ -110,17 +115,17 @@ export function ActivityPage() {
             ))}
           </div>
         ) : isError ? (
-          <ErrorPanel message="Couldn't load activity." onRetry={() => refetch()} />
+          <ErrorPanel message={t("activity.error.couldnTLoadActivity")} onRetry={() => refetch()} />
         ) : activities.length === 0 ? (
           <div className="py-16 text-center text-sm text-[var(--color-text-muted)]">
-            No activity yet.
+            {t("activity.label.noActivityYet")}
           </div>
         ) : (
           activities.map((a, i) => {
-            const label = actionLabel(a.action);
+            const sentenceKey = actionSentenceKey(a.action);
             const color = actionColor(a.action);
             const initials = getInitials(a.user_name);
-            const userName = a.user_name ?? "Someone";
+            const userName = a.user_name ?? t("activity.label.someone");
 
             // Build meta tags
             const tags: string[] = [];
@@ -128,8 +133,14 @@ export function ActivityPage() {
             if (a.meta?.email) tags.push(a.meta.email);
             if (a.meta?.old_name && a.meta?.new_name)
               tags.push(`${a.meta.old_name} → ${a.meta.new_name}`);
-            if (a.meta?.file_count) tags.push(`${a.meta.file_count} files`);
-            if (a.meta?.via) tags.push(`via ${a.meta.via}`);
+            if (a.meta?.file_count) tags.push(t("common.label.filecountFiles", { fileCount: a.meta.file_count }));
+            if (a.meta?.via) tags.push(t("activity.label.viaVia", { via: a.meta.via }));
+
+            const actorName = (
+              <span className="font-semibold text-[var(--color-text)]">
+                {userName}
+              </span>
+            );
 
             return (
               <div
@@ -162,10 +173,15 @@ export function ActivityPage() {
                 {/* Body */}
                 <div className="min-w-0 flex-1">
                   <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
-                    <span className="font-semibold text-[var(--color-text)]">
-                      {userName}
-                    </span>{" "}
-                    {label}
+                    {/* One message per row, keyed by the event code; the
+                        person's name lands wherever the language puts {actor}. */}
+                    {sentenceKey ? (
+                      richText(t, sentenceKey, {}, { actor: actorName })
+                    ) : (
+                      <>
+                        {actorName} {actionLabel(a.action)}
+                      </>
+                    )}
                   </p>
                   <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
                     {formatRelative(a.created_at)}
@@ -193,17 +209,15 @@ export function ActivityPage() {
       {pagination && pagination.total_pages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-xs text-[var(--color-text-muted)]">
-            <span className="font-medium text-[var(--color-text)]">
-              {(pagination.page - 1) * pagination.per_page + 1} to{" "}
-              {Math.min(
-                pagination.page * pagination.per_page,
-                pagination.total,
-              )}
-            </span>{" "}
-            of{" "}
-            <span className="font-medium text-[var(--color-text)]">
-              {pagination.total}
-            </span>
+            {richText(t, "activity.label.startToEndOfTotal", {}, {
+              start: <span className="font-medium text-[var(--color-text)]">{formatNumber((pagination.page - 1) * pagination.per_page + 1)}</span>,
+              end: (
+                <span className="font-medium text-[var(--color-text)]">
+                  {formatNumber(Math.min(pagination.page * pagination.per_page, pagination.total))}
+                </span>
+              ),
+              total: <span className="font-medium text-[var(--color-text)]">{formatNumber(pagination.total)}</span>,
+            })}
           </p>
           <div className="flex items-center gap-1">
             <button
@@ -212,7 +226,7 @@ export function ActivityPage() {
               className="flex h-8 w-8 items-center justify-center rounded-lg border text-sm disabled:opacity-30"
               style={{ borderColor: "var(--color-border)" }}
             >
-              <ChevronLeft size={14} />
+              <ChevronLeft size={14} className="rtl:-scale-x-100" />
             </button>
             {buildPageNumbers(page, pagination.total_pages).map((p, i) =>
               p === "..." ? (
@@ -250,7 +264,7 @@ export function ActivityPage() {
               className="flex h-8 w-8 items-center justify-center rounded-lg border text-sm disabled:opacity-30"
               style={{ borderColor: "var(--color-border)" }}
             >
-              <ChevronRight size={14} />
+              <ChevronRight size={14} className="rtl:-scale-x-100" />
             </button>
           </div>
         </div>

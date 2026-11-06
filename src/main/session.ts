@@ -2,12 +2,19 @@ import { app, session } from "electron";
 import { originAllowed } from "./trusted-origins";
 import {
   parseSessionCookieHeaders,
+  parseChallengeCookieHeader,
+  CHALLENGE_COOKIE,
   isSessionCookieName,
   HOST_SESSION_COOKIE,
   LEGACY_SESSION_COOKIE,
 } from "./session-cookie";
 import { chunkOrigins, packagedCsp, devCsp, type CspInputs } from "./csp";
 import { webRequestFilter } from "./session-filter";
+import { challengeCorsHeaders, rendererOrigin } from "./edge-challenge";
+
+/** The packaged renderer's origin; mirrors APP_ORIGIN in index.ts and the
+ * API's CORS allowlist (apps/api/src/lib/cors.ts). */
+const APP_RENDERER_ORIGIN = "app://bundle";
 
 /** The ONLYOFFICE document server the editor loads from. Overridable for a
  * self-hosted one; both policies have to name it or the editor silently
@@ -102,6 +109,14 @@ export function setupSession(apiBase: string): void {
   // the renderer-level third-party cookie restrictions.
   const cspInputs = cspInputsFor(apiBase);
 
+  // The renderer origins a Cloudflare challenge may be made readable to (see
+  // edge-challenge.ts): the bundle, plus the Vite dev server when one is used.
+  const devRenderer =
+    !app.isPackaged && process.env.ELECTRON_RENDERER_URL
+      ? rendererOrigin(process.env.ELECTRON_RENDERER_URL)
+      : null;
+  const challengeOrigins = devRenderer ? [APP_RENDERER_ORIGIN, devRenderer] : [APP_RENDERER_ORIGIN];
+
   // Now filtered, like onBeforeSendHeaders above. It could not be until the
   // packaged CSP moved out of it: this hook used to be what applied the
   // policy to `app://` documents, and Chromium's webRequest match-pattern
@@ -118,7 +133,21 @@ export function setupSession(apiBase: string): void {
   // `app.isPackaged === false`: `electron-vite preview` and the whole
   // Playwright suite) that matched neither of this hook's old conditions.
   ses.webRequest.onHeadersReceived(filter, (details, callback) => {
-    const responseHeaders = { ...details.responseHeaders };
+    let responseHeaders: Record<string, string[]> = { ...details.responseHeaders };
+
+    // A WAF challenge from Cloudflare (no CORS headers, never reached the
+    // Worker) would otherwise reject the renderer's fetch as "Failed to
+    // fetch". Grant the app's own origin read access to THAT response only,
+    // so the sign-in form can say what happened. QA TC-009/014/015.
+    if (originAllowed(details.url, [apiBase])) {
+      const wc = details.webContents;
+      const docOrigin = wc && !wc.isDestroyed() ? rendererOrigin(wc.getURL()) : null;
+      const patched = challengeCorsHeaders(responseHeaders, docOrigin, challengeOrigins);
+      if (patched) {
+        responseHeaders = patched;
+        console.warn(`[session] Cloudflare challenged ${details.method} ${new URL(details.url).pathname}`);
+      }
+    }
 
     // Apply the DEV Content-Security-Policy to the renderer document
     // (mainFrame + subFrame). This branch is now the only one here: an
@@ -162,6 +191,23 @@ export function setupSession(apiBase: string): void {
             expirationDate: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
           }).catch(() => {});
         }
+      }
+      // The 2FA challenge cookie is dropped the same way; store it so the code
+      // step that follows a password can find its challenge.
+      const challenge = parseChallengeCookieHeader(responseHeaders);
+      if (challenge?.action === "clear") {
+        ses.cookies.remove(apiBase, CHALLENGE_COOKIE).catch(() => {});
+      } else if (challenge) {
+        ses.cookies.set({
+          url: apiBase,
+          name: CHALLENGE_COOKIE,
+          value: challenge.value,
+          httpOnly: true,
+          secure: true,
+          sameSite: "no_restriction",
+          path: "/",
+          expirationDate: Math.floor(Date.now() / 1000) + (challenge.maxAgeSeconds ?? 300),
+        }).catch(() => {});
       }
     }
 

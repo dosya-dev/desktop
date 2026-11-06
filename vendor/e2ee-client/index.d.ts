@@ -5,3 +5,4 @@ export * from "./transport.js";
 export * from "./file.js";
 export * from "./grant-codec.js";
 export * from "./membership-codec.js";
+export * from "./high-water.js";

@@ -2,6 +2,8 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, Bug, RotateCw } from "lucide-react";
 import { reportError } from "../lib/sentry";
 import { openReport } from "../lib/report-problem-store";
+import { useT } from "@/lib/i18n";
+import { useAutoDir } from "@/lib/bidi-ui";
 
 /**
  * Catches a render-time throw so one broken page cannot take down the app.
@@ -19,8 +21,10 @@ import { openReport } from "../lib/report-problem-store";
 
 interface Props {
   children: ReactNode;
-  /** Shown above the message; helps say *which* surface failed. */
+  /** Names the surface in the console log and the crash report. */
   where?: string;
+  /** Which sentence the user reads: a page failed, or the app itself. */
+  surface?: "page" | "app";
 }
 
 interface State {
@@ -53,37 +57,60 @@ export class ErrorBoundary extends Component<Props, State> {
     if (!error) return this.props.children;
 
     return (
-      <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-8 text-center">
-        <AlertTriangle size={28} className="text-[var(--color-warning)]" />
-        <div>
-          <p className="text-sm font-semibold">This page didn't load</p>
-          <p className="mt-1 max-w-md text-xs text-[var(--color-text-muted)]">
-            Something went wrong rendering {this.props.where ?? "this page"}. The rest of
-            the app still works - use the sidebar to go somewhere else, or try again.
-          </p>
-        </div>
-        {/* The message itself. Users paste this into bug reports, and it is the
-            difference between "it went white" and an actionable report. */}
-        <pre className="max-w-lg overflow-x-auto rounded-lg bg-[var(--color-bg-tertiary)] px-3 py-2 text-left text-[11px] text-[var(--color-text-secondary)]">
-          {error.message}
-        </pre>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => this.setState({ error: null, eventId: null })}
-            className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
-            style={{ borderColor: "var(--color-border)" }}
-          >
-            <RotateCw size={13} /> Try again
-          </button>
-          <button
-            onClick={() => openReport({ errorRef: this.state.eventId, errorMessage: error.message })}
-            className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
-            style={{ borderColor: "var(--color-border)" }}
-          >
-            <Bug size={13} /> Report this problem
-          </button>
-        </div>
-      </div>
+      <ErrorFallback
+        error={error}
+        surface={this.props.surface ?? "page"}
+        onRetry={() => this.setState({ error: null, eventId: null })}
+        onReport={() => openReport({ errorRef: this.state.eventId, errorMessage: error.message })}
+      />
     );
   }
+}
+
+/** The fallback itself: a function component, so it follows a language switch. */
+function ErrorFallback({
+  error,
+  surface,
+  onRetry,
+  onReport,
+}: {
+  error: Error;
+  surface: "page" | "app";
+  onRetry: () => void;
+  onReport: () => void;
+}) {
+  const ownDir = useAutoDir();
+  const t = useT();
+  return (
+    <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-8 text-center">
+      <AlertTriangle size={28} className="text-[var(--color-warning)]" />
+      <div>
+        <p className="text-sm font-semibold">{t("common.error.thisPageDidnTLoad")}</p>
+        <p className="mt-1 max-w-md text-xs text-[var(--color-text-muted)]">
+          {t("common.error.somethingWentWrongRenderingThisPageTheRestOf", { surface })}
+        </p>
+      </div>
+      {/* The message itself. Users paste this into bug reports, and it is the
+          difference between "it went white" and an actionable report. */}
+      <pre translate="no" dir={ownDir} className="max-w-lg overflow-x-auto rounded-lg bg-[var(--color-bg-tertiary)] px-3 py-2 text-start text-[11px] text-[var(--color-text-secondary)]">
+        {error.message}
+      </pre>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onRetry}
+          className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          <RotateCw size={13} /> {t("common.action.tryAgain")}
+        </button>
+        <button
+          onClick={onReport}
+          className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-bg-secondary)]"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          <Bug size={13} /> {t("common.action.reportThisProblem")}
+        </button>
+      </div>
+    </div>
+  );
 }

@@ -83,12 +83,33 @@ test.describe("Application menu", () => {
     await expect(heading).toHaveCount(0);
   });
 
-  test("Sync lists the engine's folders and Settings lands on the Updates tab", async ({ appPage }) => {
+  test("Sync lists the engine's folders and Profile lands on the About tab", async ({ appPage }) => {
     const sync = (await readMenu(appPage)).find((m) => m.label === "Sync")!;
     expect(sync.items.map((i) => i.label)).toContain("Add Folder to Sync…");
 
-    await navigateTo(appPage, "/settings?tab=updates");
+    await navigateTo(appPage, "/profile?tab=about");
     await expect(appPage.getByText("dosya Desktop")).toBeVisible();
+  });
+
+  test("the menu follows the chosen language and rebuilds at once", async ({ appPage }) => {
+    const tops = async () => {
+      const labels = (await readMenu(appPage)).map((m) => m.label);
+      return process.platform === "darwin" ? labels.slice(1) : labels;
+    };
+    await appPage.evaluate(() => window.electronAPI.setLocale("tr"));
+    // Help is a role, but its title comes from the catalog like the rest.
+    await expect.poll(tops).toEqual(["Dosya", "Düzen", "Görüntü", "Git", "Senkronizasyon", "Pencere", "Yardım"]);
+    const go = (await readMenu(appPage)).find((m) => m.label === "Git")!;
+    expect(go.items.map((i) => i.label)).toEqual(expect.arrayContaining(["Geri", "İleri", "Dosyalar", "Ayarlar", "Favoriler"]));
+    const edit = (await readMenu(appPage)).find((m) => m.label === "Düzen")!;
+    expect(edit.items.map((i) => i.label)).toContain("Bul");
+    // Role items (Electron hard-codes their English) carry the catalog's label.
+    expect(edit.items.map((i) => i.label)).toEqual(expect.arrayContaining(["Geri al", "Kopyala", "Yapıştır", "Tümünü seç"]));
+    const win = (await readMenu(appPage)).find((m) => m.label === "Pencere")!;
+    expect(win.items.map((i) => i.label)).toContain("Küçült");
+
+    await appPage.evaluate(() => window.electronAPI.setLocale("en"));
+    await expect.poll(tops).toEqual(["File", "Edit", "View", "Go", "Sync", "Window", "Help"]);
   });
 
   test("About opens its own window with the version and the account", async ({ appPage }) => {

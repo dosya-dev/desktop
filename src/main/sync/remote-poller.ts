@@ -276,6 +276,14 @@ export class RemotePoller extends EventEmitter {
       useDeltaThisPoll = false;
     }
 
+    // A FULL snapshot that is itself truncated is a partial tree, and a
+    // partial tree reconciled as authoritative deletes whatever it is
+    // missing. Nothing downstream can repair that, so this poll fails
+    // outright and the pair waits for the next one.
+    if (fast?.truncated && !useDeltaThisPoll) {
+      throw new Error("Server listing was incomplete - skipping this sync cycle rather than treating missing files as deleted");
+    }
+
     if (fast) {
       if (useDeltaThisPoll && this.cachedSnapshot) {
         // Merge delta into cached snapshot

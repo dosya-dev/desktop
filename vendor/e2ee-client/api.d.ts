@@ -87,12 +87,7 @@ export interface ApiClient {
      * the P2c members/revoke UI and engine `listMembers`. Caller must already
      * be a member.
      */
-    listMembers(workspaceId: string): Promise<{
-        userId: string;
-        email: string;
-        ed25519Pub: string;
-        x25519Pub: string;
-    }[]>;
+    listMembers(workspaceId: string): Promise<MemberRow[]>;
     /**
      * GET /api/e2ee/membership-log/:workspaceId - the workspace's full signed
      * membership log (spec §7), ordered by `seq`, as opaque
@@ -217,6 +212,30 @@ export type CommitResult = {
     conflict: {
         currentVersion: number;
     };
+};
+/**
+ * One row of GET /api/e2ee/members/:workspaceId. `grant` is that member's
+ * CURRENT stored workspace-key grant (the same row `getWorkspaceGrant`
+ * returns to the member themself): the HPKE seal of the workspace key to
+ * their x25519 key, Ed25519-signed by the member who sealed it over AD that
+ * names BOTH the grantee's signing id and the exact x25519 key sealed to.
+ * `computeRotation` uses it to PIN `x25519Pub`: the server can assert any
+ * encryption key for a member on this row, so the engine only re-seals to a
+ * key a member-signed grant already binds to that signing identity. `null`
+ * when the server holds no grant for the member (never accepted for a
+ * re-seal). `granterEd25519Pub` is null for a legacy self-grant row (granter
+ * == the member themself).
+ */
+export type MemberRow = {
+    userId: string;
+    email: string;
+    ed25519Pub: string;
+    x25519Pub: string;
+    grant: {
+        wkVersion: number;
+        sealed: string;
+        granterEd25519Pub: string | null;
+    } | null;
 };
 /**
  * POST /api/e2ee/rotate request body (see

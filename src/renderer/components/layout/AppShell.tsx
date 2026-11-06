@@ -4,6 +4,7 @@ import { TitleBar } from "./TitleBar";
 import { Sidebar } from "./Sidebar";
 import { useSyncStore } from "@/lib/sync-store";
 import { DeletionBanner } from "@/components/DeletionBanner";
+import { SupportChatBoot } from "@/components/support-chat/SupportChatBoot";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
@@ -31,6 +32,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       {/* Above the scroll container: a pending deletion must stay visible while
           the user scrolls, not scroll away with the page. */}
       <DeletionBanner />
+      <SupportChatBoot />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         {/* `relative` is load-bearing: MapPage lays itself out with

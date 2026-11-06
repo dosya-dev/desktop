@@ -1,16 +1,19 @@
 // Ported from apps/web/src/components/file-viewer.tsx (read-only) - keep in sync with the web copy.
-// The desktop viewer is read-only: the Edit button, Pintura image/video editor,
-// and CodeMirror text editor from the web version are intentionally absent.
+// The desktop viewer is read-only: the Pintura image/video editor from the web
+// version is intentionally absent. Markdown and plain text get an Edit button
+// (when the caller passes onEdit) that opens the full-window text editor.
 // Downloads go through the file:download IPC (save dialog) instead of an <a download>.
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
-  X, Download, ChevronLeft, ChevronRight, Clock,
+  X, Download, ChevronLeft, ChevronRight, Clock, SquarePen,
 } from "lucide-react";
 import { toast } from "sonner";
+import { autoDir, ltrDir, useAutoDir } from "@/lib/bidi-ui";
 import { api } from "@/lib/api-client";
 import { fileRawUrl } from "@/lib/file-url";
-import { humanSize, extOf, isImage, isVideo, isAudio, isPdf, isVcard, isOfficeFile, isBook, isArchive } from "@/lib/file-type";
+import { humanSize, extOf, isImage, isVideo, isAudio, isPdf, isVcard, isCalendar, isOfficeFile, isBook, isArchive } from "@/lib/file-type";
 import { isTextReadable, langFromExtension, looksBinary } from "@/lib/text-detect";
+import { canEditText } from "@/lib/text-edit";
 import { parseCsvTable } from "@/lib/csv-table";
 import { parseMarkdown, isLinkableUrl, type InlineToken, type MdBlock } from "@/lib/markdown";
 import { highlightToHtml } from "@/lib/text-highlight";
@@ -19,14 +22,19 @@ import { isSimple, useMenuActions } from "@/lib/menu-bus";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
 import { TextFindBar } from "@/components/files/TextFindBar";
 import { VCardView } from "@/components/files/VCardView";
+import { CalendarView } from "@/components/files/CalendarView";
 import { OfficePreview } from "@/components/files/OfficePreview";
 import { BookViewer } from "@/components/files/BookViewer";
 import { ArchiveViewer } from "@/components/files/ArchiveViewer";
 import { AudioPlayer } from "@/components/files/audio/AudioPlayer";
+import { VideoPlayer } from "@/components/files/VideoPlayer";
 import { fileIconSrc } from "@/components/files/FileIcon";
 import { collapseLiveTwins, isLiveStill, isLiveTwin } from "@/lib/live-photos";
 import { LivePhotoStage } from "@/components/files/LivePhotoStage";
 import { LiveBadge } from "@/components/files/LiveBadge";
+import { PeopleChips } from "@/components/personas/PeopleChips";
+import { intlLocale } from "@/lib/locale-state";
+import { currentDir, t as tNow, useDir, useT } from "@/lib/i18n";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -75,6 +83,9 @@ interface FileViewerProps {
    *  scope. Optional so every other caller is unchanged; without it the pane
    *  offers no Save. */
   workspaceId?: string;
+  /** Opens the text editor. Offered for Markdown and plain text only; the
+   *  caller leaves it out when the user cannot upload a new version. */
+  onEdit?: (file: ViewerFile) => void;
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -115,21 +126,25 @@ async function downloadViaDialog(
     if (res.canceled) return;
     if (res.ok && res.path) {
       const path = res.path;
-      toast.success("Downloaded", {
-        description: path,
-        action: { label: "Show in Folder", onClick: () => window.electronAPI.showInFolder(path) },
+      toast.success(tNow("common.status.downloaded"), {
+        description: ltrDir(path),
+        action: { label: tNow("common.label.showInFolder"), onClick: () => window.electronAPI.showInFolder(path) },
       });
     }
   } catch (err) {
-    toast.error("Download failed", {
-      description: err instanceof Error ? err.message : undefined,
+    toast.error(tNow("common.error.downloadFailed"), {
+      description: autoDir(err instanceof Error ? err.message : undefined),
     });
   }
 }
 
 // ── Component ─────────────────────────────────────────────
 
-export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: FileViewerProps) {
+export function FileViewer({ file, files, onClose, onNavigate, workspaceId, onEdit }: FileViewerProps) {
+  const ownDir = useAutoDir();
+  const t = useT();
+  // The footer's key hints sit at the mirrored ends in a right-to-left language.
+  const dir = useDir();
   const [versions, setVersions] = useState<Version[]>([]);
   const [activeVersion, setActiveVersion] = useState(-1);
 
@@ -239,11 +254,17 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
       // and without this guard the left/right keys navigated to another file
       // (closing the archive) and up/down changed the file's version. Same
       // guard the web viewer's own handler carries.
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       if (e.key === "Escape") { handleClose(); return; }
-      if (e.key === "ArrowLeft" && hasPrev) onNavigate(navFiles[idx - 1]);
-      if (e.key === "ArrowRight" && hasNext) onNavigate(navFiles[idx + 1]);
+      // Left and right follow the page: in a right-to-left language the next
+      // file sits to the left, where the mirrored header puts its button.
+      // Read at key time, so a language switch with the viewer open applies.
+      const rtl = currentDir() === "rtl";
+      const back = rtl ? "ArrowRight" : "ArrowLeft";
+      const forward = rtl ? "ArrowLeft" : "ArrowRight";
+      if (e.key === back && hasPrev) onNavigate(navFiles[idx - 1]);
+      if (e.key === forward && hasNext) onNavigate(navFiles[idx + 1]);
       if (e.key === "ArrowUp") { e.preventDefault(); navigateVersion(-1); }
       if (e.key === "ArrowDown") { e.preventDefault(); navigateVersion(1); }
     };
@@ -280,29 +301,45 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
 
   return (
     <div
+      data-testid="file-viewer"
       className={`fixed inset-0 z-[300] flex flex-col bg-[var(--color-bg)] transition-opacity duration-200 ${closing ? "opacity-0" : "opacity-100"}`}
     >
       {/* Header. `titlebar-inset` keeps the filename clear of the macOS traffic
-          lights: this overlay covers the whole window, title bar included, so
-          without it the name renders underneath the window buttons. */}
-      <div className="titlebar-inset flex shrink-0 items-center justify-between border-b pr-4 py-2.5" style={{ borderColor: "var(--color-border)" }}>
+          lights AND the buttons clear of the Windows caption-button overlay:
+          this overlay covers the whole window, title bar included, so without
+          it the name (macOS) or Download + Close (Windows) render underneath
+          the window buttons. On Windows that left the window's own X as the
+          only visible close, which quit the app (QA TC-032/033/037).
+          It stands in for the title bar it covers, so it drags the window;
+          the buttons opt out or the drag region would swallow their clicks. */}
+      <div data-testid="viewer-header" className="titlebar-inset titlebar-drag flex shrink-0 items-center justify-between border-b pe-4 py-2.5" style={{ borderColor: "var(--color-border)" }}>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <svg viewBox="0 0 14 14" fill="none" width="14" height="14" className="shrink-0 text-[var(--color-text-muted)]">
             <path d="M1 7s2.5-4.5 6-4.5S13 7 13 7s-2.5 4.5-6 4.5S1 7 1 7z" stroke="currentColor" strokeWidth="1.1" />
             <circle cx="7" cy="7" r="2" stroke="currentColor" strokeWidth="1.1" />
           </svg>
-          <span className="truncate text-sm font-semibold">{file.name}</span>
-          <span className="shrink-0 text-xs text-[var(--color-text-muted)]">{counter}</span>
+          <span dir={ownDir} className="truncate text-sm font-semibold">{file.name}</span>
+          <span dir="ltr" className="shrink-0 text-xs text-[var(--color-text-muted)]">{counter}</span>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="titlebar-no-drag flex shrink-0 items-center gap-1">
           {hasPrev && (
-            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(navFiles[idx - 1])} title="Previous (←)">
-              <ChevronLeft size={16} className="text-[var(--color-text-muted)]" />
+            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(navFiles[idx - 1])} title={t("common.tooltip.previous")}>
+              <ChevronLeft size={16} className="text-[var(--color-text-muted)] rtl:-scale-x-100" />
             </button>
           )}
           {hasNext && (
-            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(navFiles[idx + 1])} title="Next (→)">
-              <ChevronRight size={16} className="text-[var(--color-text-muted)]" />
+            <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onNavigate(navFiles[idx + 1])} title={t("common.tooltip.next")}>
+              <ChevronRight size={16} className="text-[var(--color-text-muted)] rtl:-scale-x-100" />
+            </button>
+          )}
+          {onEdit && canEditText(file) && (
+            <button
+              data-testid="viewer-edit"
+              className="flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-[var(--color-text)] hover:bg-[var(--color-bg-tertiary)]"
+              onClick={() => onEdit(file)}
+            >
+              <SquarePen size={14} className="text-[var(--color-text-muted)]" />
+              {t("files.edit")}
             </button>
           )}
           {/* The collapsed form of the version panel. Carries the count so it
@@ -312,7 +349,7 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
               data-testid="viewer-versions-toggle"
               onClick={toggleVersions}
               aria-expanded={versionsOpen}
-              title={versionsOpen ? "Hide versions" : `Versions (${versions.length})`}
+              title={versionsOpen ? t("common.tooltip.hideVersions") : t("common.tooltip.versionsVersionCount", { versionCount: versions.length })}
               className={`flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium hover:bg-[var(--color-bg-tertiary)] ${
                 versionsOpen ? "bg-[var(--color-bg-tertiary)] text-[var(--color-text)]" : "text-[var(--color-text-muted)]"
               }`}
@@ -321,10 +358,10 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
               {versions.length}
             </button>
           )}
-          <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onDownload()} title="Download">
+          <button className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={() => onDownload()} title={t("common.action.download")}>
             <Download size={16} className="text-[var(--color-text-muted)]" />
           </button>
-          <button className="ml-1 flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={handleClose} title="Close (Esc)">
+          <button data-testid="viewer-close" aria-label={t("common.tooltip.closeEsc")} className="ms-1 flex h-8 w-8 items-center justify-center rounded-md hover:bg-[var(--color-bg-tertiary)]" onClick={handleClose} title={t("common.tooltip.closeEsc")}>
             <X size={16} className="text-[var(--color-text-muted)]" />
           </button>
         </div>
@@ -337,7 +374,7 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
             on one - so it drops the centring and padding every other type wants.
             Archive joins it for the same reason: its own two-column layout
             (tree + preview) is a surface, not an object sitting on one. */}
-        <div className={`flex min-h-0 min-w-0 flex-1 bg-[var(--color-bg-secondary)] ${isAudio(file.name) || isArchive(file.name) ? "overflow-hidden" : "items-center justify-center overflow-auto p-6"}`}>
+        <div className={`flex min-h-0 min-w-0 flex-1 bg-[var(--color-bg-secondary)] ${isAudio(file.name) || isArchive(file.name) ? "overflow-hidden" : isVideo(file.name) ? "items-center justify-center overflow-hidden p-6" : "items-center justify-center overflow-auto p-6"}`}>
           <FileContent file={file} files={files} rawUrl={rawUrl} version={previewVersion} onDownload={onDownload} onNavigate={onNavigate} workspaceId={workspaceId} />
         </div>
 
@@ -354,42 +391,42 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
           data-open={versionsOpen || undefined}
           className="viewer-versions-panel flex shrink-0"
         >
-          <div className="flex w-52 shrink-0 flex-col border-l bg-[var(--color-bg)]" style={{ borderColor: "var(--color-border)" }}>
+          <div className="flex w-52 shrink-0 flex-col border-s bg-[var(--color-bg)]" style={{ borderColor: "var(--color-border)" }}>
           <div className="flex shrink-0 items-center gap-1.5 border-b px-3.5 py-2.5 text-xs font-semibold" style={{ borderColor: "var(--color-border)" }}>
             <button
               onClick={toggleVersions}
-              title="Collapse versions"
-              aria-label="Collapse versions"
-              className="-ml-1 flex size-5 items-center justify-center rounded hover:bg-[var(--color-bg-tertiary)]"
+              title={t("common.accessibility.collapseVersions")}
+              aria-label={t("common.accessibility.collapseVersions")}
+              className="-ms-1 flex size-5 items-center justify-center rounded hover:bg-[var(--color-bg-tertiary)]"
             >
-              <ChevronRight size={13} className="text-[var(--color-text-muted)]" />
+              <ChevronRight size={13} className="text-[var(--color-text-muted)] rtl:-scale-x-100" />
             </button>
-            Versions
-            <div className="ml-auto flex items-center gap-0.5">
+            {t("common.label.versions")}
+            <div className="ms-auto flex items-center gap-0.5">
               <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>↑</kbd>
               <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>↓</kbd>
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-1.5">
             {versions.length === 0 ? (
-              <p className="py-5 text-center text-xs text-[var(--color-text-muted)]">No version history</p>
+              <p className="py-5 text-center text-xs text-[var(--color-text-muted)]">{t("common.empty.noVersionHistory")}</p>
             ) : (
               versions.map((v) => {
                 const isActive = v.version_number === activeVersion;
                 const isLatest = v.version_number === versions[0].version_number;
                 const d = new Date(v.created_at * 1000);
-                const dateStr = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-                const timeStr = d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+                const dateStr = d.toLocaleDateString(intlLocale("en-US"), { month: "short", day: "numeric", year: "numeric" });
+                const timeStr = d.toLocaleTimeString(intlLocale("en-US"), { hour: "2-digit", minute: "2-digit" });
                 return (
                   <button
                     key={v.version_number}
-                    className={`mb-0.5 block w-full rounded-md px-2.5 py-2 text-left transition-colors ${isActive ? "bg-[var(--color-bg-tertiary)] shadow-[inset_2px_0_0_var(--color-primary)]" : "hover:bg-[var(--color-bg-secondary)]"}`}
+                    className={`mb-0.5 block w-full rounded-md px-2.5 py-2 text-start transition-colors ${isActive ? "bg-[var(--color-bg-tertiary)] shadow-[inset_2px_0_0_var(--color-primary)] rtl:shadow-[inset_-2px_0_0_var(--color-primary)]" : "hover:bg-[var(--color-bg-secondary)]"}`}
                     onClick={() => setActiveVersion(v.version_number)}
                   >
                     <div className="flex items-center gap-1.5 text-xs font-semibold">
-                      v{v.version_number}
+                      {t("common.label.v")}{v.version_number}
                       {isLatest && (
-                        <span className="rounded bg-green-500 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-white">Latest</span>
+                        <span className="rounded bg-green-500 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-white">{t("common.status.latest")}</span>
                       )}
                     </div>
                     <div className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">
@@ -408,9 +445,17 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
         )}
       </div>
 
+      {/* "In this photo" (Personas): the people this device's Personas found
+          in an image, each a link to the persona's page. Nothing is asked of
+          a server; shown only while Personas is ready. The desktop viewer
+          has no details column, so the row sits above the strip. */}
+      {workspaceId && isImage(file.name) && (
+        <PeopleChips wsId={workspaceId} fileId={file.id} inline className="shrink-0 border-t px-4 py-2" style={{ borderColor: "var(--color-border)" }} />
+      )}
+
       {/* Thumbnail strip footer */}
       <div className="flex shrink-0 items-center justify-center gap-2 border-t px-3 py-2" style={{ borderColor: "var(--color-border)" }}>
-        <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>←</kbd>
+        <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>{dir === "rtl" ? "→" : "←"}</kbd>
         <div className="flex flex-1 items-center justify-center gap-1.5 overflow-x-auto">
           {thumbFiles.map((f, i) => {
             const realIdx = thumbStart + i;
@@ -429,9 +474,9 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
                   className="h-full w-full object-cover"
                   fallback={<img src={fileIconSrc(f.name)} alt="" className="h-6 w-6" />}
                 />
-                {isLiveStill(f) && <LiveBadge size="glyph" className="absolute top-0.5 left-0.5" />}
+                {isLiveStill(f) && <LiveBadge size="glyph" className="absolute top-0.5 inset-s-0.5" />}
                 {isVideo(f.name) && (
-                  <div className="absolute bottom-0.5 right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded bg-black/50">
+                  <div className="absolute bottom-0.5 inset-e-0.5 flex h-3.5 w-3.5 items-center justify-center rounded bg-black/50">
                     <svg viewBox="0 0 8 8" fill="none" width="8" height="8"><path d="M2 1.5l4.5 2.5L2 6.5z" fill="#fff" /></svg>
                   </div>
                 )}
@@ -439,7 +484,7 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
             );
           })}
         </div>
-        <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>→</kbd>
+        <kbd className="inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>{dir === "rtl" ? "←" : "→"}</kbd>
       </div>
     </div>
   );
@@ -448,10 +493,25 @@ export function FileViewer({ file, files, onClose, onNavigate, workspaceId }: Fi
 // ── File content renderer ─────────────────────────────────
 
 function FileContent({ file, files, rawUrl, version, onDownload, onNavigate, workspaceId }: { file: ViewerFile; files: ViewerFile[]; rawUrl: string; version?: number; onDownload: () => void; onNavigate: (f: ViewerFile) => void; workspaceId?: string }) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const ext = extOf(file.name);
 
   if (isVcard(file.name)) {
     return <VCardView file={file} rawUrl={rawUrl} />;
+  }
+
+  // Ahead of the text check (an .ics is text): the agenda first, with the
+  // text viewer as its source tab and as the view for a file with no events.
+  if (isCalendar(file.name, file.mime_type)) {
+    return (
+      <CalendarView
+        file={file}
+        rawUrl={rawUrl}
+        source={<TextViewer file={file} rawUrl={rawUrl} onDownload={onDownload} />}
+        oversize={<OversizeFallback file={file} onDownload={onDownload} />}
+      />
+    );
   }
 
   if (isImage(file.name)) {
@@ -475,18 +535,18 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate, wor
     // A Live Photo's twin opened directly (list view, search) is an ordinary
     // video slide with one addition: a way back to the still it belongs to.
     const still = isLiveTwin(file) ? files.find((f) => f.id === file.live_photo_id) : null;
-    // Keyed on the url so a decode failure on one file does not follow the
+    // Keyed on the file so a decode failure on one file does not follow the
     // user to the next one in the strip.
     return (
-      <div className="relative max-w-full max-h-full flex items-center justify-center">
-        <VideoPlayer key={rawUrl} file={file} rawUrl={rawUrl} onDownload={onDownload} />
+      <div className="relative h-full w-full max-w-full max-h-full flex items-center justify-center">
+        <VideoPlayer key={file.id} file={file} rawUrl={rawUrl} version={version} onDownload={onDownload} />
         {still && (
           <button
             type="button"
-            className="absolute top-3 left-3 z-10 rounded-full bg-black/45 px-2 py-0.5 font-mono text-[10px] text-white hover:bg-black/60"
+            className="absolute top-3 inset-s-3 z-10 rounded-full bg-black/45 px-2 py-0.5 font-mono text-[10px] text-white hover:bg-black/60"
             onClick={() => onNavigate(still)}
           >
-            Live Photo video of {still.name}
+            {t("common.action.livePhotoVideoOfStillName", { stillName: still.name })}
           </button>
         )}
       </div>
@@ -508,7 +568,9 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate, wor
 
   if (isPdf(file.name)) {
     return (
-      <iframe src={`${rawUrl}#toolbar=1`} className="h-full w-full rounded-md border-none bg-white" title={`PDF: ${file.name}`} />
+      <div dir="ltr" className="h-full w-full">
+        <iframe src={`${rawUrl}#toolbar=1`} className="h-full w-full rounded-md border-none bg-white" title={t("common.tooltip.pdfName", { name: file.name })} />
+      </div>
     );
   }
 
@@ -516,7 +578,7 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate, wor
   // them and this shows the resulting PDF. Placed after isPdf so a real .pdf
   // never takes the conversion path.
   if (isOfficeFile(file.name)) {
-    return <OfficePreview file={file} version={version} />;
+    return <OfficePreview file={file} version={version} onDownload={onDownload} />;
   }
 
   // Before the text check: an .epub is a zip, so isTextReadable could not claim
@@ -549,14 +611,14 @@ function FileContent({ file, files, rawUrl, version, onDownload, onNavigate, wor
   // Fallback
   return (
     <div className="rounded-xl border bg-[var(--color-bg)] p-10 text-center" style={{ borderColor: "var(--color-border)", minWidth: 280 }}>
-      <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">{ext.toUpperCase() || "FILE"}</p>
-      <p className="mb-5 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
+      <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">{ext.toUpperCase() || t("common.label.fileUppercase")}</p>
+      <p dir={ownDir} className="mb-5 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
       <button
         onClick={() => onDownload()}
         className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] hover:opacity-90"
         style={{ background: "var(--color-primary)" }}
       >
-        <Download size={16} /> Download
+        <Download size={16} /> {t("common.action.download")}
       </button>
     </div>
   );
@@ -566,6 +628,7 @@ const TEXT_PREVIEW_MAX = 2 * 1024 * 1024; // 2 MB
 const HIGHLIGHT_MAX = 300 * 1024;         // 300 KB
 
 function TextViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: string; onDownload: () => void }) {
+  const t = useT();
   const ext = extOf(file.name);
   const [plain, setPlain] = useState<string | null>(null);
   const [html, setHtml] = useState<string | null>(null);
@@ -580,7 +643,9 @@ function TextViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: st
     if (file.size_bytes > TEXT_PREVIEW_MAX) { setState("toobig"); return; }
     setState("loading");
     let cancelled = false;
-    fetch(rawUrl, { credentials: "include" })
+    // no-cache: /raw is cached for an hour; revalidating (a cheap 304 when
+    // unchanged) shows an edit made in the text editor straight away.
+    fetch(rawUrl, { credentials: "include", cache: "no-cache" })
       .then((r) => (r.ok ? r.text() : Promise.reject()))
       .then((text) => {
         if (cancelled) return;
@@ -624,7 +689,7 @@ function TextViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: st
   }
   if (state === "binary" || state === "error") {
     return <OversizeFallback file={file} onDownload={onDownload}
-      note={state === "binary" ? "This file is not text-previewable." : "Failed to load file content."} />;
+      note={state === "binary" ? t("common.error.thisFileIsNotTextPreviewable") : t("common.error.failedToLoadFileContent")} />;
   }
 
   return (
@@ -636,64 +701,32 @@ function TextViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: st
       <div ref={contentRef} className="flex-1 overflow-auto text-[13px] leading-relaxed [&_pre]:m-0 [&_pre]:!bg-transparent [&_pre]:px-4 [&_pre]:py-4 [&_pre]:whitespace-pre-wrap [&_pre]:break-words">
         {html
           ? <div dangerouslySetInnerHTML={{ __html: html }} />
-          : <pre className="m-0 whitespace-pre-wrap break-words px-4 py-4 font-mono text-[#d4d4d4]">{plain ?? "Loading…"}</pre>}
+          : <pre className="m-0 whitespace-pre-wrap break-words px-4 py-4 font-mono text-[#d4d4d4]">{plain ?? t("common.status.loading")}</pre>}
       </div>
     </div>
   );
 }
 
 function OversizeFallback({ file, onDownload, note }: { file: ViewerFile; onDownload: () => void; note?: string }) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const sizeStr = humanSize(file.size_bytes);
   return (
     <div className="rounded-xl border bg-[var(--color-bg)] p-10 text-center" style={{ borderColor: "var(--color-border)", minWidth: 280 }}>
-      <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">{extOf(file.name).toUpperCase() || "FILE"}</p>
-      <p className="mb-2 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
-      <p className="mb-5 text-xs text-[var(--color-text-muted)]">{note ?? `File too large to preview inline (${sizeStr}).`}</p>
+      <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">{extOf(file.name).toUpperCase() || t("common.label.fileUppercase")}</p>
+      <p dir={ownDir} className="mb-2 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
+      <p className="mb-5 text-xs text-[var(--color-text-muted)]">{note ?? t("common.error.fileTooLargeToPreviewInlineSizeStr", { sizeStr })}</p>
       <button
         onClick={() => onDownload()}
         className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] hover:opacity-90"
         style={{ background: "var(--color-primary)" }}
       >
-        <Download size={16} /> Download
+        <Download size={16} /> {t("common.action.download")}
       </button>
     </div>
   );
 }
 
-
-// ── Video with an honest failure card ─────────────────────
-
-/**
- * The <video> element fails silently: an AVI or WMV - or an MKV whose codec
- * Chromium lacks (Electron ships proprietary codecs, but not DTS audio or
- * every 10-bit profile) - used to render as a dead black player. Ported from
- * the web viewer; the mobile app routes the same files to libVLC.
- */
-function VideoPlayer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: string; onDownload: () => void }) {
-  const [failed, setFailed] = useState(false);
-  const ext = extOf(file.name);
-
-  if (failed) {
-    return (
-      <div className="rounded-xl border bg-[var(--color-bg)] p-10 text-center" style={{ borderColor: "var(--color-border)", minWidth: 280 }}>
-        <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">{ext.toUpperCase() || "VIDEO"}</p>
-        <p className="mb-2 break-all text-sm text-[var(--color-text-muted)]">{file.name}</p>
-        <p className="mb-5 text-xs text-[var(--color-text-muted)]">
-          This app can't decode this video. Download it and open it in a player like VLC, which decodes everything.
-        </p>
-        <button
-          onClick={() => onDownload()}
-          className="inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] hover:opacity-90"
-          style={{ background: "var(--color-primary)" }}
-        >
-          <Download size={16} /> Download
-        </button>
-      </div>
-    );
-  }
-
-  return <video src={rawUrl} controls autoPlay className="max-h-full max-w-full rounded-md bg-black" onError={() => setFailed(true)} />;
-}
 
 // ── CSV / Markdown ────────────────────────────────────────
 
@@ -711,7 +744,9 @@ function useTextBody(file: ViewerFile, rawUrl: string): { text: string | null; s
   useEffect(() => {
     if (toobig) return;
     let cancelled = false;
-    fetch(rawUrl, { credentials: "include" })
+    // no-cache: /raw is cached for an hour; revalidating (a cheap 304 when
+    // unchanged) shows an edit made in the text editor straight away.
+    fetch(rawUrl, { credentials: "include", cache: "no-cache" })
       .then((r) => (r.ok ? r.text() : Promise.reject()))
       .then((body) => {
         if (cancelled) return;
@@ -733,15 +768,16 @@ function useTextBody(file: ViewerFile, rawUrl: string): { text: string | null; s
  * falls back to the highlighted text view.
  */
 function CsvViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: string; onDownload: () => void }) {
+  const t = useT();
   const { text, state } = useTextBody(file, rawUrl);
   const table = useMemo(() => (text == null ? null : parseCsvTable(text)), [text]);
 
   if (state === "toobig") return <OversizeFallback file={file} onDownload={onDownload} />;
   if (state === "binary" || state === "error") {
-    return <OversizeFallback file={file} onDownload={onDownload} note={state === "binary" ? "This file is not text-previewable." : "Failed to load file content."} />;
+    return <OversizeFallback file={file} onDownload={onDownload} note={state === "binary" ? t("common.error.thisFileIsNotTextPreviewable") : t("common.error.failedToLoadFileContent")} />;
   }
   if (state === "loading") {
-    return <div className="flex h-full w-full items-center justify-center text-sm text-[var(--color-text-muted)]">Loading…</div>;
+    return <div className="flex h-full w-full items-center justify-center text-sm text-[var(--color-text-muted)]">{t("common.status.loading")}</div>;
   }
   if (!table) return <TextViewer file={file} rawUrl={rawUrl} onDownload={onDownload} />;
 
@@ -749,15 +785,15 @@ function CsvViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: str
   return (
     <div className="relative flex h-full w-full flex-col self-stretch overflow-hidden rounded-lg border bg-[var(--color-bg)]" style={{ borderColor: "var(--color-border)" }}>
       <div className="sticky top-0 z-10 flex items-baseline gap-3 border-b px-4 py-2 font-mono text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
-        <span className="uppercase">{extOf(file.name) || "csv"}</span>
-        <span className="ml-auto">{totalRows} {totalRows === 1 ? "row" : "rows"} &times; {table.columns} cols</span>
+        <span className="uppercase">{extOf(file.name) || t("common.label.csv")}</span>
+        <span className="ms-auto">{t("common.label.rowColumnsCols", { totalRows, columns: table.columns })}</span>
       </div>
       <div className="flex-1 overflow-auto">
         <table className="w-max min-w-full border-collapse font-mono text-xs">
           <thead className="sticky top-0 bg-[var(--color-bg-secondary)]">
             <tr>
               {table.header.map((cell, c) => (
-                <th key={c} className="max-w-105 overflow-hidden text-ellipsis whitespace-nowrap border-b px-3 py-2 text-left font-semibold" style={{ borderColor: "var(--color-border)" }}>{cell}</th>
+                <th key={c} className="max-w-105 overflow-hidden text-ellipsis whitespace-nowrap border-b px-3 py-2 text-start font-semibold" style={{ borderColor: "var(--color-border)" }}>{cell}</th>
               ))}
             </tr>
           </thead>
@@ -773,7 +809,7 @@ function CsvViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: str
         </table>
         {table.truncatedRows > 0 && (
           <p className="px-3 py-2.5 font-mono text-xs text-[var(--color-text-muted)]">
-            + {table.truncatedRows} more {table.truncatedRows === 1 ? "row" : "rows"} - download the file for all of it
+            {t("common.description.moreRowDownloadTheFileForAllOfIt", { truncatedRows: table.truncatedRows })}
           </p>
         )}
       </div>
@@ -783,23 +819,24 @@ function CsvViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: str
 
 /** Markdown rendered as the document it is, with the source one click away. */
 function MarkdownViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl: string; onDownload: () => void }) {
+  const t = useT();
   const { text, state } = useTextBody(file, rawUrl);
   const [mode, setMode] = useState<"rendered" | "source">("rendered");
   const blocks = useMemo(() => (text == null || mode !== "rendered" ? null : parseMarkdown(text)), [text, mode]);
 
   if (state === "toobig") return <OversizeFallback file={file} onDownload={onDownload} />;
   if (state === "binary" || state === "error") {
-    return <OversizeFallback file={file} onDownload={onDownload} note={state === "binary" ? "This file is not text-previewable." : "Failed to load file content."} />;
+    return <OversizeFallback file={file} onDownload={onDownload} note={state === "binary" ? t("common.error.thisFileIsNotTextPreviewable") : t("common.error.failedToLoadFileContent")} />;
   }
   if (state === "loading") {
-    return <div className="flex h-full w-full items-center justify-center text-sm text-[var(--color-text-muted)]">Loading…</div>;
+    return <div className="flex h-full w-full items-center justify-center text-sm text-[var(--color-text-muted)]">{t("common.status.loading")}</div>;
   }
 
   return (
     <div className="relative flex h-full w-full flex-col self-stretch overflow-hidden rounded-lg border bg-[var(--color-bg)]" style={{ borderColor: "var(--color-border)" }}>
       <div className="sticky top-0 z-10 flex items-center gap-3 border-b px-4 py-2" style={{ borderColor: "var(--color-border)" }}>
-        <span className="font-mono text-xs uppercase text-[var(--color-text-muted)]">Markdown</span>
-        <div role="tablist" aria-label="Markdown view" className="ml-auto flex gap-0.5 rounded-lg bg-[var(--color-bg-secondary)] p-0.5">
+        <span className="font-mono text-xs uppercase text-[var(--color-text-muted)]">{t("common.label.markdown")}</span>
+        <div role="tablist" aria-label={t("common.accessibility.markdownView")} className="ms-auto flex gap-0.5 rounded-lg bg-[var(--color-bg-secondary)] p-0.5">
           {(["rendered", "source"] as const).map((m) => (
             <button
               key={m}
@@ -809,7 +846,7 @@ function MarkdownViewer({ file, rawUrl, onDownload }: { file: ViewerFile; rawUrl
               style={mode === m ? { background: "var(--color-bg)", color: "var(--color-text)" } : { color: "var(--color-text-muted)" }}
               onClick={() => setMode(m)}
             >
-              {m}
+              {t(m === "rendered" ? "common.label.rendered" : "common.label.source")}
             </button>
           ))}
         </div>
@@ -843,7 +880,7 @@ function MdBlockView({ block }: { block: MdBlock }) {
   }
   if (block.kind === "quote") {
     return (
-      <blockquote className="mt-3 border-l-2 pl-3 text-sm italic leading-relaxed text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
+      <blockquote className="mt-3 border-s-2 ps-3 text-sm italic leading-relaxed text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
         <MdInline tokens={block.inline} />
       </blockquote>
     );
@@ -851,7 +888,7 @@ function MdBlockView({ block }: { block: MdBlock }) {
   if (block.kind === "list") {
     const L = block.ordered ? "ol" : "ul";
     return (
-      <L className={`mt-3 space-y-1 pl-5 text-sm leading-relaxed ${block.ordered ? "list-decimal" : "list-disc"}`}>
+      <L className={`mt-3 space-y-1 ps-5 text-sm leading-relaxed ${block.ordered ? "list-decimal" : "list-disc"}`}>
         {block.items.map((item, i) => <li key={i}><MdInline tokens={item} /></li>)}
       </L>
     );

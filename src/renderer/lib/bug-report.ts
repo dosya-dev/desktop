@@ -1,7 +1,12 @@
 // The desktop half of a bug report's diagnostics (spec:
 // docs/superpowers/specs/2026-10-03-bug-report-design.md). DOM-free and
 // Electron-free on purpose: every fact arrives as an argument, so this runs
-// under node --test alongside src/main's tests.
+// under node --test alongside src/main's tests (hence the relative `.ts`
+// imports). What is SENT (the diagnostics object, the body) stays English and
+// stable for support; only the card's labels and the sync line it shows are
+// translated, at call time.
+import { tl } from "./locale-state.ts";
+import type { MessageKey } from "../../i18n/keys.ts";
 
 export interface DesktopDiagnostics {
   v: 1;
@@ -64,21 +69,37 @@ function sanitizeNullable(s: string | null): string | null {
   return s === null ? null : sanitize(s);
 }
 
-/** "2 folders · 1 in error · 3 files failed", or "1 folder · paused". No paths. */
-export function summariseSync(
-  status: { pairs: { status: string; fileErrorCount: number }[]; globalPaused: boolean } | null,
-): string | null {
+type SyncStatus = { pairs: { status: string; fileErrorCount: number }[]; globalPaused: boolean };
+
+function syncCounts(status: SyncStatus) {
+  return {
+    folderCount: status.pairs.length,
+    errorCount: status.pairs.filter((p) => p.status === "error").length,
+    failedCount: status.pairs.reduce((sum, p) => sum + (p.fileErrorCount || 0), 0),
+    paused: status.globalPaused ? "yes" : "no",
+  };
+}
+
+/** "2 folders · 1 in error · 3 files failed", or "1 folder · paused". No paths.
+ *  This is the value SENT with the report, so it stays English. */
+export function summariseSync(status: SyncStatus | null): string | null {
   if (!status) return null;
-  const n = status.pairs.length;
-  if (n === 0) return status.globalPaused ? "no folders · paused" : "no folders";
+  const { folderCount: n, errorCount: errors, failedCount: failed, paused } = syncCounts(status);
+  if (n === 0) return paused === "yes" ? "no folders · paused" : "no folders";
   const parts = [`${n} ${n === 1 ? "folder" : "folders"}`];
-  const errors = status.pairs.filter((p) => p.status === "error").length;
   if (errors > 0) parts.push(`${errors} in error`);
-  const failed = status.pairs.reduce((sum, p) => sum + (p.fileErrorCount || 0), 0);
   if (failed > 0) parts.push(`${failed} ${failed === 1 ? "file" : "files"} failed`);
-  if (status.globalPaused) parts.push("paused");
+  if (paused === "yes") parts.push("paused");
   return parts.join(" · ");
 }
+
+/** The same summary in the chosen language, for the card the user reads. */
+export function describeSync(status: SyncStatus | null): string | null {
+  return status ? tl("report-problem.status.noFoldersPaused", syncCounts(status)) : null;
+}
+
+/** What collectDesktopDiagnostics sends when main gave no facts. */
+const UNKNOWN = "unknown";
 
 export function collectDesktopDiagnostics(input: {
   info: DiagnosticsInfo | null;
@@ -94,9 +115,9 @@ export function collectDesktopDiagnostics(input: {
   return {
     v: 1,
     client: "desktop",
-    app_version: sanitize(input.info?.version || "unknown"),
+    app_version: sanitize(input.info?.version || UNKNOWN),
     build: sanitizeNullable(input.info ? `${input.info.distribution} ${input.info.arch}`.trim() || null : null),
-    platform: sanitize(input.info?.platform || "unknown"),
+    platform: sanitize(input.info?.platform || UNKNOWN),
     locale: sanitizeNullable(orNull(input.info?.locale)),
     workspace_id: sanitizeNullable(orNull(input.workspaceId)),
     page: sanitizeNullable(pathOnly(orNull(input.page))),
@@ -107,17 +128,26 @@ export function collectDesktopDiagnostics(input: {
   };
 }
 
-/** The rows the card shows. Empty values are left out; the id is "Error
- *  reference", never the vendor's name. */
-export function diagnosticsRows(d: DesktopDiagnostics): { label: string; value: string }[] {
+/** Card labels for the `extra` keys, which are sent as they are. */
+const EXTRA_LABELS: Record<string, MessageKey> = { Sync: "common.label.sync" };
+
+/** The rows the card shows, in the chosen language. Empty values are left
+ *  out; the id is "Error reference", never the vendor's name. `sync` is the
+ *  translated sync line (describeSync) shown in place of the English one
+ *  the payload carries. */
+export function diagnosticsRows(d: DesktopDiagnostics, display: { sync?: string | null } = {}): { label: string; value: string }[] {
+  const shown = (v: string) => (v === UNKNOWN ? tl("report-problem.label.unknown") : v);
   const rows: { label: string; value: string | null }[] = [
-    { label: "App", value: d.build ? `${d.app_version} · ${d.build}` : d.app_version },
-    { label: "System", value: d.platform },
-    { label: "Workspace", value: d.workspace_id },
-    { label: "Page", value: d.page },
-    { label: "Error reference", value: d.error_ref },
-    { label: "Error", value: d.error_message },
-    ...Object.entries(d.extra).map(([label, value]) => ({ label, value })),
+    { label: tl("report-problem.label.app"), value: d.build ? `${d.app_version} · ${d.build}` : shown(d.app_version) },
+    { label: tl("common.label.system"), value: shown(d.platform) },
+    { label: tl("common.label.workspace"), value: d.workspace_id },
+    { label: tl("report-problem.label.page"), value: d.page },
+    { label: tl("report-problem.label.errorReference"), value: d.error_ref },
+    { label: tl("common.status.error"), value: d.error_message },
+    ...Object.entries(d.extra).map(([key, value]) => ({
+      label: EXTRA_LABELS[key] ? tl(EXTRA_LABELS[key]) : key,
+      value: key === "Sync" && display.sync ? display.sync : value,
+    })),
   ];
   return rows.filter((r): r is { label: string; value: string } => typeof r.value === "string" && r.value.length > 0);
 }

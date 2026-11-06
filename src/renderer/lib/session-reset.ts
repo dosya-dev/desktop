@@ -2,6 +2,8 @@ import { toast } from "sonner";
 import { queryClient } from "./query-client";
 import { clearHeicCaches } from "./heic-cache";
 import { useSyncStore } from "./sync-store";
+import { lastPersonasUser, teardownPersonas } from "./personas-device/teardown";
+import { wipePersonasDevice } from "./personas-device/wipe";
 
 /** Fired after session-scoped state is torn down. Providers that hold
  *  per-account state in React state (e.g. WorkspaceProvider's activeId)
@@ -23,5 +25,11 @@ export function resetSessionState(): void {
   toast.dismiss();
   // Drop the last sync snapshot (pair names, file names, logs are per-account).
   useSyncStore.setState({ status: null, isLoading: true });
+  // On-device Personas: stop the read loops and the reader worker, drop every
+  // engine and the photo listing, and make no new engine until the user changes.
+  teardownPersonas();
+  // Then remove that user's cached personas key and sealed snapshots from this
+  // device. Best effort and never throws; sign-out does not wait for it.
+  void wipePersonasDevice(lastPersonasUser());
   window.dispatchEvent(new Event(SESSION_RESET_EVENT));
 }

@@ -20,9 +20,9 @@ test("packaged policy lets libsodium instantiate WebAssembly and nothing more in
   ]);
 });
 
-test("packaged connect-src names the API, docs and BOTH R2 chunk endpoints", () => {
+test("packaged connect-src names the API (and its live chat socket), docs and BOTH R2 chunk endpoints", () => {
   assert.deepEqual(directive(packagedCsp(inputs), "connect-src"), [
-    "'self'", "sentry-ipc:", "https://api.dosya.dev", "https://docs.dosya.dev",
+    "'self'", "sentry-ipc:", "https://api.dosya.dev", "wss://api.dosya.dev", "https://docs.dosya.dev",
     "https://0b25394b353c95a526538e19706809e8.r2.cloudflarestorage.com",
     "https://0b25394b353c95a526538e19706809e8.eu.r2.cloudflarestorage.com",
   ]);

@@ -1,0 +1,5334 @@
+[
+ {
+  "name": "darwin default",
+  "template": [
+   {
+    "label": "dosya",
+    "submenu": [
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     },
+     {
+      "label": "Check for Updates…",
+      "action": {
+       "kind": "simple",
+       "id": "check-for-updates"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+,",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "services",
+      "label": "Services"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "hide",
+      "label": "Hide dosya"
+     },
+     {
+      "role": "hideOthers",
+      "label": "Hide Others"
+     },
+     {
+      "role": "unhide",
+      "label": "Show All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Quit dosya"
+     }
+    ]
+   },
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close Window"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": false
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "No folders syncing",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "front",
+      "label": "Bring All to Front"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "darwin files + sync",
+  "template": [
+   {
+    "label": "dosya",
+    "submenu": [
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     },
+     {
+      "label": "Check for Updates…",
+      "action": {
+       "kind": "simple",
+       "id": "check-for-updates"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+,",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "services",
+      "label": "Services"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "hide",
+      "label": "Hide dosya"
+     },
+     {
+      "role": "hideOthers",
+      "label": "Hide Others"
+     },
+     {
+      "role": "unhide",
+      "label": "Show All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Quit dosya"
+     }
+    ]
+   },
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close Window"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": true,
+      "enabled": true,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": true,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": true
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "All synced · 2 folders",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sync All Now",
+      "action": {
+       "kind": "simple",
+       "id": "sync-now-all"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Pause Sync",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause"
+      }
+     },
+     {
+      "label": "Pause for 1 Hour",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause-hour"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Sync Folder",
+      "submenu": [
+       {
+        "label": "Photos",
+        "action": {
+         "kind": "open-sync-folder",
+         "pairId": "p1"
+        }
+       },
+       {
+        "label": "Reports 2026",
+        "action": {
+         "kind": "open-sync-folder",
+         "pairId": "p2"
+        }
+       }
+      ]
+     },
+     {
+      "label": "Resolve 2 Conflicts…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      }
+     },
+     {
+      "label": "Sync Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "front",
+      "label": "Bring All to Front"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "darwin one pair, dev, update ready",
+  "template": [
+   {
+    "label": "dosya",
+    "submenu": [
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     },
+     {
+      "label": "Restart to Update…",
+      "action": {
+       "kind": "simple",
+       "id": "install-update"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+,",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "services",
+      "label": "Services"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "hide",
+      "label": "Hide dosya"
+     },
+     {
+      "role": "hideOthers",
+      "label": "Hide Others"
+     },
+     {
+      "role": "unhide",
+      "label": "Show All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Quit dosya"
+     }
+    ]
+   },
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close Window"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "reload",
+      "label": "Reload"
+     },
+     {
+      "role": "forceReload",
+      "label": "Force Reload"
+     },
+     {
+      "role": "toggleDevTools",
+      "label": "Toggle Developer Tools"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": false
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "All synced · 1 folder",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sync All Now",
+      "action": {
+       "kind": "simple",
+       "id": "sync-now-all"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Pause Sync",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause"
+      }
+     },
+     {
+      "label": "Pause for 1 Hour",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause-hour"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Sync Folder",
+      "action": {
+       "kind": "open-sync-folder",
+       "pairId": "p1"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      }
+     },
+     {
+      "label": "Sync Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "front",
+      "label": "Bring All to Front"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "win32 default",
+  "template": [
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Exit"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "Ctrl+,",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": false
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "No folders syncing",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Check for Updates…",
+      "action": {
+       "kind": "simple",
+       "id": "check-for-updates"
+      },
+      "enabled": true
+     },
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "win32 files + sync",
+  "template": [
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Exit"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "Ctrl+,",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": true,
+      "enabled": true,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": true,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": true
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "All synced · 2 folders",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sync All Now",
+      "action": {
+       "kind": "simple",
+       "id": "sync-now-all"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Pause Sync",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause"
+      }
+     },
+     {
+      "label": "Pause for 1 Hour",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause-hour"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Sync Folder",
+      "submenu": [
+       {
+        "label": "Photos",
+        "action": {
+         "kind": "open-sync-folder",
+         "pairId": "p1"
+        }
+       },
+       {
+        "label": "Reports 2026",
+        "action": {
+         "kind": "open-sync-folder",
+         "pairId": "p2"
+        }
+       }
+      ]
+     },
+     {
+      "label": "Resolve 2 Conflicts…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      }
+     },
+     {
+      "label": "Sync Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Check for Updates…",
+      "action": {
+       "kind": "simple",
+       "id": "check-for-updates"
+      },
+      "enabled": true
+     },
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "win32 one pair, dev, update ready",
+  "template": [
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Exit"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "Ctrl+,",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "reload",
+      "label": "Reload"
+     },
+     {
+      "role": "forceReload",
+      "label": "Force Reload"
+     },
+     {
+      "role": "toggleDevTools",
+      "label": "Toggle Developer Tools"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": false
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "All synced · 1 folder",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sync All Now",
+      "action": {
+       "kind": "simple",
+       "id": "sync-now-all"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Pause Sync",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause"
+      }
+     },
+     {
+      "label": "Pause for 1 Hour",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause-hour"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Sync Folder",
+      "action": {
+       "kind": "open-sync-folder",
+       "pairId": "p1"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      }
+     },
+     {
+      "label": "Sync Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Restart to Update…",
+      "action": {
+       "kind": "simple",
+       "id": "install-update"
+      }
+     },
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "linux default",
+  "template": [
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Quit"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "Ctrl+,",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": false
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "No folders syncing",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Check for Updates…",
+      "action": {
+       "kind": "simple",
+       "id": "check-for-updates"
+      },
+      "enabled": true
+     },
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "linux files + sync",
+  "template": [
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Quit"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "Ctrl+,",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": true,
+      "enabled": true,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": true,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": true
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "All synced · 2 folders",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sync All Now",
+      "action": {
+       "kind": "simple",
+       "id": "sync-now-all"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Pause Sync",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause"
+      }
+     },
+     {
+      "label": "Pause for 1 Hour",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause-hour"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Sync Folder",
+      "submenu": [
+       {
+        "label": "Photos",
+        "action": {
+         "kind": "open-sync-folder",
+         "pairId": "p1"
+        }
+       },
+       {
+        "label": "Reports 2026",
+        "action": {
+         "kind": "open-sync-folder",
+         "pairId": "p2"
+        }
+       }
+      ]
+     },
+     {
+      "label": "Resolve 2 Conflicts…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      }
+     },
+     {
+      "label": "Sync Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Check for Updates…",
+      "action": {
+       "kind": "simple",
+       "id": "check-for-updates"
+      },
+      "enabled": true
+     },
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "linux one pair, dev, update ready",
+  "template": [
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Quit"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "accelerator": "CmdOrCtrl+K",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "Ctrl+,",
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": true,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "accelerator": "CmdOrCtrl+I",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "reload",
+      "label": "Reload"
+     },
+     {
+      "role": "forceReload",
+      "label": "Force Reload"
+     },
+     {
+      "role": "toggleDevTools",
+      "label": "Toggle Developer Tools"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": false
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": true
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": true
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": true
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": true
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": true
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": true
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": true
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": true
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": true
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": true
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "All synced · 1 folder",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sync All Now",
+      "action": {
+       "kind": "simple",
+       "id": "sync-now-all"
+      },
+      "enabled": true
+     },
+     {
+      "label": "Pause Sync",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause"
+      }
+     },
+     {
+      "label": "Pause for 1 Hour",
+      "action": {
+       "kind": "simple",
+       "id": "sync-pause-hour"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Sync Folder",
+      "action": {
+       "kind": "open-sync-folder",
+       "pairId": "p1"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      }
+     },
+     {
+      "label": "Sync Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      }
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "role": "close",
+      "label": "Close"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Restart to Update…",
+      "action": {
+       "kind": "simple",
+       "id": "install-update"
+      }
+     },
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "name": "mas store",
+  "template": [
+   {
+    "label": "dosya",
+    "submenu": [
+     {
+      "label": "About dosya",
+      "action": {
+       "kind": "simple",
+       "id": "about"
+      }
+     },
+     {
+      "label": "Open Mac App Store…",
+      "action": {
+       "kind": "simple",
+       "id": "open-store"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Settings…",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+,",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Sign Out…",
+      "action": {
+       "kind": "simple",
+       "id": "sign-out"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "services",
+      "label": "Services"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "hide",
+      "label": "Hide dosya"
+     },
+     {
+      "role": "hideOthers",
+      "label": "Hide Others"
+     },
+     {
+      "role": "unhide",
+      "label": "Show All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "quit",
+      "label": "Quit dosya"
+     }
+    ]
+   },
+   {
+    "label": "File",
+    "submenu": [
+     {
+      "label": "New Folder…",
+      "action": {
+       "kind": "simple",
+       "id": "new-folder"
+      },
+      "accelerator": "CmdOrCtrl+Shift+N",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Upload Files…",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+U",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Download Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "download-selected"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Share Selected…",
+      "action": {
+       "kind": "simple",
+       "id": "share-selected"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "close",
+      "label": "Close Window"
+     }
+    ]
+   },
+   {
+    "label": "Edit",
+    "submenu": [
+     {
+      "role": "undo",
+      "label": "Undo"
+     },
+     {
+      "role": "redo",
+      "label": "Redo"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "cut",
+      "label": "Cut"
+     },
+     {
+      "role": "copy",
+      "label": "Copy"
+     },
+     {
+      "role": "paste",
+      "label": "Paste"
+     },
+     {
+      "role": "selectAll",
+      "label": "Select All"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Find…",
+      "action": {
+       "kind": "simple",
+       "id": "find"
+      },
+      "accelerator": "CmdOrCtrl+F"
+     },
+     {
+      "label": "Search dosya…",
+      "action": {
+       "kind": "navigate",
+       "path": "/search"
+      },
+      "enabled": false
+     }
+    ]
+   },
+   {
+    "label": "View",
+    "submenu": [
+     {
+      "label": "as List",
+      "type": "checkbox",
+      "checked": true,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "table"
+      }
+     },
+     {
+      "label": "as Grid",
+      "type": "checkbox",
+      "checked": false,
+      "enabled": false,
+      "action": {
+       "kind": "view",
+       "mode": "card"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Show Sidebar",
+      "type": "checkbox",
+      "checked": true,
+      "accelerator": "CmdOrCtrl+Alt+S",
+      "enabled": false,
+      "action": {
+       "kind": "simple",
+       "id": "toggle-sidebar"
+      }
+     },
+     {
+      "label": "Show File Details",
+      "action": {
+       "kind": "simple",
+       "id": "toggle-details"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Appearance",
+      "submenu": [
+       {
+        "label": "Light",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "light"
+        }
+       },
+       {
+        "label": "Dark",
+        "type": "radio",
+        "checked": false,
+        "action": {
+         "kind": "appearance",
+         "mode": "dark"
+        }
+       },
+       {
+        "label": "System",
+        "type": "radio",
+        "checked": true,
+        "action": {
+         "kind": "appearance",
+         "mode": "system"
+        }
+       }
+      ]
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "resetZoom",
+      "label": "Actual Size"
+     },
+     {
+      "role": "zoomIn",
+      "label": "Zoom In"
+     },
+     {
+      "role": "zoomOut",
+      "label": "Zoom Out"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "togglefullscreen",
+      "label": "Toggle Full Screen"
+     }
+    ]
+   },
+   {
+    "label": "Go",
+    "submenu": [
+     {
+      "label": "Back",
+      "action": {
+       "kind": "simple",
+       "id": "go-back"
+      },
+      "accelerator": "CmdOrCtrl+[",
+      "enabled": true
+     },
+     {
+      "label": "Forward",
+      "action": {
+       "kind": "simple",
+       "id": "go-forward"
+      },
+      "accelerator": "CmdOrCtrl+]",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Dashboard",
+      "action": {
+       "kind": "navigate",
+       "path": "/dashboard"
+      },
+      "accelerator": "CmdOrCtrl+1",
+      "enabled": false
+     },
+     {
+      "label": "Files",
+      "action": {
+       "kind": "navigate",
+       "path": "/files"
+      },
+      "accelerator": "CmdOrCtrl+2",
+      "enabled": false
+     },
+     {
+      "label": "Upload",
+      "action": {
+       "kind": "navigate",
+       "path": "/upload"
+      },
+      "accelerator": "CmdOrCtrl+3",
+      "enabled": false
+     },
+     {
+      "label": "Shared",
+      "action": {
+       "kind": "navigate",
+       "path": "/shared"
+      },
+      "accelerator": "CmdOrCtrl+4",
+      "enabled": false
+     },
+     {
+      "label": "Vault",
+      "action": {
+       "kind": "navigate",
+       "path": "/vault"
+      },
+      "accelerator": "CmdOrCtrl+5",
+      "enabled": false
+     },
+     {
+      "label": "Sync",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync"
+      },
+      "accelerator": "CmdOrCtrl+6",
+      "enabled": false
+     },
+     {
+      "label": "Workspaces",
+      "action": {
+       "kind": "navigate",
+       "path": "/workspaces"
+      },
+      "accelerator": "CmdOrCtrl+7",
+      "enabled": false
+     },
+     {
+      "label": "Team",
+      "action": {
+       "kind": "navigate",
+       "path": "/team"
+      },
+      "accelerator": "CmdOrCtrl+8",
+      "enabled": false
+     },
+     {
+      "label": "Settings",
+      "action": {
+       "kind": "navigate",
+       "path": "/settings"
+      },
+      "accelerator": "CmdOrCtrl+9",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Favourites",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=favourites"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Deleted",
+      "action": {
+       "kind": "navigate",
+       "path": "/files?filter=deleted"
+      },
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "LAN Transfer",
+      "action": {
+       "kind": "navigate",
+       "path": "/lan-transfer"
+      },
+      "enabled": false
+     },
+     {
+      "label": "Notifications",
+      "action": {
+       "kind": "navigate",
+       "path": "/notifications"
+      },
+      "enabled": false
+     }
+    ]
+   },
+   {
+    "label": "Sync",
+    "submenu": [
+     {
+      "label": "No folders syncing",
+      "enabled": false
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Add Folder to Sync…",
+      "action": {
+       "kind": "navigate",
+       "path": "/sync?add=1"
+      },
+      "enabled": false
+     }
+    ]
+   },
+   {
+    "label": "Window",
+    "submenu": [
+     {
+      "role": "minimize",
+      "label": "Minimize"
+     },
+     {
+      "role": "zoom",
+      "label": "Zoom"
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "role": "front",
+      "label": "Bring All to Front"
+     }
+    ]
+   },
+   {
+    "role": "help",
+    "label": "Help",
+    "submenu": [
+     {
+      "label": "dosya Help",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/help"
+      }
+     },
+     {
+      "label": "Keyboard Shortcuts",
+      "action": {
+       "kind": "simple",
+       "id": "shortcuts"
+      },
+      "accelerator": "CmdOrCtrl+/"
+     },
+     {
+      "label": "What's New",
+      "action": {
+       "kind": "external",
+       "url": "https://dosya.dev/changelog/"
+      }
+     },
+     {
+      "type": "separator"
+     },
+     {
+      "label": "Open Log Folder",
+      "action": {
+       "kind": "simple",
+       "id": "open-log-folder"
+      }
+     },
+     {
+      "label": "Report a Problem…",
+      "action": {
+       "kind": "simple",
+       "id": "report-problem"
+      },
+      "accelerator": "CmdOrCtrl+Shift+B"
+     }
+    ]
+   }
+  ]
+ }
+]

@@ -2,6 +2,7 @@ import { Play } from 'lucide-react';
 import { stripExt } from '@dosya-dev/audio-player';
 import { humanSize } from '@/lib/file-type';
 import type { ViewerFile } from '../FileViewer';
+import { useAutoDir } from "@/lib/bidi-ui";
 
 interface Props {
   queue: ViewerFile[];
@@ -14,6 +15,7 @@ interface Props {
 
 /** The rows only - the player owns the tab header above them. */
 export function QueuePanel({ queue, activeIndex, playing, folder, onPick }: Props) {
+  const ownDir = useAutoDir();
   return (
     <>
       {queue.map((t, i) => {
@@ -24,7 +26,7 @@ export function QueuePanel({ queue, activeIndex, playing, folder, onPick }: Prop
               data-track
               onClick={() => onPick(i)}
               aria-current={active ? 'true' : undefined}
-              className={`group grid w-full grid-cols-[26px_1fr_auto] items-center gap-3.5 border-b border-[var(--color-border)] border-[color-mix(in_oklab,var(--color-border)_55%,transparent)] px-5 py-2 text-left transition-colors ${
+              className={`group grid w-full grid-cols-[26px_1fr_auto] items-center gap-3.5 border-b border-[var(--color-border)] border-[color-mix(in_oklab,var(--color-border)_55%,transparent)] px-5 py-2 text-start transition-colors ${
                 active ? 'bg-[color-mix(in_oklab,var(--color-primary)_10%,transparent)]' : 'hover:bg-[color-mix(in_oklab,var(--color-text)_5%,transparent)]'
               }`}
             >
@@ -46,7 +48,7 @@ export function QueuePanel({ queue, activeIndex, playing, folder, onPick }: Prop
               </span>
 
               <span className="min-w-0">
-                <span className={`block truncate text-sm leading-snug ${active ? 'font-bold' : 'font-medium'}`}>
+                <span dir={ownDir} className={`block truncate text-sm leading-snug ${active ? 'font-bold' : 'font-medium'}`}>
                   {stripExt(t.name)}
                 </span>
                 {folder && (

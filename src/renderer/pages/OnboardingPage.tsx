@@ -12,66 +12,73 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "../../i18n/keys";
 
-const steps = [
+// Catalog keys, translated at render so a language switch reaches them.
+const steps: {
+  title: MessageKey;
+  /** The step's name in the left-hand list, where it is shorter. */
+  short?: MessageKey;
+  description: MessageKey;
+  icon: typeof MonitorSmartphone;
+  features: MessageKey[];
+}[] = [
   {
-    title: "Welcome to dosya.dev",
-    description:
-      "Your files, everywhere. dosya.dev gives you a fast, secure space to store, sync, and share files across all your devices.",
+    title: "onboarding.heading.welcomeToDosyaDev",
+    short: "onboarding.heading.welcome",
+    description: "onboarding.description.yourFilesEverywhereDosyaDevGivesYouAFast",
     icon: MonitorSmartphone,
     features: [
-      "Up to 10 TB of cloud storage",
-      "Available on Windows, macOS, and Linux",
-      "Access your files from any browser",
+      "onboarding.label.upTo10TBOfCloudStorage",
+      "onboarding.label.availableOnWindowsMacOSAndLinux",
+      "onboarding.label.accessYourFilesFromAnyBrowser",
     ],
   },
   {
-    title: "Sync folders automatically",
-    description:
-      "Pick any folder on your computer and dosya.dev keeps it in sync with the cloud. Changes upload in the background - no manual steps needed.",
+    title: "onboarding.heading.syncFoldersAutomatically",
+    description: "onboarding.description.pickAnyFolderOnYourComputerAndDosyaDev",
     icon: FolderSync,
     features: [
-      "Two-way, push, or pull sync modes",
-      "Runs silently in your system tray",
-      "Pause and resume anytime",
+      "onboarding.label.twoWayPushOrPullSyncModes",
+      "onboarding.label.runsSilentlyInYourSystemTray",
+      "onboarding.label.pauseAndResumeAnytime",
     ],
   },
   {
-    title: "Upload anything, instantly",
-    description:
-      "Drag and drop files straight from your desktop. Large files are handled natively - no browser upload limits, no timeouts.",
+    title: "onboarding.heading.uploadAnythingInstantly",
+    description: "onboarding.description.dragAndDropFilesStraightFromYourDesktopLarge",
     icon: Upload,
     features: [
-      "No file size limits",
-      "Drag and drop from your file manager",
-      "Automatic versioning on every change",
+      "onboarding.label.noFileSizeLimits",
+      "onboarding.label.dragAndDropFromYourFileManager",
+      "onboarding.label.automaticVersioningOnEveryChange",
     ],
   },
   {
-    title: "Secure by default",
-    description:
-      "Every file is encrypted at rest with AES-256. Share files with expiring links, password protection, and download limits.",
+    title: "onboarding.heading.secureByDefault",
+    description: "onboarding.description.everyFileIsEncryptedAtRestWithAES256",
     icon: Shield,
     features: [
-      "AES-256 encryption at rest",
-      "Password-protected share links",
-      "Expiring links with download limits",
+      "onboarding.label.aes256EncryptionAtRest",
+      "onboarding.label.passwordProtectedShareLinks",
+      "onboarding.label.expiringLinksWithDownloadLimits",
     ],
   },
   {
-    title: "Stay in the loop",
-    description:
-      "Get native notifications when uploads finish, when someone shares a file with you, or when your storage is running low.",
+    title: "onboarding.heading.stayInTheLoop",
+    description: "onboarding.description.getNativeNotificationsWhenUploadsFinishWhenSomeoneShares",
     icon: Bell,
     features: [
-      "Native OS notifications",
-      "Upload and sync progress in the tray",
-      "Team activity updates",
+      "onboarding.label.nativeOSNotifications",
+      "onboarding.label.uploadAndSyncProgressInTheTray",
+      "onboarding.label.teamActivityUpdates",
     ],
   },
 ];
 
 export function OnboardingPage() {
+  const t = useT();
   const [step, setStep] = useState(0);
   const navigate = useNavigate();
   const { isAuthenticated, isLoading } = useAuth();
@@ -120,7 +127,7 @@ export function OnboardingPage() {
               <button
                 key={i}
                 onClick={() => setStep(i)}
-                className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left transition-all ${
+                className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-start transition-all ${
                   isActive
                     ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
                     : isDone
@@ -132,7 +139,7 @@ export function OnboardingPage() {
                 <span
                   className={`text-sm ${isActive ? "font-semibold" : "font-medium"}`}
                 >
-                  {s.title.replace("Welcome to dosya.dev", "Welcome")}
+                  {t(s.short ?? s.title)}
                 </span>
               </button>
             );
@@ -144,7 +151,7 @@ export function OnboardingPage() {
           onClick={finish}
           className="text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors"
         >
-          Skip onboarding
+          {t("onboarding.action.skipOnboarding")}
         </button>
       </div>
 
@@ -163,12 +170,12 @@ export function OnboardingPage() {
 
           {/* Title */}
           <h1 className="mb-4 text-3xl font-bold tracking-tight text-[var(--color-text)]">
-            {current.title}
+            {t(current.title)}
           </h1>
 
           {/* Description */}
           <p className="mb-8 text-base leading-relaxed text-[var(--color-text-secondary)]">
-            {current.description}
+            {t(current.description)}
           </p>
 
           {/* Feature list */}
@@ -176,17 +183,17 @@ export function OnboardingPage() {
             {current.features.map((feature, i) => (
               <div
                 key={i}
-                className="flex items-center gap-3 rounded-lg bg-[var(--color-bg)] px-4 py-3 text-left shadow-sm"
+                className="flex items-center gap-3 rounded-lg bg-[var(--color-bg)] px-4 py-3 text-start shadow-sm"
                 style={{ borderColor: "var(--color-border)" }}
               >
                 <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary)]/10">
                   <ChevronRight
                     size={14}
-                    className="text-[var(--color-primary)]"
+                    className="text-[var(--color-primary)] rtl:-scale-x-100"
                   />
                 </div>
                 <span className="text-sm text-[var(--color-text)]">
-                  {feature}
+                  {t(feature)}
                 </span>
               </div>
             ))}
@@ -213,14 +220,14 @@ export function OnboardingPage() {
               onClick={next}
               className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-[var(--color-primary-fg)] transition-colors hover:bg-[var(--color-primary-hover)]"
             >
-              {isLast ? "Get Started" : "Next"}
-              <ArrowRight size={16} />
+              {isLast ? t("onboarding.action.getStarted") : t("common.next")}
+              <ArrowRight size={16} className="rtl:-scale-x-100" />
             </button>
           </div>
         </div>
 
         {/* Step counter */}
-        <div className="absolute bottom-6 right-8 text-xs text-[var(--color-text-muted)]">
+        <div className="absolute bottom-6 inset-e-8 text-xs text-[var(--color-text-muted)]">
           {step + 1} / {steps.length}
         </div>
       </div>

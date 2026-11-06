@@ -11,7 +11,10 @@ export function Modal({
   return (
     <div className="anim-modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div
-        className="anim-modal-panel w-full rounded-xl bg-[var(--color-bg)] p-6 shadow-xl"
+        // overflow-wrap is inherited: a file name quoted in any dialog's
+        // copy is one unbreakable word, and without this it ran past the
+        // panel's border. Truncated rows (white-space: nowrap) are unaffected.
+        className="anim-modal-panel mx-4 w-full min-w-0 rounded-xl bg-[var(--color-bg)] p-6 shadow-xl [overflow-wrap:anywhere]"
         style={{ maxWidth }}
         onClick={(e) => e.stopPropagation()}
       >

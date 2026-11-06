@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   parseSessionCookieHeaders,
+  parseChallengeCookieHeader,
+  CHALLENGE_COOKIE,
   sessionCookieHeader,
   isSessionCookieName,
   HOST_SESSION_COOKIE,
@@ -128,4 +130,26 @@ test("isSessionCookieName recognises both names and nothing else", () => {
   assert.equal(isSessionCookieName(LEGACY_SESSION_COOKIE), true);
   assert.equal(isSessionCookieName("dosya_session_backup"), false);
   assert.equal(isSessionCookieName("csrf"), false);
+});
+
+// The 2FA challenge cookie meets the same cross-site drop as the session one:
+// unstored, /api/auth/2fa/verify answered "No 2FA challenge found" and every
+// account with 2FA was locked out of password sign-in on desktop.
+test("captures the 2FA challenge cookie with its lifetime", () => {
+  const got = parseChallengeCookieHeader({
+    "set-cookie": [`${CHALLENGE_COOKIE}=abc123; Path=/; HttpOnly; SameSite=Lax; Max-Age=300; Secure`],
+  });
+  assert.deepEqual(got, { action: "store", value: "abc123", maxAgeSeconds: 300 });
+});
+
+test("an empty or Max-Age=0 challenge cookie clears it", () => {
+  assert.deepEqual(
+    parseChallengeCookieHeader({ "Set-Cookie": [`${CHALLENGE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`] }),
+    { action: "clear" },
+  );
+});
+
+test("no challenge cookie on the response means nothing to do", () => {
+  assert.equal(parseChallengeCookieHeader({ "set-cookie": ["dosya_session=x; Path=/"] }), null);
+  assert.equal(parseChallengeCookieHeader(undefined), null);
 });

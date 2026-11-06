@@ -27,7 +27,11 @@ import type { SyncFileError, SyncFileRecord, SyncFolderRecord } from "./types";
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
+-- FULL, not NORMAL: in WAL mode NORMAL survives a process crash but not a
+-- power loss, and a lost base-row write means the next cycle treats a
+-- half-landed download as an unsynced local edit or, worse, a synced one.
+-- Writes are already batched; FULL costs one fsync per transaction.
+PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);

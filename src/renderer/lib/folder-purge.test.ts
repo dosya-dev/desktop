@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   purgeTrashedFolder,
@@ -8,6 +9,12 @@ import {
   MAX_PURGE_CALLS,
   type PurgeResponse,
 } from "./folder-purge.ts";
+import { setTranslator } from "./locale-state.ts";
+import { makeT } from "../../i18n/translator.ts";
+
+// The summaries are catalog messages: translate them in English, as the app does.
+const enMessages = JSON.parse(readFileSync(new URL("../../i18n/messages/en.json", import.meta.url), "utf8"));
+setTranslator(makeT("en", enMessages, enMessages));
 
 /**
  * Run with `npm run test:unit` in apps/desktop - Node's own test runner.

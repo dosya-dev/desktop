@@ -1,10 +1,17 @@
-import { formatBytes } from "@dosya-dev/shared";
+// Node-safe on purpose: locale-state, not i18n.tsx (React + JSON catalogs),
+// so modules that node:test loads (file-columns -> format) can import this.
+import { getActiveLocale, intlLocale, tl } from "./locale-state";
+export { intlLocale };
+import { formatBytes as bytesIn, formatRelative as relative } from "../../i18n/translator";
 
-export { formatBytes };
+/** "1.5 KB" (en), "1,5 KB" (de), "1,5 Ko" (fr), following the chosen language. */
+export function formatBytes(bytes: number): string {
+  return bytesIn(getActiveLocale(), bytes);
+}
 
 export function formatDate(ts: number | string): string {
   const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
-  return d.toLocaleDateString(undefined, {
+  return d.toLocaleDateString(intlLocale(), {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -12,18 +19,7 @@ export function formatDate(ts: number | string): string {
 }
 
 export function formatRelative(ts: number | string): string {
-  const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
-  const now = Date.now();
-  const diff = now - d.getTime();
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return formatDate(ts);
+  return relative(getActiveLocale(), ts, tl);
 }
 
 export function fileIcon(ext: string | null): string {

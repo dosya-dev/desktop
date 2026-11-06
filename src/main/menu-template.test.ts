@@ -1,11 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   buildMenuTemplate,
   defaultMenuState,
   type MenuContext,
   type TemplateItem,
 } from "./menu-template.ts";
+import { makeT, type Messages } from "../i18n/translator.ts";
+
+const messages = (locale: string): Messages =>
+  JSON.parse(readFileSync(new URL(`../i18n/messages/${locale}.json`, import.meta.url), "utf8")) as Messages;
+const en = messages("en");
+const enT = makeT("en", en, en);
+const trT = makeT("tr", messages("tr"), en);
 
 function ctx(over: Partial<MenuContext> = {}): MenuContext {
   return {
@@ -15,17 +23,22 @@ function ctx(over: Partial<MenuContext> = {}): MenuContext {
     updateState: "idle",
     sync: null,
     state: defaultMenuState(),
+    t: enT,
     ...over,
   };
 }
 
-const titles = (items: TemplateItem[]) => items.map((m) => m.label ?? m.role);
+// A role item is named by its role (it also carries a label, checked in the
+// role-label tests below), every other item by its label.
+const titles = (items: TemplateItem[]) => items.map((m) => m.role ?? m.label);
 const find = (items: TemplateItem[], title: string): TemplateItem => {
-  const m = items.find((i) => (i.label ?? i.role) === title);
+  const m = items.find((i) => (i.role ?? i.label) === title);
   assert.ok(m, `menu "${title}" is missing from ${JSON.stringify(titles(items))}`);
   return m;
 };
-const labels = (m: TemplateItem) => (m.submenu ?? []).map((i) => i.label ?? i.role ?? (i.type === "separator" ? "-" : "?"));
+const labels = (m: TemplateItem) => (m.submenu ?? []).map((i) => i.role ?? i.label ?? (i.type === "separator" ? "-" : "?"));
+/** The labels a role item shows, keyed by role: what the menu bar displays. */
+const roleLabels = (m: TemplateItem) => (m.submenu ?? []).filter((i) => i.role).map((i) => [i.role, i.label]);
 const item = (m: TemplateItem, label: string): TemplateItem => {
   const i = (m.submenu ?? []).find((x) => x.label === label);
   assert.ok(i, `item "${label}" is missing from ${JSON.stringify(labels(m))}`);
@@ -124,6 +137,20 @@ test("Edit keeps the editing roles and adds Find and Search", () => {
   assert.deepEqual(item(edit, "Find…").action, { kind: "simple", id: "find" });
   assert.equal(item(edit, "Search dosya…").accelerator, "CmdOrCtrl+K");
   assert.deepEqual(item(edit, "Search dosya…").action, { kind: "navigate", path: "/search" });
+});
+
+test("in the text editor, ⌘K and ⌘I belong to the editor (link, italic), not the menu", () => {
+  const state = { ...defaultMenuState(), route: "/text-editor/f1", signedIn: true };
+  const t = buildMenuTemplate(ctx({ state }));
+  // Still in the menu, still clickable, just without the key the editor uses.
+  const search = item(find(t, "Edit"), "Search dosya…");
+  assert.equal(search.accelerator, undefined);
+  assert.deepEqual(search.action, { kind: "navigate", path: "/search" });
+  assert.equal(item(find(t, "View"), "Show File Details").accelerator, undefined);
+  // Everywhere else they keep their keys.
+  const files = buildMenuTemplate(ctx({ state: { ...state, route: "/files" } }));
+  assert.equal(item(find(files, "Edit"), "Search dosya…").accelerator, "CmdOrCtrl+K");
+  assert.equal(item(find(files, "View"), "Show File Details").accelerator, "CmdOrCtrl+I");
 });
 
 test("View is presentation only, with checkmarks that follow the renderer's state", () => {
@@ -225,6 +252,56 @@ test("Sync while paused offers Resume instead of Pause, and a single folder open
   assert.ok(!labels(sync).some((l) => l.startsWith("Resolve")));
 });
 
+test("role items show Electron's own English labels, per platform", () => {
+  const mac = buildMenuTemplate(ctx({ isDev: true }));
+  assert.deepEqual(roleLabels(find(mac, "dosya")), [
+    ["services", "Services"], ["hide", "Hide dosya"], ["hideOthers", "Hide Others"], ["unhide", "Show All"], ["quit", "Quit dosya"],
+  ]);
+  assert.deepEqual(roleLabels(find(mac, "File")), [["close", "Close Window"]]);
+  assert.deepEqual(roleLabels(find(mac, "Edit")), [
+    ["undo", "Undo"], ["redo", "Redo"], ["cut", "Cut"], ["copy", "Copy"], ["paste", "Paste"], ["selectAll", "Select All"],
+  ]);
+  assert.deepEqual(roleLabels(find(mac, "View")), [
+    ["resetZoom", "Actual Size"], ["zoomIn", "Zoom In"], ["zoomOut", "Zoom Out"], ["togglefullscreen", "Toggle Full Screen"],
+    ["reload", "Reload"], ["forceReload", "Force Reload"], ["toggleDevTools", "Toggle Developer Tools"],
+  ]);
+  assert.deepEqual(roleLabels(find(mac, "Window")), [["minimize", "Minimize"], ["zoom", "Zoom"], ["front", "Bring All to Front"]]);
+  assert.equal(find(mac, "help").label, "Help");
+
+  const win = buildMenuTemplate(ctx({ platform: "win32" }));
+  assert.deepEqual(roleLabels(find(win, "File")), [["close", "Close"], ["quit", "Exit"]]);
+  assert.deepEqual(roleLabels(find(win, "Window")), [["minimize", "Minimize"], ["zoom", "Zoom"], ["close", "Close"]]);
+  const linux = buildMenuTemplate(ctx({ platform: "linux" }));
+  assert.deepEqual(roleLabels(find(linux, "File")), [["close", "Close"], ["quit", "Quit"]]);
+});
+
+test("a Turkish t translates the menu titles, items and role items", () => {
+  const t = buildMenuTemplate(ctx({ t: trT }));
+  assert.deepEqual(t.map((m) => m.label), ["dosya", "Dosya", "Düzen", "Görüntü", "Git", "Senkronizasyon", "Pencere", "Yardım"]);
+  assert.equal(find(t, "help").role, "help");
+  const file = find(t, "Dosya");
+  assert.ok(hasItem(file, "Yeni klasör"));
+  assert.deepEqual(roleLabels(file), [["close", "Pencereyi kapat"]]);
+  assert.deepEqual(roleLabels(find(t, "dosya")), [
+    ["services", "Servisler"], ["hide", "dosya.dev'i gizle"], ["hideOthers", "Diğerlerini gizle"], ["unhide", "Tümünü göster"], ["quit", "dosya.dev'den çık"],
+  ]);
+  assert.deepEqual(roleLabels(find(t, "Düzen")), [
+    ["undo", "Geri al"], ["redo", "Yinele"], ["cut", "Kes"], ["copy", "Kopyala"], ["paste", "Yapıştır"], ["selectAll", "Tümünü seç"],
+  ]);
+  assert.deepEqual(roleLabels(find(t, "Pencere")), [["minimize", "Küçült"], ["zoom", "Büyüt"], ["front", "Tümünü öne getir"]]);
+  assert.ok(roleLabels(find(t, "Görüntü")).some(([r, l]) => r === "togglefullscreen" && l === "Tam ekranı aç/kapat"));
+  const winFile = find(buildMenuTemplate(ctx({ t: trT, platform: "win32" })), "Dosya");
+  assert.deepEqual(roleLabels(winFile), [["close", "Kapat"], ["quit", "Çıkış"]]);
+  const sync = find(buildMenuTemplate(ctx({
+    t: trT,
+    sync: { summary: "Tümü senkronize edildi", globalPaused: false, unresolvedConflicts: 3, pairs: [{ pairId: "p1", name: "Belgeler", localPath: "/x" }, { pairId: "p2", name: "Fotoğraflar", localPath: "/y" }] },
+  })), "Senkronizasyon");
+  assert.equal(labels(sync)[0], "Tümü senkronize edildi · 2 klasör");
+  assert.ok(hasItem(sync, "3 çakışmayı çöz"));
+  const store = find(buildMenuTemplate(ctx({ t: trT, distribution: "mas" })), "dosya");
+  assert.ok(hasItem(store, "Mağazayı aç: Mac App Store"));
+});
+
 test("Window differs per platform the way it always did", () => {
   assert.deepEqual(labels(find(buildMenuTemplate(ctx()), "Window")), ["minimize", "zoom", "-", "front"]);
   assert.deepEqual(labels(find(buildMenuTemplate(ctx({ platform: "win32" })), "Window")), ["minimize", "zoom", "close"]);
@@ -267,4 +344,49 @@ test("while the update installs the menu says so and offers nothing to click", (
   assert.ok(!hasItem(installing, "Check for Updates…"));
   assert.ok(!hasItem(installing, "Restart to Update…"));
   assert.equal(item(installing, "Installing Update…").enabled, false);
+});
+
+// ---- right-to-left ----
+import { makeDirectionalT } from "../i18n/bidi.ts";
+import { fixtureCases, FIXTURE_PAIRS } from "./menu-fixture-cases.ts";
+
+const FSI = "⁨";
+const PDI = "⁩";
+
+test("English builds exactly the template captured at b32e39925", () => {
+  const fixture = JSON.parse(
+    readFileSync(new URL("./fixtures/menu-template-en-b32e39925.json", import.meta.url), "utf8"),
+  ) as { name: string; template: unknown }[];
+  const cases = fixtureCases(enT);
+  assert.equal(fixture.length, cases.length);
+  for (const [i, c] of cases.entries()) {
+    assert.equal(fixture[i].name, c.name);
+    assert.deepEqual(JSON.parse(JSON.stringify(buildMenuTemplate({ ...c.ctx, dir: "ltr" }))), fixture[i].template, c.name);
+    assert.deepEqual(JSON.parse(JSON.stringify(buildMenuTemplate(c.ctx))), fixture[i].template, c.name);
+  }
+});
+
+test("a left-to-right language does not isolate sync pair names", () => {
+  const sync = { summary: "x", globalPaused: false, unresolvedConflicts: 0, pairs: FIXTURE_PAIRS };
+  const t = buildMenuTemplate(ctx({ sync, dir: "ltr", t: enT }));
+  const open = find(t, "Sync").submenu!.find((i) => i.submenu)!;
+  assert.deepEqual(open.submenu!.map((i) => i.label), ["Photos", "Reports 2026"]);
+});
+
+test("Arabic menus carry Arabic labels and isolated pair names", () => {
+  const ar = messages("ar");
+  const arT = makeDirectionalT("ar", ar, en);
+  const sync = { summary: "x", globalPaused: false, unresolvedConflicts: 0, pairs: FIXTURE_PAIRS };
+  const t = buildMenuTemplate(ctx({ sync, dir: "rtl", t: arT }));
+  const file = t.find((m) => m.label === ar["menus.label.file.menu"]);
+  assert.ok(file, "the File menu is in Arabic");
+  assert.notEqual(ar["menus.label.file.menu"], en["menus.label.file.menu"]);
+  const syncMenu = t.find((m) => m.label === ar["common.label.sync"])!;
+  const open = syncMenu.submenu!.find((i) => i.submenu)!;
+  assert.deepEqual(open.submenu!.map((i) => i.label), [`${FSI}Photos${PDI}`, `${FSI}Reports 2026${PDI}`]);
+  // The action still carries the pair id, never the decorated name.
+  assert.deepEqual(open.submenu!.map((i) => i.action), [
+    { kind: "open-sync-folder", pairId: "p1" },
+    { kind: "open-sync-folder", pairId: "p2" },
+  ]);
 });

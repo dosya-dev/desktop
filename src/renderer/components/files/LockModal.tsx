@@ -2,9 +2,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, FileText, Folder, KeyRound, Loader2, Lock, LockOpen } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api-client";
+import { autoDir } from "@/lib/bidi-ui";
+import { api, ApiError } from "@/lib/api-client";
 import { Modal } from "@/components/files/Modal";
 import { formatBytes, formatRelative } from "@/lib/format";
+import { useT } from "@/lib/i18n";
 import {
   LOCK_MODE_OPTIONS, MIN_LOCK_PASSWORD_LENGTH,
   canApplyLock, describeLockMode, describeLockStatus, describeLockTarget,
@@ -43,10 +45,15 @@ function asLockMode(value: string | undefined): LockMode {
 
 const IS_MAC = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
 
+/**
+ * A key cap for the footer hints. The cap carries full ink: it used to inherit
+ * the row's --color-text-muted, which at 10.5px on --color-bg-secondary was
+ * close to invisible (QA TC-025).
+ */
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
     <kbd
-      className="inline-block min-w-[18px] rounded border px-1 text-center text-[10.5px] leading-4"
+      className="inline-block min-w-[18px] rounded border px-1 text-center text-[10.5px] font-medium leading-4 text-[var(--color-text)]"
       style={{ borderColor: "var(--color-border)", background: "var(--color-bg-secondary)", fontFamily: "inherit" }}
     >
       {children}
@@ -74,6 +81,7 @@ export function LockModal({ open, target, onClose, onDone }: LockModalProps) {
  * of its own.
  */
 function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClose: () => void; onDone: () => void }) {
+  const t = useT();
   const seed = asLockMode(target.lock_mode);
   const [loading, setLoading] = useState(true);
   const [current, setCurrent] = useState<LockMode>(seed);
@@ -145,18 +153,19 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
       if (selected === "full_lock") body.password = password;
       const res = await api.post<{ ok: boolean; error?: string }>(endpoint, body);
       if (!res.ok) {
-        toast.error("Couldn't update the lock", { description: res.error ?? "Try again." });
+        toast.error(t("file-security.error.couldnTUpdateTheLock"), { description: res.error != null ? autoDir(res.error) : t("file-security.description.tryAgain") });
         return;
       }
-      if (selected === "none") toast.success("Lock removed", { description: `${target.name} is open to everyone in the workspace.` });
-      else if (selected === "view_only") toast.success("View only", { description: `${target.name} can be previewed but not downloaded.` });
-      else if (current === "full_lock") toast.success("Password updated", { description: `${target.name} now needs the new password.` });
-      else toast.success("Locked with a password", { description: `${target.name} now needs a password to open.` });
+      const targetName = target.name;
+      if (selected === "none") toast.success(t("file-security.label.lockRemoved"), { description: t("file-security.description.targetnameIsOpenToEveryoneInTheWorkspace", { targetName }) });
+      else if (selected === "view_only") toast.success(t("common.status.viewOnly"), { description: t("file-security.description.targetnameCanBePreviewedButNotDownloaded", { targetName }) });
+      else if (current === "full_lock") toast.success(t("file-security.label.passwordUpdated"), { description: t("file-security.description.targetnameNowNeedsTheNewPassword", { targetName }) });
+      else toast.success(t("file-security.label.lockedWithAPassword"), { description: t("file-security.description.targetnameNowNeedsAPasswordToOpen", { targetName }) });
       onDone();
       onClose();
     } catch (err) {
-      toast.error("Couldn't update the lock", {
-        description: err instanceof Error && err.message ? err.message : "Can't reach the server. Check your connection and try again.",
+      toast.error(t("file-security.error.couldnTUpdateTheLock"), {
+        description: err instanceof ApiError && err.message ? autoDir(err.message) : err instanceof Error && err.message ? err.message : t("common.error.canTReachTheServerCheckYourConnectionAnd"),
       });
     } finally {
       savingRef.current = false;
@@ -185,7 +194,7 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
 
   return (
     <div>
-      <h3 className="text-lg font-semibold">{isFolder ? "Lock folder" : "Lock file"}</h3>
+      <h3 className="text-lg font-semibold">{isFolder ? t("file-security.heading.lockFolder") : t("file-security.heading.lockFile")}</h3>
 
       <div className="mt-3 flex min-w-0 items-center gap-2.5">
         <span
@@ -197,7 +206,7 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
           <TargetIcon size={17} />
         </span>
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{target.name}</div>
+          <div className="truncate text-sm font-medium" title={target.name}>{target.name}</div>
           <div className="text-xs text-[var(--color-text-muted)]">{meta}</div>
         </div>
       </div>
@@ -222,7 +231,7 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
           ))}
         </div>
       ) : (
-        <div role="radiogroup" aria-label="Access level" className="mt-3 overflow-hidden rounded-[10px] border" style={{ borderColor: "var(--color-border)" }}>
+        <div role="radiogroup" aria-label={t("file-security.accessibility.accessLevel")} className="mt-3 overflow-hidden rounded-[10px] border" style={{ borderColor: "var(--color-border)" }}>
           {LOCK_MODE_OPTIONS.map((m, i) => {
             const on = selected === m.value;
             const Icon = MODE_ICONS[m.value];
@@ -261,7 +270,7 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
                 </label>
 
                 {on && m.value === "full_lock" && (
-                  <div className="px-3 pb-3 pl-[38px]">
+                  <div className="px-3 pb-3 ps-[38px]">
                     <label htmlFor={passwordId} className="mb-1.5 block text-xs font-medium">{passwordFieldLabel(current)}</label>
                     <div className="relative">
                       <input
@@ -271,26 +280,26 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
                         onChange={(e) => { setPassword(e.target.value); setTooShort(false); }}
                         // Plain Enter submits; modifier+Enter is left to the window shortcut so it is not handled twice.
                         onKeyDown={(e) => { if (e.key === "Enter" && !e.metaKey && !e.ctrlKey) { e.preventDefault(); void submit(); } }}
-                        placeholder={current === "full_lock" ? "Type a new password" : "Choose a password"}
+                        placeholder={current === "full_lock" ? t("file-security.placeholder.typeANewPassword") : t("file-security.placeholder.chooseAPassword")}
                         autoComplete="new-password"
                         spellCheck={false}
                         aria-invalid={tooShort || undefined}
                         aria-describedby={hintId}
-                        className="w-full rounded-lg border bg-transparent py-2 pl-3 pr-9 text-sm outline-none focus:border-[var(--color-primary)]"
+                        className="w-full rounded-lg border bg-transparent py-2 ps-3 pe-9 text-sm outline-none focus:border-[var(--color-primary)]"
                         style={{ borderColor: tooShort ? "var(--color-danger)" : "var(--color-border)" }}
                         autoFocus
                       />
                       <button
                         type="button"
-                        aria-label={showPassword ? "Hide password" : "Show password"}
+                        aria-label={showPassword ? t("common.accessibility.hidePassword") : t("common.accessibility.showPassword")}
                         onClick={() => setShowPassword((v) => !v)}
-                        className="absolute right-1 top-1 flex size-7 items-center justify-center rounded-md text-[var(--color-text-muted)] hover:bg-[var(--color-bg-secondary)]"
+                        className="absolute inset-e-1 top-1 flex size-7 items-center justify-center rounded-md text-[var(--color-text-muted)] hover:bg-[var(--color-bg-secondary)]"
                       >
                         {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                       </button>
                     </div>
                     <p id={hintId} className="mt-1.5 text-xs" style={{ color: tooShort ? "var(--color-danger)" : "var(--color-text-muted)" }}>
-                      {tooShort ? `Use at least ${MIN_LOCK_PASSWORD_LENGTH} characters.` : passwordHint(current)}
+                      {tooShort ? t("file-security.description.useAtLeastMinLockPasswordLengthCharacters", { minLockPasswordLength: String(MIN_LOCK_PASSWORD_LENGTH) }) : passwordHint(current)}
                     </p>
                   </div>
                 )}
@@ -301,9 +310,11 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
       )}
 
       <div className="mt-4 flex items-center justify-end gap-2">
-        <div className="mr-auto flex items-center gap-2.5 whitespace-nowrap text-[11px] text-[var(--color-text-muted)]">
-          <span className="flex items-center gap-1"><Kbd>Esc</Kbd> Cancel</span>
-          <span className="flex items-center gap-1"><Kbd>{IS_MAC ? "⌘" : "Ctrl"}</Kbd><Kbd>↵</Kbd> Apply</span>
+        {/* --color-text-secondary, not -muted: muted is the 62% wash meant for
+            metadata, too faint for an instruction at 11px. */}
+        <div className="me-auto flex items-center gap-2.5 whitespace-nowrap text-[11px] text-[var(--color-text-secondary)]">
+          <span className="flex items-center gap-1"><Kbd>Esc</Kbd> {t("common.cancel")}</span>
+          <span className="flex items-center gap-1"><Kbd>{IS_MAC ? "⌘" : "Ctrl"}</Kbd><Kbd>↵</Kbd> {t("file-security.apply")}</span>
         </div>
         <button
           type="button"
@@ -312,7 +323,7 @@ function LockModalBody({ target, onClose, onDone }: { target: LockTarget; onClos
           className="whitespace-nowrap rounded-lg border px-4 py-2 text-sm disabled:opacity-50"
           style={{ borderColor: "var(--color-border)" }}
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           type="button"

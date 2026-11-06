@@ -5,6 +5,7 @@ import {
   Layers, Plus, Trash2, Pencil, Check, X, FolderOpen, FileIcon, Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
+import { autoDir, useAutoDir } from "@/lib/bidi-ui";
 import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { humanSize } from "@/lib/file-type";
@@ -14,6 +15,8 @@ import {
   DEFAULT_GROUP_COLOR, MAX_GROUP_NAME, type Group,
 } from "@/lib/groups-api";
 import { SWATCHES, resolveSwatch } from "@/lib/palette";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "../../i18n/keys";
 
 /**
  * A swatch row rather than a colour picker: the colour exists so two groups are told
@@ -23,10 +26,25 @@ import { SWATCHES, resolveSwatch } from "@/lib/palette";
  * than by limiting the choice.
  */
 
+/** Swatch names (lib/palette.ts) to their catalog labels, as SwatchPicker names them. */
+const SWATCH_LABELS: Record<string, MessageKey> = {
+  green: "common.label.green",
+  teal: "common.label.teal",
+  blue: "common.label.blue",
+  violet: "common.label.violet",
+  pink: "common.label.pink",
+  orange: "common.label.orange",
+  graphite: "common.label.graphite",
+};
+
 export function GroupsPage() {
+  const ownDir = useAutoDir();
   const { active } = useWorkspace();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const t = useT();
+  const swatchLabel = (s: { name: string; label: string }): string =>
+    SWATCH_LABELS[s.name] ? t(SWATCH_LABELS[s.name]) : s.label;
 
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
@@ -42,7 +60,7 @@ export function GroupsPage() {
   });
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["groups"] });
-  const failed = (e: unknown) => toast.error(e instanceof ApiError ? e.message : "Failed");
+  const failed = (e: unknown) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed"));
 
   const createMut = useMutation({
     mutationFn: () => createGroup(active!.id, newName.trim(), newColor),
@@ -51,7 +69,7 @@ export function GroupsPage() {
       setCreating(false);
       setNewName("");
       setNewColor(DEFAULT_GROUP_COLOR);
-      toast.success("Group created");
+      toast.success(t("groups.label.groupCreated"));
     },
     onError: failed,
   });
@@ -72,7 +90,7 @@ export function GroupsPage() {
     mutationFn: (id: string) => deleteGroup(id),
     // The group goes; the files and folders in it do not. Saying so stops this
     // reading as a bulk delete.
-    onSuccess: () => { invalidate(); toast.success("Group deleted", { description: "The files and folders in it were not touched." }); },
+    onSuccess: () => { invalidate(); toast.success(t("groups.label.groupDeleted"), { description: t("groups.description.theFilesAndFoldersInItWereNotTouched") }); },
     onError: failed,
   });
 
@@ -92,12 +110,12 @@ export function GroupsPage() {
   const nameTooLong = newName.trim().length > MAX_GROUP_NAME;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-testid="groups-page">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Groups</h1>
+          <h1 className="text-2xl font-semibold">{t("groups.heading.groups")}</h1>
           <p className="text-sm text-[var(--color-text-muted)]">
-            Your own shortcuts to files and folders - only you see them
+            {t("groups.description.yourOwnShortcutsToFilesAndFoldersOnlyYou")}
           </p>
         </div>
         <button
@@ -106,7 +124,7 @@ export function GroupsPage() {
           className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
           style={{ background: "var(--color-primary)" }}
         >
-          <Plus size={14} /> New group
+          <Plus size={14} /> {t("groups.action.newGroup")}
         </button>
       </div>
 
@@ -116,17 +134,17 @@ export function GroupsPage() {
         </div>
       ) : isError ? (
         <div className="flex flex-col items-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }} data-testid="groups-error">
-          <p className="text-sm">Couldn't load your groups.</p>
+          <p className="text-sm">{t("groups.error.couldnTLoadYourGroups")}</p>
           <button data-testid="groups-retry" onClick={() => refetch()} className="mt-2 text-xs font-medium text-[var(--color-primary)]">
-            Retry
+            {t("common.retry")}
           </button>
         </div>
       ) : list.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border py-16" style={{ borderColor: "var(--color-border)" }} data-testid="groups-empty">
           <Layers size={36} className="mb-3 text-[var(--color-text-muted)]" />
-          <p className="text-sm font-medium">No groups yet</p>
+          <p className="text-sm font-medium">{t("groups.empty.noGroupsYet")}</p>
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-            Group anything you keep coming back to. Add items from the file browser.
+            {t("groups.description.groupAnythingYouKeepComingBackToAddItems")}
           </p>
         </div>
       ) : (
@@ -163,14 +181,14 @@ export function GroupsPage() {
                   </>
                 ) : (
                   <>
-                    <p className="flex-1 truncate text-sm font-semibold">{g.name}</p>
+                    <p dir={ownDir} className="flex-1 truncate text-sm font-semibold">{g.name}</p>
                     <span className="text-xs text-[var(--color-text-muted)]">
-                      {g.files.length + g.folders.length} item{g.files.length + g.folders.length === 1 ? "" : "s"}
+                      {t("common.label.item", { count: g.files.length + g.folders.length })}
                     </span>
                     <button
                       data-testid={`group-${g.id}-rename`}
                       onClick={() => { setEditingId(g.id); setEditName(g.name); }}
-                      title="Rename"
+                      title={t("common.action.rename")}
                       className="text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
                     >
                       <Pencil size={13} />
@@ -178,7 +196,7 @@ export function GroupsPage() {
                     <button
                       data-testid={`group-${g.id}-delete`}
                       onClick={() => setDeleteTarget(g)}
-                      title="Delete group"
+                      title={t("groups.action.deleteGroup")}
                       className="text-[var(--color-text-muted)] hover:text-[var(--color-danger)]"
                     >
                       <Trash2 size={13} />
@@ -196,7 +214,7 @@ export function GroupsPage() {
                     key={s.name}
                     data-testid={`group-${g.id}-color-${s.name}`}
                     onClick={() => recolourMut.mutate({ id: g.id, color: s.light })}
-                    aria-label={`Set colour ${s.label}`}
+                    aria-label={t("groups.accessibility.setColourLabel", { label: swatchLabel(s) })}
                     className={`h-4 w-4 rounded-full transition-transform hover:scale-110 ${resolveSwatch(g.color) === s.name ? "ring-2 ring-offset-1" : ""}`}
                     style={{ background: s.light }}
                   />
@@ -206,20 +224,20 @@ export function GroupsPage() {
 
               {g.folders.length === 0 && g.files.length === 0 ? (
                 <p className="mt-3 text-xs text-[var(--color-text-muted)]" data-testid={`group-${g.id}-empty`}>
-                  Nothing in this group yet.
+                  {t("groups.description.nothingInThisGroupYet")}
                 </p>
               ) : (
                 <div className="mt-3 space-y-1.5">
                   {g.folders.map((f) => (
                     <div key={f.item_id} data-testid={`group-folder-${f.folder_id}`} className="flex items-center gap-2 text-xs">
                       <FolderOpen size={12} className="shrink-0 text-[var(--color-text-muted)]" />
-                      <button onClick={() => navigate(`/files?folder=${f.folder_id}`)} className="flex-1 truncate text-left hover:underline">
+                      <button onClick={() => navigate(`/files?folder=${f.folder_id}`)} dir={ownDir} className="flex-1 truncate text-start hover:underline">
                         {f.folder_name}
                       </button>
                       <button
                         data-testid={`group-folder-${f.folder_id}-remove`}
                         onClick={() => removeFolderMut.mutate({ groupId: g.id, folderId: f.folder_id })}
-                        title="Remove from group"
+                        title={t("groups.tooltip.removeFromGroup")}
                         className="text-[var(--color-text-muted)] hover:text-[var(--color-danger)]"
                       >
                         <X size={11} />
@@ -229,14 +247,14 @@ export function GroupsPage() {
                   {g.files.map((f) => (
                     <div key={f.item_id} data-testid={`group-file-${f.file_id}`} className="flex items-center gap-2 text-xs">
                       <FileIcon size={12} className="shrink-0 text-[var(--color-text-muted)]" />
-                      <button onClick={() => navigate(`/files?panel=${f.file_id}`)} className="flex-1 truncate text-left hover:underline">
+                      <button onClick={() => navigate(`/files?panel=${f.file_id}`)} dir={ownDir} className="flex-1 truncate text-start hover:underline">
                         {f.file_name}
                       </button>
                       <span className="text-[var(--color-text-muted)]">{humanSize(f.size_bytes)}</span>
                       <button
                         data-testid={`group-file-${f.file_id}-remove`}
                         onClick={() => removeFileMut.mutate({ groupId: g.id, fileId: f.file_id })}
-                        title="Remove from group"
+                        title={t("groups.tooltip.removeFromGroup")}
                         className="text-[var(--color-text-muted)] hover:text-[var(--color-danger)]"
                       >
                         <X size={11} />
@@ -254,20 +272,20 @@ export function GroupsPage() {
       {creating && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl">
-            <h3 className="mb-4 text-lg font-semibold">New group</h3>
+            <h3 className="mb-4 text-lg font-semibold">{t("groups.heading.newGroup")}</h3>
             <input
               data-testid="group-create-name"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && newName.trim() && !nameTooLong) createMut.mutate(); }}
               autoFocus
-              placeholder="e.g. Client work"
+              placeholder={t("groups.placeholder.eGClientWork")}
               className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
               style={{ borderColor: "var(--color-border)" }}
             />
             {nameTooLong && (
               <p data-testid="group-create-error" className="mt-1 text-xs text-[var(--color-danger)]">
-                Keep the name under {MAX_GROUP_NAME} characters.
+                {t("groups.description.keepTheNameUnderMaxGroupNameCharacters", { maxGroupName: MAX_GROUP_NAME })}
               </p>
             )}
             <div className="mt-3 flex items-center gap-1.5">
@@ -276,7 +294,7 @@ export function GroupsPage() {
                   key={s.name}
                   data-testid={`group-create-color-${s.name}`}
                   onClick={() => setNewColor(s.light)}
-                  aria-label={`Colour ${s.label}`}
+                  aria-label={t("groups.accessibility.colourLabel", { label: swatchLabel(s) })}
                   className={`h-5 w-5 rounded-full transition-transform hover:scale-110 ${resolveSwatch(newColor) === s.name ? "ring-2 ring-offset-1" : ""}`}
                   style={{ background: s.light }}
                 />
@@ -284,7 +302,7 @@ export function GroupsPage() {
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button data-testid="group-create-cancel" onClick={() => setCreating(false)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 data-testid="group-create-submit"
@@ -294,7 +312,7 @@ export function GroupsPage() {
                 style={{ background: "var(--color-primary)" }}
               >
                 {createMut.isPending && <Loader2 size={12} className="animate-spin" />}
-                Create
+                {t("common.action.create")}
               </button>
             </div>
           </div>
@@ -305,21 +323,21 @@ export function GroupsPage() {
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl">
-            <h3 className="text-lg font-semibold">Delete "{deleteTarget.name}"?</h3>
+            <h3 className="text-lg font-semibold">{t("groups.heading.deleteDeleteTargetName", { deleteTargetName: deleteTarget.name })}</h3>
             <p className="mt-2 text-sm text-[var(--color-text-muted)]">
-              The group goes. The files and folders in it stay exactly where they are.
+              {t("groups.description.theGroupGoesTheFilesAndFoldersInIt")}
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button data-testid="group-delete-cancel" onClick={() => setDeleteTarget(null)} className="rounded-lg border px-4 py-2 text-sm" style={{ borderColor: "var(--color-border)" }}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 data-testid="group-delete-confirm"
-                onClick={() => { const t = deleteTarget; setDeleteTarget(null); deleteMut.mutate(t.id); }}
+                onClick={() => { const target = deleteTarget; setDeleteTarget(null); deleteMut.mutate(target.id); }}
                 className="rounded-lg px-4 py-2 text-sm font-medium text-white"
                 style={{ background: "var(--color-danger)" }}
               >
-                Delete group
+                {t("groups.action.deleteGroup")}
               </button>
             </div>
           </div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { mmss } from '@dosya-dev/audio-player';
+import { useT } from '@/lib/i18n';
 
 const BAR_W = 3;
 const BAR_GAP = 2;
@@ -51,6 +52,7 @@ interface Props {
 }
 
 export function Waveform({ peaks, position, duration, loop, onSeek }: Props) {
+  const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
@@ -158,17 +160,17 @@ export function Waveform({ peaks, position, duration, loop, onSeek }: Props) {
   };
 
   return (
-    <div className="mt-[22px]">
+    <div dir="ltr" className="mt-[22px]">
       <div
         ref={wrapRef}
         className="relative h-[78px] cursor-pointer touch-none rounded focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--color-primary)]"
         role="slider"
         tabIndex={0}
-        aria-label="Seek"
+        aria-label={t('common.accessibility.seek')}
         aria-valuemin={0}
         aria-valuemax={Math.round(duration)}
         aria-valuenow={Math.round(position)}
-        aria-valuetext={`${mmss(position)} of ${mmss(duration)}`}
+        aria-valuetext={t("audio.accessibility.positionOfDuration", { position: mmss(position), duration: mmss(duration) })}
         onPointerDown={(e) => {
           (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
           onSeek(secondsAt(e.clientX));
@@ -193,6 +195,7 @@ export function Waveform({ peaks, position, duration, loop, onSeek }: Props) {
         <canvas ref={canvasRef} className="block w-full h-full" />
         <span
           ref={tipRef}
+          /* rtl-ok: media timeline, the tip follows the pointer at a physical x */
           className="pointer-events-none absolute -top-2 z-10 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded bg-[var(--color-text)] px-[7px] py-[3px] font-mono text-[11px] font-bold text-[var(--color-bg)] opacity-0 transition-opacity"
         />
       </div>

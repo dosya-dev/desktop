@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle } from "lucide-react";
-import { formatDeletionDate, deletionDaysRemaining } from "@dosya-dev/shared";
+import { deletionDaysRemaining } from "@dosya-dev/shared";
 import { api } from "@/lib/api-client";
+import { formatters, useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
 
 /**
  * Persistent notice while an account deletion is pending.
@@ -15,6 +17,7 @@ import { api } from "@/lib/api-client";
  * polling of its own.
  */
 export function DeletionBanner() {
+  const t = useT();
   const navigate = useNavigate();
   const { data } = useQuery({
     queryKey: ["me", "deletion"],
@@ -26,6 +29,8 @@ export function DeletionBanner() {
   if (scheduledFor == null) return null;
 
   const days = deletionDaysRemaining(scheduledFor, Math.floor(Date.now() / 1000));
+  // packages/shared formatDeletionDate's long date, in the chosen language.
+  const date = <span className="font-semibold">{formatters().formatDate(scheduledFor, "long")}</span>;
 
   return (
     <div
@@ -35,15 +40,15 @@ export function DeletionBanner() {
     >
       <AlertTriangle size={14} className="shrink-0 text-[var(--color-danger)]" />
       <p className="flex-1 text-xs text-[var(--color-danger)]">
-        Your account is scheduled for deletion on{" "}
-        <span className="font-semibold">{formatDeletionDate(scheduledFor)}</span>
-        {days > 0 ? ` - ${days} day${days === 1 ? "" : "s"} left.` : " - today."}
+        {days > 0
+          ? richText(t, "profile.description.yourAccountIsScheduledForDeletionOnScheduledForDay", { days }, { scheduledFor: date })
+          : richText(t, "profile.description.yourAccountIsScheduledForDeletionOnScheduledForToday", {}, { scheduledFor: date })}
       </p>
       <button
         onClick={() => navigate("/profile")}
         className="shrink-0 text-xs font-medium underline text-[var(--color-danger)] hover:no-underline"
       >
-        Cancel deletion
+        {t("profile.action.cancelDeletion")}
       </button>
     </div>
   );

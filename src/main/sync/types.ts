@@ -323,6 +323,13 @@ export type SyncAction =
       remoteFile: RemoteFileInfo;
       localPath: string;
       existingRecord: SyncFileRecord;
+      /** The local file as the planner saw it at scan time. The executor
+       *  refuses the rename only if the file changed AFTER this point; an edit
+       *  the planner already weighed (last-write-wins) is overwritten as
+       *  planned. Absent when the planner did not look at the local file
+       *  (the remote-only fast path), in which case the base record is the
+       *  baseline. */
+      expectedLocal?: { sizeBytes: number; mtimeMs: number };
     }
   | {
       type: "upload-new";

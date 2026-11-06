@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, Wrench } from "lucide-react";
+import { useT } from "../lib/i18n";
+import { useAutoDir } from "@/lib/bidi-ui";
 
 /**
  * Full-screen gate shown when the platform switch has paused the desktop
@@ -30,6 +32,8 @@ export function MaintenanceScreen({
   email?: string | null;
   onSignOut?: () => void;
 }) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const [left, setLeft] = useState(INTERVAL_S);
   const [checking, setChecking] = useState(false);
 
@@ -74,15 +78,14 @@ export function MaintenanceScreen({
         <Wrench className="h-7 w-7" />
       </div>
       <h1 className="mb-2 text-2xl font-bold tracking-tight">
-        The desktop app is paused for maintenance
+        {t("maintenance.heading.theDesktopAppIsPausedForMaintenance")}
       </h1>
       <p className="mb-5 max-w-md text-[var(--color-text-secondary)]">
-        Sync is paused and your local files are untouched. We&apos;ll reconnect and pick up where
-        we left off.
+        {t("maintenance.description.syncIsPausedAndYourLocalFilesAreUntouched")}
       </p>
       {message && (
         <div
-          className="mb-6 w-full max-w-md rounded-xl p-4 text-left"
+          className="mb-6 w-full max-w-md rounded-xl p-4 text-start"
           style={{
             background: "color-mix(in oklab, var(--color-warning), transparent 90%)",
             border: "1px solid color-mix(in oklab, var(--color-warning), transparent 55%)",
@@ -92,9 +95,9 @@ export function MaintenanceScreen({
             className="mb-1 font-mono text-[11px] uppercase tracking-wider"
             style={{ color: "var(--color-warning)" }}
           >
-            From the team
+            {t("maintenance.label.fromTheTeam")}
           </div>
-          <div className="whitespace-pre-wrap">{message}</div>
+          <div className="whitespace-pre-wrap">{ownDir ? <span dir={ownDir}>{message}</span> : message}</div>
         </div>
       )}
       <div className="mb-3 h-1 w-full max-w-xs overflow-hidden rounded-full bg-[var(--color-bg-tertiary)]">
@@ -104,7 +107,7 @@ export function MaintenanceScreen({
         />
       </div>
       <div className="mb-4 font-mono text-sm tabular-nums text-[var(--color-text-secondary)]">
-        {checking ? "Checking…" : `Checking again in ${mm}:${ss}`}
+        {checking ? t("common.status.checking") : t("maintenance.label.checkingAgainInMmSs", { mm: String(mm), ss })}
       </div>
       <div className="flex flex-wrap justify-center gap-3">
         <button
@@ -115,7 +118,7 @@ export function MaintenanceScreen({
           style={{ background: "var(--color-primary)" }}
         >
           <RefreshCw className="h-4 w-4" />
-          Check now
+          {t("maintenance.action.checkNow")}
         </button>
         <button
           type="button"
@@ -123,7 +126,7 @@ export function MaintenanceScreen({
           className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-[var(--color-bg-secondary)]"
           style={{ borderColor: "var(--color-border)" }}
         >
-          Status page
+          {t("maintenance.action.statusPage")}
         </button>
       </div>
       {email && (
@@ -131,7 +134,7 @@ export function MaintenanceScreen({
           className="mt-10 w-full max-w-md border-t pt-4 text-sm text-[var(--color-text-secondary)]"
           style={{ borderColor: "var(--color-border)" }}
         >
-          Signed in as {email}
+          {t("maintenance.label.signedInAsEmail", { email })}
           {onSignOut && (
             <>
               {" "}
@@ -141,7 +144,7 @@ export function MaintenanceScreen({
                 className="underline underline-offset-2"
                 onClick={onSignOut}
               >
-                Sign out
+                {t("maintenance.action.signOut")}
               </button>
             </>
           )}

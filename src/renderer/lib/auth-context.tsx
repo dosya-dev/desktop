@@ -7,11 +7,14 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import { api, ApiError } from "./api-client";
+import { api, ApiError, NetworkError, isEdgeChallengeError } from "./api-client";
+import { authErrorMessage, isEmailUnverifiedError } from "./auth-error";
 import { resetSessionState } from "./session-reset";
+import { setPersonasUser } from "./personas-device/teardown";
 import { SESSION_CHECK_INTERVAL_MS, SIGNED_OUT_NOTICE_KEY, sessionLoss } from "./session-loss";
 import { toast } from "sonner";
 import { setSentryUser } from "./sentry";
+import { t } from "./i18n";
 import { applyTheme, writeCache, readCache, initSystemListener } from "./theme";
 import { isThemeId, isMode, DEFAULT_THEME, DEFAULT_MODE } from "./themes";
 import type { User } from "@dosya-dev/shared";
@@ -57,6 +60,10 @@ interface LoginResult {
   requires_2fa?: boolean;
   twofa_method?: string;
   error?: string;
+  /** Why it failed, when the form should react beyond showing `error`:
+   *  "network" offers a retry, "challenge" points at Forgot password,
+   *  "unverified" sends the user to the verify screen. */
+  reason?: "network" | "challenge" | "invalid" | "unverified";
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -112,6 +119,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const userId = user?.id ?? null;
   useEffect(() => {
     setSentryUser(userId);
+    // On-device Personas keeps one engine per user and needs to know when
+    // the user changes (lib/personas-device/teardown.ts).
+    setPersonasUser(userId);
   }, [userId]);
 
   // Check session on mount. Retry transient failures a few times before
@@ -185,13 +195,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         return { ok: true };
       } catch (err) {
-        if (err instanceof ApiError) {
-          return { ok: false, error: err.message };
+        // QA TC-014/015: every one of these used to reach the form as raw
+        // text, including Chromium's "Failed to fetch (api.dosya.dev)".
+        if (err instanceof NetworkError) {
+          console.error("Login error:", err.cause ?? err);
+          return { ok: false, error: err.message, reason: "network" };
         }
-        const message =
-          err instanceof Error ? err.message : "An unexpected error occurred";
-        console.error("Login error:", err);
-        return { ok: false, error: message };
+        if (isEdgeChallengeError(err)) {
+          // Cloudflare's leaked-credential rule refused the request before the
+          // API saw it (main/edge-challenge.ts). It fires on the password
+          // alone, so this is true whether or not the password was correct.
+          return { ok: false, error: t("sign-in.error.passwordOnLeakedList"), reason: "challenge" };
+        }
+        if (err instanceof ApiError && err.status === 401) {
+          return { ok: false, error: t("sign-in.error.incorrectEmailOrPassword"), reason: "invalid" };
+        }
+        // The account exists but its email was never verified (sign-up was
+        // abandoned before the code). The form moves to the verify screen
+        // rather than showing a message with nothing to act on.
+        if (isEmailUnverifiedError(err)) {
+          return { ok: false, error: "", reason: "unverified" };
+        }
+        if (!(err instanceof ApiError)) console.error("Login error:", err);
+        return { ok: false, error: authErrorMessage(err, t("sign-in.error.couldNotSignYouIn")) };
       }
     },
     [refreshUser],
@@ -281,7 +307,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Only a confirmed 401 ends the session. Network blips and 5xx keep
       // the user signed in, exactly like refreshUser above.
       if (err instanceof ApiError && err.status === 401) {
-        await endSession("Your session was ended. Please sign in again.");
+        await endSession(t("common.label.yourSessionWasEndedPleaseSignInAgain"));
       }
     } finally {
       checkingRef.current = false;
@@ -312,7 +338,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       notice = sessionStorage.getItem(SIGNED_OUT_NOTICE_KEY);
       if (notice) sessionStorage.removeItem(SIGNED_OUT_NOTICE_KEY);
     } catch { /* storage unavailable */ }
-    if (notice) toast.info("Signed out", { description: notice });
+    if (notice) toast.info(t("common.label.signedOut"), { description: notice });
   }, []);
 
   return (

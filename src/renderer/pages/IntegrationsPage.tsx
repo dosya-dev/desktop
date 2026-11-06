@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { ArrowRight, ExternalLink } from "lucide-react";
-import { INTEGRATIONS, TOOLS } from "@/lib/integrations";
+import { INTEGRATIONS, TOOLS, cardTitle } from "@/lib/integrations";
+import { useT } from "@/lib/i18n";
 import { webAppUrl } from "@/lib/web-app-url";
 
 /**
@@ -40,46 +41,48 @@ function Tag({ label }: { label: string }) {
 
 export function IntegrationsPage() {
   const navigate = useNavigate();
+  const t = useT();
 
   return (
-    <div className="mx-auto w-full max-w-5xl space-y-8">
+    <div className="mx-auto w-full max-w-5xl space-y-8" data-testid="integrations-page">
       <div>
-        <h1 className="text-2xl font-semibold">Integrations</h1>
+        <h1 className="text-2xl font-semibold">{t("integrations.heading.integrations")}</h1>
         <p className="text-sm text-[var(--color-text-muted)]">
-          Built-in tools, and ways to connect other apps to your workspace
+          {t("integrations.description.builtInToolsAndWaysToConnectOtherApps")}
         </p>
       </div>
 
       {/* Built-in tools */}
       <section>
         <div className="mb-3">
-          <h2 className="text-sm font-semibold">Built-in tools</h2>
+          <h2 className="text-sm font-semibold">{t("integrations.heading.builtInTools")}</h2>
           <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
-            Included with your workspace - no setup needed.
+            {t("integrations.description.includedWithYourWorkspaceNoSetupNeeded")}
           </p>
         </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {TOOLS.map((t) => (
-            <Card key={t.to}>
+          {TOOLS.map((tool) => (
+            <Card key={tool.to}>
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex size-9 items-center justify-center rounded-lg bg-[var(--color-bg-tertiary)]">
-                  <t.icon size={18} />
+                  <tool.icon size={18} />
                 </div>
                 <ArrowRight
                   size={16}
-                  className="-translate-x-1 text-[var(--color-text-muted)] opacity-0 transition-all group-hover:translate-x-0 group-hover:opacity-100"
+                  // rtl-ok: mirrored, the rtl: twins slide the nudge the other way
+                  className="-translate-x-1 rtl:translate-x-1 rtl:-scale-x-100 text-[var(--color-text-muted)] opacity-0 transition-all group-hover:translate-x-0 rtl:group-hover:translate-x-0 group-hover:opacity-100"
                 />
               </div>
-              <p className="text-sm font-semibold">{t.title}</p>
-              <p className="mt-1 flex-1 text-xs text-[var(--color-text-muted)]">{t.description}</p>
+              <p className="text-sm font-semibold">{cardTitle(tool.title)}</p>
+              <p className="mt-1 flex-1 text-xs text-[var(--color-text-muted)]">{t(tool.description)}</p>
               <div className="mt-3">
-                <Tag label={t.tag} />
+                <Tag label={t(tool.tag)} />
               </div>
               <button
-                data-testid={`tool-card-${t.to.replace("/", "")}`}
-                onClick={() => navigate(t.to)}
+                data-testid={`tool-card-${tool.to.replace("/", "")}`}
+                onClick={() => navigate(tool.to)}
                 className="absolute inset-0 rounded-xl"
-                aria-label={`Open ${t.title}`}
+                aria-label={t("integrations.accessibility.openTitle", { title: cardTitle(tool.title) })}
               />
             </Card>
           ))}
@@ -89,9 +92,9 @@ export function IntegrationsPage() {
       {/* Connection cards - these hand off to the web app */}
       <section>
         <div className="mb-3">
-          <h2 className="text-sm font-semibold">Connect external tools</h2>
+          <h2 className="text-sm font-semibold">{t("integrations.heading.connectExternalTools")}</h2>
           <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
-            Setup guides open in your browser, where your API keys live.
+            {t("integrations.description.setupGuidesOpenInYourBrowserWhereYourAPI")}
           </p>
         </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -110,17 +113,17 @@ export function IntegrationsPage() {
                   className="text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100"
                 />
               </div>
-              <p className="text-sm font-semibold">{it.title}</p>
-              <p className="mt-1 flex-1 text-xs text-[var(--color-text-muted)]">{it.description}</p>
+              <p className="text-sm font-semibold">{cardTitle(it.title)}</p>
+              <p className="mt-1 flex-1 text-xs text-[var(--color-text-muted)]">{t(it.description)}</p>
               <div className="mt-3 flex items-center justify-between gap-2">
-                <Tag label={it.tag} />
+                <Tag label={t(it.tag)} />
                 {it.docsUrl && (
                   <button
                     onClick={() => window.open(it.docsUrl, "_blank")}
                     className="relative z-10 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)]"
                     style={{ borderColor: "var(--color-border)" }}
                   >
-                    Read docs <ExternalLink size={11} />
+                    {t("integrations.action.readDocs")} <ExternalLink size={11} />
                   </button>
                 )}
               </div>
@@ -128,7 +131,7 @@ export function IntegrationsPage() {
                 data-testid={`integration-card-${it.slug}`}
                 onClick={() => window.open(webAppUrl(`/integrations/${it.slug}`), "_blank")}
                 className="absolute inset-0 rounded-xl"
-                aria-label={`Open ${it.title} setup`}
+                aria-label={t("integrations.accessibility.openTitleSetup", { title: cardTitle(it.title) })}
               />
             </Card>
           ))}

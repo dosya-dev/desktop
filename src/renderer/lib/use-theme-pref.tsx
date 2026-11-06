@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { autoDir } from "@/lib/bidi-ui";
 import { api, ApiError } from "./api-client";
+import { t } from "./i18n";
 import {
   readCache,
   writeCache,
@@ -37,7 +39,7 @@ export function useThemePref() {
       setPref(prev);
       applyTheme(prev);
       writeCache(prev);
-      toast.error(e instanceof ApiError ? e.message : "Your theme could not be saved");
+      toast.error(e instanceof ApiError ? autoDir(e.message) : t("appearance.error.yourThemeCouldNotBeSaved"));
     }
   }, []);
 

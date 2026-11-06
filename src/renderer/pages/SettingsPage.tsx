@@ -12,22 +12,26 @@ import {
   Pencil,
   Trash2,
   ImagePlus,
-  DownloadCloud,
   LogOut,
   Globe,
   Eraser,
   RotateCcw,
   Bug,
+  Sparkles,
 } from "lucide-react";
 import { api, ApiError, apiRequest } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes } from "@/lib/format";
-import { UpdatesSection } from "@/components/UpdatesSection";
 import { toast } from "sonner";
+import { autoDir, ipcErrorText } from "@/lib/bidi-ui";
 import { webAppUrl } from "../lib/web-app-url";
 import { SwatchPicker } from "../components/SwatchPicker";
 import { openReport } from "../lib/report-problem-store";
+import { useWorkspaceIconVersion, workspaceIconUrl } from "@/lib/workspace-icon-version";
+import { useT } from "@/lib/i18n";
+import { AiSearchSection } from "@/components/settings/AiSearchSection";
+import type { MessageKey } from "../../i18n/keys";
 
 /** Shape of GET /api/workspaces/:id. */
 interface SettingsResponse {
@@ -54,7 +58,7 @@ interface SettingsResponse {
   } | null;
 }
 
-type Tab = "general" | "limits" | "security" | "roles" | "updates" | "danger";
+type Tab = "general" | "limits" | "security" | "ai-search" | "roles" | "danger";
 
 /**
  * What PUT /api/workspaces/:id/settings demands for the Hard limits form, per
@@ -72,29 +76,33 @@ function isTab(v: string | null): v is Tab {
   return v !== null && TABS.some((t) => t.id === v);
 }
 
-const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: "general", label: "General", icon: <Settings size={16} /> },
-  { id: "limits", label: "Hard limits", icon: <HardDrive size={16} /> },
-  { id: "security", label: "Security", icon: <Shield size={16} /> },
-  { id: "roles", label: "Roles", icon: <Users size={16} /> },
-  { id: "updates", label: "Updates", icon: <DownloadCloud size={16} /> },
-  { id: "danger", label: "Danger zone", icon: <AlertTriangle size={16} /> },
+const TABS: { id: Tab; label: MessageKey; icon: React.ReactNode }[] = [
+  { id: "general", label: "settings.label.general", icon: <Settings size={16} /> },
+  { id: "limits", label: "settings.label.hardLimits", icon: <HardDrive size={16} /> },
+  { id: "security", label: "settings.label.security", icon: <Shield size={16} /> },
+  { id: "ai-search", label: "settings.label.aiSearch", icon: <Sparkles size={16} /> },
+  { id: "roles", label: "settings.label.roles", icon: <Users size={16} /> },
+  { id: "danger", label: "profile.heading.dangerZone", icon: <AlertTriangle size={16} /> },
 ];
 
 
 export function SettingsPage() {
+  const t = useT();
   const { active } = useWorkspace();
   const queryClient = useQueryClient();
-  // `?tab=updates` lands the user on a section: the menu's Check for Updates
-  // sends them here to watch the check it just started.
+  // `?tab=<id>` lands the user on a section.
   const location = useLocation();
   const requestedTab = new URLSearchParams(location.search).get("tab");
+  // Personas settings are each member's own and live on /personas/settings,
+  // not here.
   const [tab, setTab] = useState<Tab>(() => (isTab(requestedTab) ? requestedTab : "general"));
   useEffect(() => { if (isTab(requestedTab)) setTab(requestedTab); }, [requestedTab]);
   const { can } = usePermissions();
   const canSaveLimits = LIMIT_PERMISSIONS.some((p) => can(p));
   // The security toggles are all manage_settings fields on the server.
   const canSaveSecurity = can("manage_settings");
+
+  const tabs = TABS;
 
   // GET /api/workspaces/:id - NOT /:id/settings, which is PUT-only on the API.
   // The old URL 404'd on every load, so `data` was always undefined: the whole
@@ -145,10 +153,10 @@ export function SettingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      toast.success("Workspace updated");
+      toast.success(t("settings.label.workspaceUpdated"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to save");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("settings.error.failedToSave"));
     },
   });
 
@@ -162,10 +170,10 @@ export function SettingsPage() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
-      toast.success("Limits updated");
+      toast.success(t("settings.label.limitsUpdated"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to save limits");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("settings.error.failedToSaveLimits"));
     },
   });
 
@@ -178,17 +186,17 @@ export function SettingsPage() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
-      toast.success("Security settings updated");
+      toast.success(t("settings.label.securitySettingsUpdated"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to save security settings");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("settings.error.failedToSaveSecuritySettings"));
     },
   });
 
   if (isLoading) {
     return (
-      <div className="space-y-4">
-        <h1 className="text-2xl font-semibold">Settings</h1>
+      <div className="space-y-4" data-testid="settings-page">
+        <h1 className="text-2xl font-semibold">{t("common.label.settings")}</h1>
         <div className="h-64 animate-pulse rounded-xl bg-[var(--color-bg-tertiary)]" />
       </div>
     );
@@ -204,21 +212,21 @@ export function SettingsPage() {
   // twenty-three that do).
 
   return (
-    <div className="flex h-full gap-6">
+    <div className="flex h-full gap-6" data-testid="settings-page">
       {/* Sidebar Tabs */}
-      <div className="w-48 space-y-1">
-        {TABS.map((t) => (
+      <div className="w-48 space-y-1" data-testid="settings-tabs">
+        {tabs.map((tb) => (
           <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
+            key={tb.id}
+            onClick={() => setTab(tb.id)}
             className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${
-              tab === t.id
+              tab === tb.id
                 ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
                 : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
             }`}
           >
-            {t.icon}
-            {t.label}
+            {tb.icon}
+            {t(tb.label)}
           </button>
         ))}
       </div>
@@ -226,7 +234,7 @@ export function SettingsPage() {
       {/* Content */}
       <div className="flex-1">
         {tab === "general" && (
-          <Section title="Workspace info">
+          <Section title={t("settings.tooltip.workspaceInfo")}>
             <div className="space-y-5">
               {/* Workspace icon/photo */}
               <WorkspaceIconUpload
@@ -237,7 +245,7 @@ export function SettingsPage() {
               />
 
               <div>
-                <label className="mb-1 block text-sm font-medium">Name</label>
+                <label className="mb-1 block text-sm font-medium">{t("common.label.name")}</label>
                 <input
                   type="text"
                   value={wsName}
@@ -247,9 +255,9 @@ export function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="mb-2 block text-sm font-medium">Icon color</label>
-                <p className="mb-2 text-xs text-[var(--color-text-muted)]">Used when no custom photo is set</p>
-                <SwatchPicker value={wsColor} onChange={setWsColor} label="Workspace colour" />
+                <label className="mb-2 block text-sm font-medium">{t("settings.label.iconColor")}</label>
+                <p className="mb-2 text-xs text-[var(--color-text-muted)]">{t("settings.label.usedWhenNoCustomPhotoIsSet")}</p>
+                <SwatchPicker value={wsColor} onChange={setWsColor} label={t("common.label.workspaceColour")} />
               </div>
               <button
                 onClick={() => saveGeneralMut.mutate()}
@@ -258,42 +266,42 @@ export function SettingsPage() {
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
-                Save changes
+                {t("settings.action.saveChanges")}
               </button>
             </div>
           </Section>
         )}
         {tab === "general" && (
           <div className="mt-6">
-            <Section title="Troubleshooting">
+            <Section title={t("settings.tooltip.troubleshooting")}>
               <TroubleshootingSection />
             </Section>
           </div>
         )}
 
         {tab === "limits" && (
-          <Section title="Hard limits">
+          <Section title={t("settings.label.hardLimits")}>
             <div className="space-y-4 max-w-sm">
               <p className="text-xs text-[var(--color-text-muted)]">
-                Set any limit to 0 to leave it unlimited.
+                {t("settings.description.setAnyLimitTo0ToLeaveItUnlimited")}
               </p>
               <NumberInput
-                label="Max upload file size (GB)"
+                label={t("settings.label.maxUploadFileSizeGB")}
                 value={maxFileSize}
                 onChange={setMaxFileSize}
               />
               <NumberInput
-                label="Total workspace storage cap (GB)"
+                label={t("settings.label.totalWorkspaceStorageCapGB")}
                 value={maxStorage}
                 onChange={setMaxStorage}
               />
               <NumberInput
-                label="Storage per member (GB)"
+                label={t("settings.label.storagePerMemberGB")}
                 value={maxPerMember}
                 onChange={setMaxPerMember}
               />
               <NumberInput
-                label="Max simultaneous uploads per member"
+                label={t("settings.label.maxSimultaneousUploadsPerMember")}
                 value={maxConcurrent}
                 onChange={setMaxConcurrent}
               />
@@ -304,11 +312,11 @@ export function SettingsPage() {
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
-                Save limits
+                {t("settings.action.saveLimits")}
               </button>
               {!canSaveLimits && (
                 <p className="text-xs text-[var(--color-text-muted)]">
-                  Your role does not allow changing these limits.
+                  {t("settings.description.yourRoleDoesNotAllowChangingTheseLimits")}
                 </p>
               )}
             </div>
@@ -316,23 +324,23 @@ export function SettingsPage() {
         )}
 
         {tab === "security" && (
-          <Section title="Security">
+          <Section title={t("settings.label.security")}>
             <div className="space-y-4 max-w-sm">
               <Toggle
-                label="Require 2FA for all members"
-                description="Members must enable two-factor authentication"
+                label={t("settings.label.require2FAForAllMembers")}
+                description={t("settings.description.membersMustEnableTwoFactorAuthentication")}
                 checked={require2fa}
                 onChange={setRequire2fa}
               />
               <Toggle
-                label="Disable share links"
-                description="Prevent members from creating public share links"
+                label={t("settings.label.disableShareLinks")}
+                description={t("settings.label.preventMembersFromCreatingPublicShareLinks")}
                 checked={disableShares}
                 onChange={setDisableShares}
               />
               <Toggle
-                label="Force password on share links"
-                description="All share links must be password-protected"
+                label={t("settings.label.forcePasswordOnShareLinks")}
+                description={t("settings.description.allShareLinksMustBePasswordProtected")}
                 checked={forceSharePassword}
                 onChange={setForceSharePassword}
               />
@@ -343,44 +351,44 @@ export function SettingsPage() {
                 style={{ background: "var(--color-primary)" }}
               >
                 <Save size={14} />
-                Save security
+                {t("settings.action.saveSecurity")}
               </button>
               {!canSaveSecurity && (
                 <p className="text-xs text-[var(--color-text-muted)]">
-                  Your role does not allow changing security settings.
+                  {t("settings.description.yourRoleDoesNotAllowChangingSecuritySettings")}
                 </p>
               )}
             </div>
           </Section>
         )}
 
+        {tab === "ai-search" && active && (
+          <Section title={t("settings.label.aiSearch")}>
+            <AiSearchSection wsId={active.id} />
+          </Section>
+        )}
+
         {tab === "roles" && (
-          <Section title="Roles & permissions">
+          <Section title={t("settings.tooltip.rolesPermissions")}>
             <div className="rounded-xl border p-6 text-center" style={{ borderColor: "var(--color-border)" }}>
               <Users size={32} className="mx-auto mb-3 text-[var(--color-text-muted)]" />
-              <h3 className="text-sm font-semibold">Manage roles & permissions</h3>
+              <h3 className="text-sm font-semibold">{t("settings.heading.manageRolesPermissions")}</h3>
               <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                Create custom roles, edit permissions, and manage access controls on the web app.
+                {t("settings.description.createCustomRolesEditPermissionsAndManageAccessControls")}
               </p>
               <button
                 onClick={() => window.open(webAppUrl("/settings"), "_blank")}
                 className="mt-4 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
                 style={{ background: "var(--color-primary)" }}
               >
-                Open on web
+                {t("common.action.openOnWeb")}
               </button>
             </div>
           </Section>
         )}
 
-        {tab === "updates" && (
-          <Section title="App updates">
-            <UpdatesSection />
-          </Section>
-        )}
-
         {tab === "danger" && (
-          <Section title="Danger zone">
+          <Section title={t("profile.heading.dangerZone")}>
             <DangerZone workspaceId={active?.id ?? ""} workspaceName={workspace?.name ?? ""} />
           </Section>
         )}
@@ -417,6 +425,7 @@ export function SettingsPage() {
  * in the cloud is touched.
  */
 function TroubleshootingSection() {
+  const t = useT();
   const [confirmReset, setConfirmReset] = useState(false);
   const [busy, setBusy] = useState<"cache" | "reset" | null>(null);
   const queryClient = useQueryClient();
@@ -428,9 +437,9 @@ function TroubleshootingSection() {
       // Renderer-side caches too: query results and decoded previews are the
       // caches the user can actually see going stale.
       queryClient.invalidateQueries();
-      toast.success("Cache cleared");
+      toast.success(t("settings.label.cacheCleared"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to clear cache");
+      toast.error(ipcErrorText(err instanceof Error ? err.message : undefined, t("settings.error.failedToClearCache")));
     } finally {
       setBusy(null);
     }
@@ -444,7 +453,7 @@ function TroubleshootingSection() {
     } catch (err) {
       setBusy(null);
       setConfirmReset(false);
-      toast.error(err instanceof Error ? err.message : "Reset failed");
+      toast.error(ipcErrorText(err instanceof Error ? err.message : undefined, t("settings.error.resetFailed")));
     }
   };
 
@@ -452,10 +461,9 @@ function TroubleshootingSection() {
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="mb-1 font-semibold">Report a bug</h3>
+          <h3 className="mb-1 font-semibold">{t("common.heading.reportABug")}</h3>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Opens a support ticket with this app's version, your system and, if
-            you choose, the recent log attached.
+            {t("settings.description.opensASupportTicketWithThisAppSVersion")}
           </p>
         </div>
         <button
@@ -463,7 +471,7 @@ function TroubleshootingSection() {
           className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium"
           style={{ borderColor: "var(--color-border)" }}
         >
-          <Bug size={14} /> Report a bug
+          <Bug size={14} /> {t("settings.action.reportABug")}
         </button>
       </div>
 
@@ -471,10 +479,9 @@ function TroubleshootingSection() {
 
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="mb-1 font-semibold">Clear cache</h3>
+          <h3 className="mb-1 font-semibold">{t("settings.heading.clearCache")}</h3>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Clears downloaded previews and cached data. Your files, sync folders
-            and sign-in are not affected.
+            {t("settings.description.clearsDownloadedPreviewsAndCachedDataYourFilesSync")}
           </p>
         </div>
         <button
@@ -483,7 +490,7 @@ function TroubleshootingSection() {
           className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
           style={{ borderColor: "var(--color-border)" }}
         >
-          <Eraser size={14} /> {busy === "cache" ? "Clearing..." : "Clear cache"}
+          <Eraser size={14} /> {busy === "cache" ? t("settings.action.clearing") : t("settings.action.clearCache")}
         </button>
       </div>
 
@@ -491,10 +498,9 @@ function TroubleshootingSection() {
 
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="mb-1 font-semibold text-[var(--color-danger)]">Reset app data</h3>
+          <h3 className="mb-1 font-semibold text-[var(--color-danger)]">{t("settings.heading.resetAppDataSentenceCase")}</h3>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Signs you out, removes all local app data including sync folder
-            settings, and restarts the app. Files in the cloud are not touched.
+            {t("settings.description.signsYouOutRemovesAllLocalAppDataIncluding")}
           </p>
         </div>
         <button
@@ -503,7 +509,7 @@ function TroubleshootingSection() {
           className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
           style={{ borderColor: "var(--color-danger)", color: "var(--color-danger)" }}
         >
-          <RotateCcw size={14} /> Reset app data
+          <RotateCcw size={14} /> {t("settings.action.resetAppData")}
         </button>
       </div>
 
@@ -513,19 +519,17 @@ function TroubleshootingSection() {
             className="w-full max-w-md rounded-xl border bg-[var(--color-bg)] p-6 shadow-xl"
             style={{ borderColor: "var(--color-border)" }}
           >
-            <h3 className="mb-2 text-lg font-semibold">Reset app data?</h3>
+            <h3 className="mb-2 text-lg font-semibold">{t("settings.heading.resetAppDataQuestionSentenceCase")}</h3>
             <p className="mb-3 text-sm text-[var(--color-text-secondary)]">
-              This signs you out and removes everything the app stores on this
-              computer:
+              {t("settings.description.thisSignsYouOutAndRemovesEverythingTheApp")}
             </p>
-            <ul className="mb-4 list-disc space-y-1 pl-5 text-sm text-[var(--color-text-secondary)]">
-              <li>Sync folder settings and sync history</li>
-              <li>Cached files, previews and thumbnails</li>
-              <li>Your session on this device</li>
+            <ul className="mb-4 list-disc space-y-1 ps-5 text-sm text-[var(--color-text-secondary)]">
+              <li>{t("settings.label.syncFolderSettingsAndSyncHistory")}</li>
+              <li>{t("settings.label.cachedFilesPreviewsAndThumbnails")}</li>
+              <li>{t("settings.label.yourSessionOnThisDevice")}</li>
             </ul>
             <p className="mb-5 text-sm text-[var(--color-text-secondary)]">
-              Files on your computer and in the cloud are not deleted. The app
-              restarts signed out.
+              {t("settings.description.filesOnYourComputerAndInTheCloudAre")}
             </p>
             <div className="flex justify-end gap-3">
               <button
@@ -534,14 +538,14 @@ function TroubleshootingSection() {
                 className="rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={factoryReset}
                 disabled={busy === "reset"}
                 className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
-                {busy === "reset" ? "Resetting..." : "Reset and restart"}
+                {busy === "reset" ? t("common.status.resetting") : t("settings.action.resetAndRestart")}
               </button>
             </div>
           </div>
@@ -552,6 +556,8 @@ function TroubleshootingSection() {
 }
 
 function DangerZone({ workspaceId, workspaceName }: { workspaceId: string; workspaceName: string }) {
+  const t = useT();
+  const hasName = workspaceName ? "yes" : "no";
   const openInWeb = () => window.open(webAppUrl("/settings#section-danger"), "_blank");
 
   return (
@@ -565,16 +571,15 @@ function DangerZone({ workspaceId, workspaceName }: { workspaceId: string; works
       >
         <Globe size={15} className="mt-0.5 shrink-0 text-[var(--color-text-secondary)]" />
         <p className="text-sm text-[var(--color-text-secondary)]">
-          Leaving and deleting a workspace are only available in the web app. Both are
-          irreversible, and deleting requires a confirmation code sent to your email.
+          {t("settings.description.leavingAndDeletingAWorkspaceAreOnlyAvailableIn")}
         </p>
       </div>
 
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="mb-1 font-semibold">Leave workspace</h3>
+          <h3 className="mb-1 font-semibold">{t("settings.heading.leaveWorkspace")}</h3>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            You will lose access to {workspaceName || "this workspace"} and its files immediately.
+            {t("settings.description.youWillLoseAccessToWorkspaceNameAndItsFiles", { hasName, workspaceName })}
           </p>
         </div>
         <button
@@ -583,7 +588,7 @@ function DangerZone({ workspaceId, workspaceName }: { workspaceId: string; works
           className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
           style={{ borderColor: "var(--color-danger)", color: "var(--color-danger)" }}
         >
-          <LogOut size={14} /> Leave on web
+          <LogOut size={14} className="rtl:-scale-x-100" /> {t("settings.action.leaveOnWeb")}
         </button>
       </div>
 
@@ -591,10 +596,9 @@ function DangerZone({ workspaceId, workspaceName }: { workspaceId: string; works
 
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="mb-1 font-semibold text-[var(--color-danger)]">Delete workspace</h3>
+          <h3 className="mb-1 font-semibold text-[var(--color-danger)]">{t("settings.heading.deleteWorkspace")}</h3>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Permanently deletes {workspaceName || "this workspace"} and every file in it. This
-            action cannot be undone.
+            {t("settings.error.permanentlyDeletesWorkspaceNameAndEveryFileInItThis", { hasName, workspaceName })}
           </p>
         </div>
         <button
@@ -602,7 +606,7 @@ function DangerZone({ workspaceId, workspaceName }: { workspaceId: string; works
           disabled={!workspaceId}
           className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
         >
-          <Trash2 size={14} /> Delete on web
+          <Trash2 size={14} /> {t("settings.action.deleteOnWeb")}
         </button>
       </div>
     </div>
@@ -673,7 +677,8 @@ function Toggle({
       >
         <div
           className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--color-bg)] shadow transition-transform ${
-            checked ? "translate-x-5" : "translate-x-0.5"
+            // rtl-ok: mirrored, the rtl: twin slides the knob the other way
+            checked ? "translate-x-5 rtl:-translate-x-5" : "translate-x-0.5 rtl:-translate-x-0.5"
           }`}
         />
       </button>
@@ -692,14 +697,15 @@ function WorkspaceIconUpload({
   currentInitials: string;
   hasImage: boolean;
 }) {
+  const t = useT();
   const queryClient = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [apiBase, setApiBase] = useState("");
-  // Cache-buster for the icon URL, which is a fixed path. A counter starting at
-  // 0 collided with the previously cached `?t=0` whenever this component
-  // remounted (tab switch), so a freshly uploaded icon could still paint the
-  // old image. A timestamp is always new.
-  const [imgKey, setImgKey] = useState(() => Date.now());
+  // Cache-buster for the icon URL, which is a fixed path. Shared with the
+  // sidebar and the workspace switcher, so an upload repaints every
+  // workspace badge, not just this preview.
+  const imgKey = useWorkspaceIconVersion((s) => s.version);
+  const bumpIcon = useWorkspaceIconVersion((s) => s.bump);
 
   useEffect(() => {
     window.electronAPI.getApiBase().then(setApiBase);
@@ -714,10 +720,10 @@ function WorkspaceIconUpload({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      setImgKey(Date.now());
-      toast.success("Workspace icon updated");
+      bumpIcon();
+      toast.success(t("settings.label.workspaceIconUpdated"));
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed to upload"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("settings.error.failedToUpload")),
   });
 
   const deleteMut = useMutation({
@@ -725,21 +731,21 @@ function WorkspaceIconUpload({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-      setImgKey(Date.now());
-      toast.success("Icon removed");
+      bumpIcon();
+      toast.success(t("settings.label.iconRemoved"));
     },
   });
 
   return (
     <div>
-      <label className="mb-2 block text-sm font-medium">Workspace icon</label>
+      <label className="mb-2 block text-sm font-medium">{t("settings.label.workspaceIcon")}</label>
       <div className="flex items-center gap-4">
         <div className="group relative">
           {hasImage && apiBase ? (
             <img
               key={imgKey}
-              src={`${apiBase}/api/workspaces/${workspaceId}/icon?t=${imgKey}`}
-              alt="Workspace icon"
+              src={workspaceIconUrl(apiBase, workspaceId, imgKey)}
+              alt={t("settings.label.workspaceIcon")}
               className="h-16 w-16 rounded-xl object-cover"
             />
           ) : (
@@ -774,7 +780,7 @@ function WorkspaceIconUpload({
             className="flex items-center gap-1.5 text-xs font-medium text-[var(--color-primary)] hover:underline"
           >
             <ImagePlus size={12} />
-            {hasImage ? "Change photo" : "Upload photo"}
+            {hasImage ? t("settings.action.changePhoto") : t("settings.action.uploadPhoto")}
           </button>
           {hasImage && (
             <button
@@ -782,11 +788,11 @@ function WorkspaceIconUpload({
               className="mt-1 flex items-center gap-1.5 text-xs text-[var(--color-danger)] hover:underline"
             >
               <Trash2 size={12} />
-              Remove photo
+              {t("settings.action.removePhoto")}
             </button>
           )}
           <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-            PNG, JPEG, WebP or GIF - max 2 MB
+            {t("common.label.pngJPEGWebPOrGIFMax2MB")}
           </p>
         </div>
       </div>

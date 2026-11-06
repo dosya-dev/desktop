@@ -1,0 +1,974 @@
+/*
+ * dosya video player skin. Replaces video-js.css entirely (never import it,
+ * nor the Video.js icon font). Fonts are the host's.
+ *
+ * Motion: transform and opacity only. Spring for the knob, center button and
+ * popovers; ease elsewhere. Reduced motion: no overshoot, no shimmer,
+ * opacity-only (see the two blocks at the end).
+ */
+
+.dp {
+  /* Palette, from DESIGN.md. */
+  --dp-green: #22c55e;
+  --dp-green-deep: #16a34a;
+  --dp-green-ink: #052e16;
+  --dp-base: #131313;
+  --dp-card: #1d1d1d;
+  --dp-ink: #ededed;
+  --dp-alert: #d42121;
+  --dp-focus: #a1a1a1;
+
+  /*
+   * Translucent overlays over moving video. These are the intentional
+   * exception to the zero-chroma palette: they must read over any frame.
+   */
+  --dp-glass: rgba(22, 22, 22, 0.94);
+  --dp-hair: rgba(255, 255, 255, 0.1);
+  --dp-hover: rgba(255, 255, 255, 0.12);
+  --dp-track: rgba(255, 255, 255, 0.22);
+  --dp-buffer: rgba(255, 255, 255, 0.35);
+  --dp-ink-dim: rgba(237, 237, 237, 0.62);
+  --dp-disc: rgba(0, 0, 0, 0.45);
+  --dp-disc-edge: rgba(255, 255, 255, 0.14);
+  --dp-skip-bg: rgba(255, 255, 255, 0.08);
+  --dp-shade-top: rgba(0, 0, 0, 0.6);
+  --dp-shade-bottom: rgba(0, 0, 0, 0.75);
+  --dp-shade-bottom-mid: rgba(0, 0, 0, 0.25);
+  --dp-sweep: rgba(255, 255, 255, 0.045);
+  --dp-ring-track: rgba(255, 255, 255, 0.1);
+  --dp-alert-wash: rgba(212, 33, 33, 0.12);
+  --dp-drop: rgba(0, 0, 0, 0.5);
+  --dp-stage-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --dp-pop-shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.9);
+
+  --dp-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dp-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dp-vol-w: 72px;
+
+  position: relative;
+  /*
+   * Sized from the video's aspect ratio (player.ts sets --dp-aspect on
+   * loadedmetadata), never from the host's height: hosts are auto-height.
+   * player.ts writes an exact inline width/height when the host has a
+   * definite box.
+   */
+  width: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: var(--dp-aspect, 16 / 9);
+  height: auto;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: 14px;
+  background: #000;
+  color: var(--dp-ink);
+  font: inherit;
+  box-shadow: var(--dp-stage-shadow);
+  animation: dp-enter 0.7s var(--dp-ease) 0.05s backwards;
+}
+.dp *, .dp *::before, .dp *::after { box-sizing: border-box; }
+@keyframes dp-enter { from { opacity: 0; transform: translateY(8px) scale(0.985); } }
+
+/* ---------- Video.js structure (what video-js.css would have provided) ---------- */
+
+.dp .video-js {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  outline: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.dp .vjs-tech { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.dp .vjs-hidden { display: none !important; }
+.dp .vjs-icon-placeholder { display: none; }
+.dp .vjs-poster, .dp .vjs-title-bar, .dp .vjs-modal-dialog { display: none; }
+.dp .vjs-text-track-display { position: absolute; inset: 0 0 64px 0; pointer-events: none; }
+.dp .vjs-resize-manager { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: -1; opacity: 0; pointer-events: none; }
+.dp .vjs-control-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.vjs-full-window .dp .video-js.vjs-fullscreen { position: fixed; inset: 0; z-index: 1000; }
+.dp .video-js.vjs-fullscreen.vjs-user-inactive.vjs-playing { cursor: none; }
+.dp :focus-visible { outline: 2px solid var(--dp-focus); outline-offset: 2px; }
+
+/* ---------- gradients and title ---------- */
+
+.dp-shade { position: absolute; inset: 0; pointer-events: none; z-index: 1; transition: opacity 0.35s var(--dp-ease); }
+.dp-shade-t { background: linear-gradient(to bottom, var(--dp-shade-top), transparent 28%); }
+.dp-shade-b { background: linear-gradient(to top, var(--dp-shade-bottom), var(--dp-shade-bottom-mid) 22%, transparent 40%); }
+
+.dp-title {
+  display: none;
+  position: absolute;
+  top: 14px;
+  left: 18px;
+  right: 18px;
+  z-index: 2;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-shadow: 0 1px 2px var(--dp-drop);
+  pointer-events: none;
+  transition: opacity 0.35s var(--dp-ease), transform 0.35s var(--dp-ease);
+}
+.vjs-fullscreen .dp-title { display: flex; }
+.dp-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-title-meta { color: var(--dp-ink-dim); font-size: 0.75rem; font-weight: 500; white-space: nowrap; }
+.dp-title-meta:empty { display: none; }
+
+/* ---------- center button, skip ripples, stall ring ---------- */
+
+.dp-big {
+  appearance: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  width: 84px;
+  height: 84px;
+  margin: -42px 0 0 -42px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--dp-disc-edge);
+  border-radius: 50%;
+  background: var(--dp-disc);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.6);
+  pointer-events: none;
+}
+.dp-big .dp-icon { width: 36px; height: 36px; transform: translateX(2px); }
+.vjs-paused .dp-big {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+  transition: transform 0.45s var(--dp-spring), opacity 0.25s var(--dp-ease);
+}
+.vjs-playing .dp-big.dp-burst { animation: dp-burst 0.55s var(--dp-ease) forwards; }
+.dp-ready .vjs-paused .dp-big { animation: dp-popin 0.55s var(--dp-spring) backwards; }
+@keyframes dp-burst { from { opacity: 0.9; transform: scale(0.8); } to { opacity: 0; transform: scale(1.5); } }
+@keyframes dp-popin { from { opacity: 0; transform: scale(0.5); } }
+
+.dp-skip {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  width: 120px;
+  height: 120px;
+  margin-top: -60px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--dp-skip-bg);
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  pointer-events: none;
+}
+.dp-skip.l { left: 12%; }
+.dp-skip.r { right: 12%; }
+.dp-skip.dp-go { animation: dp-skip 0.6s var(--dp-ease); }
+@keyframes dp-skip {
+  0% { opacity: 0; transform: scale(0.6); }
+  25% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.25); }
+}
+
+.dp-spin {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s var(--dp-ease);
+}
+.dp-spin::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid var(--dp-ring-track);
+  border-top-color: var(--dp-green);
+  animation: dp-rot 0.9s var(--dp-ease) infinite;
+}
+.dp:not(.dp-loading):not(.dp-failed) .vjs-waiting .dp-spin { opacity: 1; }
+@keyframes dp-rot { to { transform: rotate(360deg); } }
+
+/* ---------- control bar ---------- */
+
+.dp .vjs-control-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 0 14px 10px;
+  transition: opacity 0.35s var(--dp-ease), transform 0.35s var(--dp-ease);
+}
+
+/* Controls rest while playing and still; never while paused or a popover is open. */
+.dp:not(.dp-menu-open) .vjs-playing.vjs-user-inactive { cursor: none; }
+.dp:not(.dp-menu-open) .vjs-playing.vjs-user-inactive .vjs-control-bar { opacity: 0; transform: translateY(10px); pointer-events: none; }
+.dp:not(.dp-menu-open) .vjs-playing.vjs-user-inactive .dp-shade { opacity: 0; }
+.dp:not(.dp-menu-open) .vjs-playing.vjs-user-inactive .dp-title { opacity: 0; transform: translateY(-6px); }
+
+.dp .vjs-button {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+  transition: transform 0.15s var(--dp-ease);
+}
+.dp .vjs-button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--dp-hover);
+  opacity: 0;
+  transition: opacity 0.2s var(--dp-ease);
+}
+.dp .vjs-button:hover::before { opacity: 1; }
+.dp .vjs-button:active { transform: scale(0.9); }
+.dp .dp-glyph { position: relative; display: grid; place-items: center; }
+.dp .dp-glyph > span { display: grid; }
+.dp .vjs-button .dp-icon { width: 22px; height: 22px; }
+.dp .dp-report-btn .dp-icon { width: 19px; height: 19px; }
+.dp .dp-keys-btn .dp-icon { width: 20px; height: 20px; }
+
+.dp .vjs-play-control.vjs-playing .dp-g-play,
+.dp .vjs-play-control:not(.vjs-playing) .dp-g-pause,
+.dp .vjs-mute-control.vjs-vol-0 .dp-g-vol,
+.dp .vjs-mute-control:not(.vjs-vol-0) .dp-g-muted,
+.dp .vjs-fullscreen .vjs-fullscreen-control .dp-g-fs,
+.dp .video-js:not(.vjs-fullscreen) .vjs-fullscreen-control .dp-g-exit { display: none; }
+
+/* Tooltips: the button's own control text, as dark glass. */
+.dp .vjs-control-bar .vjs-button > .vjs-control-text {
+  left: 50%;
+  bottom: 44px;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 4px 8px;
+  overflow: visible;
+  clip-path: none;
+  border: 1px solid var(--dp-hair);
+  border-radius: 6px;
+  background: var(--dp-glass);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.4;
+  opacity: 0;
+  transform: translateX(-50%) translateY(4px);
+  pointer-events: none;
+  transition: opacity 0.15s var(--dp-ease), transform 0.15s var(--dp-ease);
+}
+.dp .vjs-control-bar .vjs-button:is(:hover, :focus-visible) > .vjs-control-text { opacity: 1; transform: translateX(-50%); }
+.dp .vjs-control-bar .vjs-fullscreen-control > .vjs-control-text { left: auto; right: 0; transform: translateY(4px); }
+.dp .vjs-control-bar .vjs-fullscreen-control:is(:hover, :focus-visible) > .vjs-control-text { transform: none; }
+.dp.dp-menu-open .vjs-control-bar .vjs-button > .vjs-control-text { display: none; }
+
+/* ---------- seek line ---------- */
+
+.dp .vjs-progress-control {
+  order: -1;
+  flex: 1 0 100%;
+  position: relative;
+  height: 18px;
+  margin: 0 4px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.dp .vjs-progress-holder {
+  position: relative;
+  flex: 1;
+  height: 3px;
+  outline-offset: 6px;
+}
+.dp .vjs-progress-holder::before,
+.dp .vjs-load-progress,
+.dp .vjs-play-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 99px;
+  transform-origin: left center;
+  transition: transform 0.2s var(--dp-ease);
+}
+.dp .vjs-progress-holder::before { content: ""; width: 100%; background: var(--dp-track); }
+.dp .vjs-load-progress { background: var(--dp-buffer); }
+.dp .vjs-load-progress div { display: none; }
+.dp .vjs-play-progress { background: var(--dp-green); }
+.dp .vjs-play-progress::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -6.5px;
+  width: 13px;
+  height: 13px;
+  margin-top: -6.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px var(--dp-drop);
+  transform: scale(0);
+  transition: transform 0.2s var(--dp-spring);
+}
+/* Thicken with transform, never height. The knob counter-scales to stay round. */
+.dp .vjs-progress-control:hover .vjs-progress-holder::before,
+.dp .vjs-progress-control:hover .vjs-load-progress,
+.dp .vjs-progress-control:hover .vjs-play-progress,
+.dp .vjs-scrubbing .vjs-progress-holder::before,
+.dp .vjs-scrubbing .vjs-load-progress,
+.dp .vjs-scrubbing .vjs-play-progress { transform: scaleY(1.66); }
+.dp .vjs-progress-control:hover .vjs-play-progress::after,
+.dp .vjs-scrubbing .vjs-play-progress::after { transform: scale(1, 0.6024); }
+
+.dp .vjs-play-progress .vjs-time-tooltip { display: none; }
+.dp .vjs-mouse-display {
+  position: absolute;
+  top: 0;
+  width: 0;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s var(--dp-ease);
+}
+.dp .vjs-progress-control:hover .vjs-mouse-display { opacity: 1; }
+.dp .vjs-mouse-display .vjs-time-tooltip {
+  position: absolute;
+  bottom: 14px;
+  left: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--dp-hair);
+  border-radius: 6px;
+  background: var(--dp-glass);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.dp-marker {
+  appearance: none;
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  box-sizing: content-box !important;
+  margin: 0;
+  padding: 0;
+  border: 2px solid var(--dp-green);
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+  transform: translate(-50%, -50%);
+  transition: transform 0.2s var(--dp-ease), opacity 0.2s var(--dp-ease);
+}
+.dp-marker::before { content: ""; position: absolute; inset: -7px; border-radius: 50%; }
+.dp-marker:hover, .dp-marker:focus-visible { transform: translate(-50%, -50%) scale(1.5); }
+.dp-marker.dp-dim { opacity: 0.45; }
+
+/* ---------- volume: clipped, translated slider; the time group slides with it ---------- */
+
+.dp .vjs-volume-panel { display: flex; align-items: center; flex: none; }
+.dp .vjs-volume-control {
+  position: relative;
+  width: var(--dp-vol-w);
+  height: 38px;
+  display: flex;
+  align-items: center;
+  clip-path: inset(0);
+  opacity: 0;
+  transform: translateX(-8px);
+  pointer-events: none;
+  transition: opacity 0.3s var(--dp-ease), transform 0.3s var(--dp-ease);
+}
+.dp .vjs-volume-panel ~ .vjs-time-control {
+  transform: translateX(calc(-1 * var(--dp-vol-w)));
+  transition: transform 0.3s var(--dp-ease);
+}
+.dp .vjs-volume-panel:is(:hover, :focus-within, .vjs-hover, .vjs-slider-active) .vjs-volume-control { opacity: 1; transform: none; pointer-events: auto; }
+.dp .vjs-volume-panel:is(:hover, :focus-within, .vjs-hover, .vjs-slider-active) ~ .vjs-time-control { transform: none; }
+.dp .vjs-volume-bar { position: relative; width: 60px; height: 18px; margin: 0 6px; cursor: pointer; }
+.dp .vjs-volume-bar::before,
+.dp .vjs-volume-level { content: ""; position: absolute; left: 0; top: 50%; height: 3px; margin-top: -1.5px; border-radius: 99px; }
+.dp .vjs-volume-bar::before { width: 100%; background: var(--dp-track); }
+.dp .vjs-volume-level { background: #fff; }
+.dp .vjs-volume-bar .vjs-volume-tooltip,
+.dp .vjs-volume-bar .vjs-mouse-display { display: none; }
+
+/* ---------- time, spacer, speed ---------- */
+
+.dp .vjs-time-control {
+  flex: none;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+  color: #fff;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.dp .vjs-current-time { padding-left: 8px; }
+.dp .vjs-time-divider, .dp .vjs-duration { color: var(--dp-ink-dim); font-weight: 500; }
+.dp .vjs-custom-control-spacer { flex: 1 1 auto; }
+
+/* "?" and speed travel together: a wrapped bar must never split them. */
+.dp .dp-rate-group { display: flex; flex: none; flex-wrap: nowrap; align-items: center; gap: 4px; }
+.dp .vjs-playback-rate { position: relative; flex: none; width: 44px; height: 38px; }
+.dp .vjs-playback-rate .vjs-menu-button { width: 100%; }
+.dp .vjs-playback-rate-value {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  pointer-events: none;
+  z-index: 1;
+}
+.dp .vjs-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  bottom: 46px;
+  z-index: 5;
+  min-width: 120px;
+  padding: 6px;
+  border: 1px solid var(--dp-hair);
+  border-radius: 12px;
+  background: var(--dp-glass);
+  box-shadow: var(--dp-pop-shadow);
+  transform-origin: bottom right;
+}
+/* player.ts caps the speed menu to the room above its button; it scrolls inside. */
+.dp .vjs-playback-rate .vjs-menu { overscroll-behavior: contain; scrollbar-width: thin; }
+.dp .vjs-menu.vjs-lock-showing { display: block; animation: dp-pop 0.22s var(--dp-spring); }
+@keyframes dp-pop { from { opacity: 0; transform: scale(0.92) translateY(6px); } }
+.dp .vjs-menu-content { margin: 0; padding: 0; list-style: none; }
+.dp .vjs-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+}
+.dp .vjs-menu-item:is(:hover, :focus-visible) { background: var(--dp-hover); }
+.dp .vjs-menu-item.vjs-selected::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--dp-green); }
+
+/* ---------- report slot (popover lives in the report module) ---------- */
+
+/* Spans the player from 8px below the top to just above the bar, so the popover
+   can be capped to it: on a short player the steps scroll inside instead of
+   being clipped by .dp's overflow. */
+.dp-report-anchor { position: absolute; top: 8px; left: 14px; right: 14px; bottom: 60px; z-index: 6; pointer-events: none; }
+
+/* report popover */
+
+.dp-report {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: min(300px, calc(100vw - 28px));
+  max-width: 100%;
+  max-height: 100%;
+  padding: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: 14px;
+  border: 1px solid var(--dp-hair);
+  background: var(--dp-glass);
+  box-shadow: var(--dp-pop-shadow);
+  transform-origin: bottom right;
+  transform: scale(0.92) translateY(6px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: transform 0.22s var(--dp-ease), opacity 0.22s var(--dp-ease), visibility 0s 0.22s;
+}
+.dp-report-anchor.dp-open .dp-report {
+  transform: none;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: transform 0.22s var(--dp-spring), opacity 0.22s var(--dp-ease), visibility 0s;
+}
+.dp-step:not([hidden]) { animation: dp-step-in 0.25s var(--dp-ease); }
+@keyframes dp-step-in { from { opacity: 0; transform: translateX(8px); } }
+.dp-report h5 {
+  display: flex;
+  justify-content: space-between;
+  margin: 4px 10px 8px;
+  color: var(--dp-ink-dim);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.dp-back {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--dp-ink-dim);
+  font: inherit;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+.dp-back:hover { color: #fff; }
+.dp-back-error { margin: 0 10px 6px; font-size: 0.75rem; }
+.dp-opt {
+  appearance: none;
+  border: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s var(--dp-ease);
+}
+.dp-opt:hover { background: var(--dp-hover); }
+.dp-opt i {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--dp-skip-bg);
+  font-style: normal;
+  font-size: 0.875rem;
+}
+.dp-opt small { display: block; margin-top: 1px; color: var(--dp-ink-dim); font-size: 0.6875rem; font-weight: 400; }
+.dp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 10px 10px; }
+.dp-chips span {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--dp-hair);
+  background: var(--dp-skip-bg);
+  color: var(--dp-ink);
+  font-size: 0.6875rem;
+  font-weight: 500;
+}
+.dp-f { margin: 0 10px 8px; }
+.dp-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--dp-hair);
+  background: var(--dp-skip-bg);
+  color: #fff;
+  font: inherit;
+  font-size: 0.8125rem;
+  resize: none;
+  outline: none;
+}
+.dp-input::placeholder { color: var(--dp-ink-dim); }
+.dp-input:focus-visible { border-color: var(--dp-green); outline: none; }
+.dp-ck {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 10px 10px;
+  color: var(--dp-ink-dim);
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.dp-ck input { margin-top: 2px; accent-color: var(--dp-green); }
+.dp-challenge { margin: 0 10px 8px; }
+.dp-challenge:empty { display: none; }
+.dp-send {
+  appearance: none;
+  border: 0;
+  width: calc(100% - 20px);
+  margin: 0 10px 4px;
+  padding: 10px;
+  border-radius: 9px;
+  background: var(--dp-green);
+  color: var(--dp-green-ink);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.15s var(--dp-ease), opacity 0.15s var(--dp-ease);
+}
+.dp-send:hover:not(:disabled) { background: var(--dp-green-deep); }
+.dp-send:active:not(:disabled) { transform: scale(0.97); }
+.dp-send:disabled { opacity: 0.4; cursor: default; }
+.dp-error { margin: 4px 10px 10px; color: var(--dp-ink); font-size: 0.8125rem; line-height: 1.45; }
+.dp-done { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 10px 10px; text-align: center; }
+.dp-done:not([hidden]) { display: flex; }
+.dp-done b { font-size: 0.8125rem; }
+.dp-done p { margin: 0; color: var(--dp-ink-dim); font-size: 0.6875rem; }
+.dp-done svg { width: 44px; height: 44px; }
+.dp-done circle, .dp-done path { fill: none; stroke: var(--dp-green); stroke-linecap: round; stroke-linejoin: round; }
+.dp-done circle { stroke-width: 2.5; stroke-dasharray: 140; stroke-dashoffset: 140; animation: dp-draw 0.5s var(--dp-ease) forwards; }
+.dp-done path { stroke-width: 3; stroke-dasharray: 40; stroke-dashoffset: 40; animation: dp-draw 0.35s var(--dp-ease) 0.3s forwards; }
+@keyframes dp-draw { to { stroke-dashoffset: 0; } }
+.dp-formal { color: var(--dp-ink); font-size: 0.75rem; font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
+.dp-formal:hover { color: #fff; }
+.dp-step[hidden] { display: none; }
+
+/* ---------- keyboard shortcuts overlay ---------- */
+
+/* Covers the whole player, above the stage (5) and the report slot (6). */
+.dp-keys {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 7;
+  display: flex;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Its width is the player's: the list below queries it. */
+  container-type: inline-size;
+  background: var(--dp-glass);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.2s var(--dp-ease), visibility 0s 0.2s;
+}
+.dp-keys.dp-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 0.2s var(--dp-ease), visibility 0s;
+}
+/* Auto margins center the panel and fall to 0 when it overflows, so it scrolls from its top. */
+.dp-keys-panel {
+  width: min(560px, 100%);
+  margin: auto;
+  padding: 16px 20px 18px;
+  outline: none;
+  transform: scale(0.96);
+  transition: transform 0.3s var(--dp-spring);
+}
+.dp-keys.dp-open .dp-keys-panel { transform: none; }
+.dp-keys-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.dp-keys-title { color: #fff; font-size: 0.9375rem; font-weight: 600; }
+.dp-keys-close {
+  appearance: none;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  margin: 0 -6px 0 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dp-ink-dim);
+  cursor: pointer;
+  transition: background 0.15s var(--dp-ease), transform 0.15s var(--dp-ease);
+}
+.dp-keys-close:hover { background: var(--dp-hover); color: #fff; }
+.dp-keys-close:active { transform: scale(0.92); }
+.dp-keys-close .dp-icon { width: 18px; height: 18px; }
+.dp-keys-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 28px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+@container (max-width: 419px) {
+  .dp-keys-list { grid-template-columns: minmax(0, 1fr); }
+}
+.dp-keys-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--dp-hair);
+}
+.dp-keys-k { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 96px; max-width: 55%; }
+.dp-keys-k kbd {
+  min-width: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--dp-hair);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--dp-skip-bg);
+  color: #fff;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  white-space: nowrap;
+}
+.dp-keys-sep { color: var(--dp-ink-dim); font-size: 0.6875rem; }
+.dp-keys-note { flex-basis: 100%; color: var(--dp-ink-dim); font-size: 0.6875rem; }
+.dp-keys-d { min-width: 0; color: var(--dp-ink); font-size: 0.8125rem; line-height: 1.35; }
+
+/* ---------- loading stage and failure card ---------- */
+
+.dp-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--dp-base);
+  transition: opacity 0.5s var(--dp-ease), transform 0.5s var(--dp-ease), visibility 0s;
+}
+.dp:not(.dp-loading):not(.dp-failed) .dp-stage {
+  opacity: 0;
+  transform: scale(1.02);
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.5s var(--dp-ease), transform 0.5s var(--dp-ease), visibility 0s 0.5s;
+}
+.dp-stage-sweep {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, var(--dp-sweep) 50%, transparent 70%);
+  transform: translateX(-100%);
+  animation: dp-sweep 1.8s var(--dp-ease) infinite;
+}
+@keyframes dp-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.dp-stage-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: min(360px, calc(100% - 32px));
+  text-align: center;
+}
+.dp-stage-ring { position: relative; width: 56px; height: 56px; display: grid; place-items: center; }
+.dp-stage-ring::before,
+.dp-stage-ring::after { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 3px solid var(--dp-ring-track); }
+.dp-stage-ring::after {
+  border-color: transparent;
+  border-top-color: var(--dp-green);
+  border-right-color: var(--dp-green);
+  animation: dp-rot 0.8s var(--dp-ease) infinite;
+}
+.dp-stage-ring .dp-icon { width: 20px; height: 20px; color: #fff; opacity: 0.9; transform: translateX(1px); }
+.dp-stage-name { font-size: 0.8125rem; font-weight: 600; color: #fff; overflow-wrap: anywhere; }
+.dp-stage-name:empty { display: none; }
+.dp-stage-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dp-ink-dim);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dp-stage-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--dp-green); animation: dp-blink 1.2s var(--dp-ease) infinite; }
+@keyframes dp-blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+.dp-stage-failure { display: none; margin: -6px 0 0; color: var(--dp-ink-dim); font-size: 0.8125rem; line-height: 1.5; }
+.dp-stage-line {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--dp-green);
+  box-shadow: 0 0 12px var(--dp-green);
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.4s var(--dp-ease);
+}
+.dp-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 10px;
+  background: var(--dp-green);
+  color: var(--dp-green-ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform 0.15s var(--dp-ease);
+}
+.dp-download:hover { background: var(--dp-green-deep); }
+.dp-download:active { transform: scale(0.97); }
+.dp-download .dp-icon { width: 16px; height: 16px; }
+
+.dp-loading .vjs-control-bar,
+.dp-loading .dp-big,
+.dp-loading .dp-title,
+.dp-loading .dp-shade,
+.dp-failed .vjs-control-bar,
+.dp-failed .dp-big,
+.dp-failed .dp-title,
+.dp-failed .dp-shade,
+/* visibility as well as opacity: invisible controls must not take tab focus. */
+.dp-failed .dp-spin { opacity: 0; visibility: hidden; pointer-events: none; }
+
+.dp-failed .dp-stage-sweep { display: none; }
+.dp-failed .dp-stage-ring::after { animation: none; border-color: transparent; }
+.dp-failed .dp-stage-ring::before { border-color: var(--dp-alert); background: var(--dp-alert-wash); }
+.dp-failed .dp-stage-ring .dp-icon { opacity: 0; }
+.dp-failed .dp-stage-dot { animation: none; background: var(--dp-alert); }
+.dp-failed .dp-stage-failure { display: block; }
+.dp-failed .dp-stage-line { background: var(--dp-alert); box-shadow: none; }
+
+/* ---------- reduced motion: no overshoot, no shimmer, opacity only ---------- */
+/* Same body twice: once for the OS setting, once for the `reducedMotion` option. */
+
+@media (prefers-reduced-motion: reduce) {
+  .dp { --dp-spring: var(--dp-ease); animation-name: dp-fade-in; }
+  .dp *, .dp *::before, .dp *::after { transition-property: opacity, visibility !important; }
+  .dp .dp-stage-sweep { display: none; }
+  .dp .dp-stage-ring::after, .dp .dp-spin::before { animation-name: dp-blink; }
+  .dp .dp-big, .dp .vjs-paused .dp-big { transform: none; }
+  .dp .vjs-playing .dp-big.dp-burst { animation-name: dp-fade-out; }
+  .dp.dp-ready .vjs-paused .dp-big, .dp .vjs-menu.vjs-lock-showing { animation-name: dp-fade-in; }
+  .dp .dp-skip.dp-go { animation-name: dp-flash; }
+  .dp .vjs-control-bar, .dp .dp-title, .dp .dp-stage, .dp .vjs-volume-control { transform: none !important; }
+  .dp .vjs-button:active, .dp .dp-download:active { transform: none; }
+  .dp .dp-keys-panel, .dp .dp-keys-close:active { transform: none; }
+}
+.dp.dp-reduced-motion { --dp-spring: var(--dp-ease); animation-name: dp-fade-in; }
+.dp.dp-reduced-motion *, .dp.dp-reduced-motion *::before, .dp.dp-reduced-motion *::after { transition-property: opacity, visibility !important; }
+.dp.dp-reduced-motion .dp-stage-sweep { display: none; }
+.dp.dp-reduced-motion .dp-stage-ring::after, .dp.dp-reduced-motion .dp-spin::before { animation-name: dp-blink; }
+.dp.dp-reduced-motion .dp-big, .dp.dp-reduced-motion .vjs-paused .dp-big { transform: none; }
+.dp.dp-reduced-motion .vjs-playing .dp-big.dp-burst { animation-name: dp-fade-out; }
+.dp.dp-reduced-motion.dp-ready .vjs-paused .dp-big, .dp.dp-reduced-motion .vjs-menu.vjs-lock-showing { animation-name: dp-fade-in; }
+.dp.dp-reduced-motion .dp-skip.dp-go { animation-name: dp-flash; }
+.dp.dp-reduced-motion .dp-report { transform: none; }
+.dp.dp-reduced-motion .dp-keys-panel, .dp.dp-reduced-motion .dp-keys-close:active { transform: none; }
+.dp.dp-reduced-motion .dp-step:not([hidden]) { animation-name: dp-fade-in; }
+.dp.dp-reduced-motion .dp-done circle, .dp.dp-reduced-motion .dp-done path { animation: none; stroke-dashoffset: 0; }
+.dp.dp-reduced-motion .dp-send:active { transform: none; }
+.dp.dp-reduced-motion .vjs-control-bar, .dp.dp-reduced-motion .dp-title, .dp.dp-reduced-motion .dp-stage, .dp.dp-reduced-motion .vjs-volume-control { transform: none !important; }
+.dp.dp-reduced-motion .vjs-button:active, .dp.dp-reduced-motion .dp-download:active { transform: none; }
+
+@keyframes dp-fade-in { from { opacity: 0; } }
+@keyframes dp-fade-out { to { opacity: 0; } }
+@keyframes dp-flash { 0% { opacity: 0; } 25% { opacity: 1; } 100% { opacity: 0; } }
+
+/* The failure card's Download can be a <button> (hosts that save through their own dialog). */
+button.dp-download { border: 0; cursor: pointer; font-family: inherit; }
+
+/* Failure card actions: Download and, with a report config, Report a problem. */
+.dp-stage-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.dp-report-fail {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 16px;
+  border: 1px solid var(--dp-hair);
+  border-radius: 10px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s var(--dp-ease), background 0.15s var(--dp-ease);
+}
+.dp-report-fail:hover { background: var(--dp-hover); }
+.dp-report-fail:active { transform: scale(0.97); }
+.dp.dp-reduced-motion .dp-report-fail:active { transform: none; }
+@media (prefers-reduced-motion: reduce) { .dp .dp-report-fail:active { transform: none; } }
+
+/* ---------- compact: a ~300 x 192 file detail panel ---------- */
+/* The root fills the panel box (player.ts), so it drops the rounded stage look. */
+
+.dp.dp-compact { border-radius: 0; box-shadow: none; }
+/* 'focus' key mode focuses the root on a click; it is never a tab stop. */
+.dp:focus { outline: none; }
+.dp.dp-compact .vjs-control-bar { gap: 2px; padding: 0 8px 6px; }
+.dp.dp-compact .vjs-time-control { font-size: 0.75rem; }
+.dp.dp-compact .vjs-current-time { padding-left: 4px; }
+.dp.dp-compact .vjs-text-track-display { bottom: 52px; }
+
+/* Fullscreen gets the full-size center button and skip ripples back. */
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-big { width: 56px; height: 56px; margin: -28px 0 0 -28px; }
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-big .dp-icon { width: 24px; height: 24px; }
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-skip { width: 72px; height: 72px; margin-top: -36px; font-size: 0.75rem; }
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-spin { width: 36px; height: 36px; margin: -18px 0 0 -18px; }
+
+/* Loading: ring and status only, about 64 px tall. Failure: ring, one line, a small Download.
+   Sizes return to full in fullscreen; the name line and long text stay hidden. */
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-stage-card { gap: 10px; max-width: calc(100% - 24px); }
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-stage-ring { width: 40px; height: 40px; }
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-stage-ring .dp-icon { width: 16px; height: 16px; }
+.dp-compact .dp-stage-name { display: none; }
+.dp-compact.dp-failed .dp-stage-failure { display: none; }
+.dp-compact.dp-failed .dp-stage-dot { display: none; }
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-download { gap: 6px; padding: 6px 12px; border-radius: 8px; font-size: 0.75rem; }
+.dp-compact .video-js:not(.vjs-fullscreen) .dp-download .dp-icon { width: 14px; height: 14px; }

@@ -28,10 +28,13 @@ import {
   type LibraryRow,
 } from "@/lib/library-window";
 import { FilePreviewImage } from "@/components/files/FilePreviewImage";
+import { VideoPoster } from "@/components/files/VideoPoster";
 import { FileIcon } from "@/components/files/FileIcon";
 import { extOf, colorFor, humanSize } from "@/lib/file-type";
 import { NAME_COL_MIN, type ColumnDef } from "@/lib/file-columns";
 import { formatItemDate, LIBRARY_PAGE_SIZE, KIND_COPY, plural, type MonthGroup, type LibraryItem, type LibraryKind, type LibraryLayout } from "@/lib/library-request";
+import { useT } from "@/lib/i18n";
+import { Part, useAutoDir } from "@/lib/bidi-ui";
 
 export type TileSize = "small" | "large";
 
@@ -129,6 +132,7 @@ export function LibraryGrid(props: LibraryGridProps) {
     selected, favourites, unlockedFiles, activeId, tileSize, layout, columns,
     onLoadMore, onRetry, onUploadClick, onOpen, onToggleSelect, onSelectMany, onFavourite, onContextMenu,
   } = props;
+  const t = useT();
   const copy = KIND_COPY[kind];
   const list = layout === "list";
   const bodyClass = list ? LIST : GRID[kind][tileSize];
@@ -269,9 +273,9 @@ export function LibraryGrid(props: LibraryGridProps) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <AlertCircle size={40} className="mb-4 text-[var(--color-danger)] opacity-50" />
-        <p className="mb-1 text-sm font-medium">Could not load your {copy.nounPlural}</p>
+        <p className="mb-1 text-sm font-medium">{t("files.error.couldNotLoadYourPhotos", { kind })}</p>
         <p className="mb-3 max-w-80 text-xs text-[var(--color-text-muted)]">{error}</p>
-        <button className={btn} style={{ borderColor: "var(--color-border)" }} onClick={onRetry}><RefreshCw size={12} /> Try again</button>
+        <button className={btn} style={{ borderColor: "var(--color-border)" }} onClick={onRetry}><RefreshCw size={12} /> {t("common.action.tryAgain")}</button>
       </div>
     );
   }
@@ -288,13 +292,13 @@ export function LibraryGrid(props: LibraryGridProps) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         {search ? <Search size={40} className="mb-4 text-[var(--color-text-muted)] opacity-40" /> : <EmptyIcon size={40} className="mb-4 text-[var(--color-text-muted)] opacity-40" />}
-        <p className="mb-1 text-sm font-medium">{search ? `No ${copy.nounPlural} match "${search}"` : copy.emptyTitle}</p>
+        <p className="mb-1 text-sm font-medium">{search ? t("files.description.noPhotosMatchSearch", { kind, search }) : t(copy.emptyTitle)}</p>
         <p className="mb-4 max-w-80 text-xs text-[var(--color-text-muted)]">
-          {search ? `Try a different name, or clear the search to see every ${copy.noun}.` : copy.emptyDescription}
+          {search ? t("files.description.tryADifferentNameOrClearTheSearchTo", { kind }) : t(copy.emptyDescription)}
         </p>
         {!search && (
           <button className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs text-[var(--color-primary-fg)]" onClick={onUploadClick}>
-            <Upload size={12} /> Upload {copy.nounPlural}
+            <Upload size={12} /> {t("files.action.uploadPhotos", { kind })}
           </button>
         )}
       </div>
@@ -326,7 +330,7 @@ export function LibraryGrid(props: LibraryGridProps) {
       {list && columns.length > 0 && (
         <div
           data-testid="library-table-header"
-          title="Rows follow the sort menu's date order"
+          title={t("files.tooltip.rowsFollowTheSortMenuSDateOrder")}
           className="mb-0.5 flex items-center gap-3 border-b px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]"
           style={{ borderColor: "var(--color-border)", minWidth: listMinWidth }}
         >
@@ -365,7 +369,7 @@ export function LibraryGrid(props: LibraryGridProps) {
           const box: CSSProperties = pinned
             ? { position: "sticky", top: 0, zIndex: 10, width: "100%", height: HEADER_H }
             : {
-                position: "absolute", top: 0, left: 0, width: "100%",
+                position: "absolute", top: 0, insetInlineStart: 0, width: "100%",
                 height: row.type === "header" ? HEADER_H : itemH,
                 transform: `translateY(${vi.start - scrollMargin}px)`,
               };
@@ -383,13 +387,13 @@ export function LibraryGrid(props: LibraryGridProps) {
               >
                 <h3 className="text-[15px] font-semibold leading-5 tracking-tight">{m.label}</h3>
                 <span className="text-xs tabular-nums text-[var(--color-text-muted)]">{plural(kind, m.count)}</span>
-                {partial && <span className="text-[11px] tabular-nums text-[var(--color-text-muted)]">· {m.files.length} loaded</span>}
+                {partial && <span className="text-[11px] tabular-nums text-[var(--color-text-muted)]">{t("files.label.filecountLoaded", { fileCount: String(m.files.length) })}</span>}
                 <button
                   type="button"
-                  className="ml-auto rounded px-1.5 py-0.5 text-[11px] text-[var(--color-text-muted)] opacity-0 transition-opacity hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)] focus-visible:opacity-100 group-hover/month:opacity-100"
+                  className="ms-auto rounded px-1.5 py-0.5 text-[11px] text-[var(--color-text-muted)] opacity-0 transition-opacity hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)] focus-visible:opacity-100 group-hover/month:opacity-100"
                   onClick={() => onSelectMany(selectable)}
                 >
-                  {partial ? `Select ${selectable.length} loaded` : "Select all"}
+                  {partial ? t("files.action.selectSelectableCountLoaded", { selectableCount: String(selectable.length) }) : t("common.action.selectAll")}
                 </button>
               </div>
             );
@@ -446,16 +450,16 @@ export function LibraryGrid(props: LibraryGridProps) {
       <div className="flex flex-col items-center gap-2.5 pb-2 pt-8">
         {hasMore ? (
           <>
-            <span className="text-xs tabular-nums text-[var(--color-text-muted)]">Showing {loaded.toLocaleString()} of {plural(kind, total)}</span>
+            <span className="text-xs tabular-nums text-[var(--color-text-muted)]">{t("files.label.showingLoadedOfTotalKind", { loaded, total, kind })}</span>
             <div className="h-[3px] w-[200px] overflow-hidden rounded-full bg-[var(--color-bg-tertiary)]" aria-hidden="true">
               <div className="h-full bg-[var(--color-primary)] transition-[width] duration-300" style={{ width: `${pct}%` }} />
             </div>
             <button className={btn} style={{ borderColor: "var(--color-border)" }} disabled={isLoadingMore} onClick={onLoadMore}>
-              {isLoadingMore ? <><Loader2 size={12} className="animate-spin" /> Loading</> : `Load ${Math.min(LIBRARY_PAGE_SIZE, remaining)} more`}
+              {isLoadingMore ? <><Loader2 size={12} className="animate-spin" /> {t("files.action.loading")}</> : t("files.action.loadLibraryPageSizeMore", { libraryPageSize: Math.min(LIBRARY_PAGE_SIZE, remaining) })}
             </button>
           </>
         ) : (
-          <span className="text-xs text-[var(--color-text-muted)]">That's all {plural(kind, loaded)}.</span>
+          <span className="text-xs text-[var(--color-text-muted)]">{t("files.label.thatSAllPhoto", { count: loaded, kind })}</span>
         )}
       </div>
     </div>
@@ -471,8 +475,10 @@ type TileProps = {
 type RowProps = Omit<TileProps, "onFavourite"> & { kind: LibraryKind; columns: ColumnDef[] };
 
 function PhotoTile({ file, selected, anySelected, active, isFavourite, unlockToken, onOpen, onToggle, onFavourite, onContextMenu }: TileProps) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const locked = file.lock_mode === "full_lock" && !unlockToken;
-  const ext = extOf(file.name).toUpperCase() || "FILE";
+  const ext = extOf(file.name).toUpperCase() || t("common.label.fileUppercase");
   const onKey = (e: ReactKeyboardEvent) => {
     if (e.key === "Enter") { e.preventDefault(); onOpen(); }
     if (e.key === " " && !locked) { e.preventDefault(); onToggle(); }
@@ -513,25 +519,25 @@ function PhotoTile({ file, selected, anySelected, active, isFavourite, unlockTok
       {!locked && (
         <input
           type="checkbox"
-          aria-label={`Select ${file.name}`}
+          aria-label={t("files.accessibility.selectName", { name: file.name })}
           checked={selected}
           onChange={onToggle}
           onClick={(e) => e.stopPropagation()}
-          className={`absolute left-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-opacity ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          className={`absolute inset-s-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-opacity ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         />
       )}
 
       <button
         type="button"
-        title={isFavourite ? "Remove from favourites" : "Add to favourites"}
-        className={`absolute right-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-opacity hover:bg-black/55 ${isFavourite ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+        title={isFavourite ? t("files.accessibility.removeFromFavourites") : t("files.label.addToFavourites")}
+        className={`absolute inset-e-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-opacity hover:bg-black/55 ${isFavourite ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         onClick={(e) => { e.stopPropagation(); onFavourite(); }}
       >
         <Star size={14} className={isFavourite ? "fill-orange-400 text-orange-400" : "text-white"} />
       </button>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-5 text-white opacity-0 transition-opacity group-hover:opacity-100">
-        <p className="truncate text-[11px] font-medium leading-tight">{file.name}</p>
+        <p dir={ownDir} className="truncate text-[11px] font-medium leading-tight" title={file.name}>{file.name}</p>
         <p className="text-[10px] tabular-nums opacity-80">{formatItemDate(file.taken_at)}</p>
       </div>
     </div>
@@ -542,8 +548,10 @@ function PhotoTile({ file, selected, anySelected, active, isFavourite, unlockTok
 // mark (a lock, when the file is locked), the format top-right, and the name
 // and size always on - there is nothing to reveal on hover.
 function VideoCard({ file, selected, anySelected, active, isFavourite, unlockToken, onOpen, onToggle, onFavourite, onContextMenu }: TileProps) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const locked = file.lock_mode === "full_lock" && !unlockToken;
-  const ext = extOf(file.name).toUpperCase() || "VIDEO";
+  const ext = extOf(file.name).toUpperCase() || t("common.label.videoUppercase");
   const onKey = (e: ReactKeyboardEvent) => {
     if (e.key === "Enter") { e.preventDefault(); onOpen(); }
     if (e.key === " " && !locked) { e.preventDefault(); onToggle(); }
@@ -563,35 +571,37 @@ function VideoCard({ file, selected, anySelected, active, isFavourite, unlockTok
       onKeyDown={onKey}
       onContextMenu={onContextMenu}
     >
+      {!locked && <VideoPoster file={file} unlockToken={unlockToken} />}
       <span
         className="absolute left-1/2 top-1/2 flex h-10 w-10 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 backdrop-blur-sm"
         data-testid={locked ? "lock" : "play"}
       >
+        {/* rtl-ok: physical geometry, the play triangle points right in every language */}
         {locked ? <Lock size={16} /> : <Play size={16} className="ml-0.5 fill-white" />}
       </span>
-      <span className="absolute right-2 top-2 z-10 rounded-full bg-black/45 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider backdrop-blur-sm">{ext}</span>
+      <span className="absolute inset-e-2 top-2 z-10 rounded-full bg-black/45 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider backdrop-blur-sm">{ext}</span>
       {!locked && (
         <input
           type="checkbox"
-          aria-label={`Select ${file.name}`}
+          aria-label={t("files.accessibility.selectName", { name: file.name })}
           checked={selected}
           onChange={onToggle}
           onClick={(e) => e.stopPropagation()}
-          className={`absolute left-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-opacity ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          className={`absolute inset-s-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-opacity ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         />
       )}
       <button
         type="button"
-        title={isFavourite ? "Remove from favourites" : "Add to favourites"}
-        aria-label={isFavourite ? "Remove from favourites" : "Add to favourites"}
-        className={`absolute right-14 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-opacity hover:bg-black/55 ${isFavourite ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+        title={isFavourite ? t("files.accessibility.removeFromFavourites") : t("files.label.addToFavourites")}
+        aria-label={isFavourite ? t("files.accessibility.removeFromFavourites") : t("files.label.addToFavourites")}
+        className={`absolute inset-e-14 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-opacity hover:bg-black/55 ${isFavourite ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         onClick={(e) => { e.stopPropagation(); onFavourite(); }}
       >
         <Star size={14} className={isFavourite ? "fill-orange-400 text-orange-400" : "text-white"} />
       </button>
       <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-2.5 pb-2 pt-6">
-        <p className="truncate text-[12px] font-medium leading-tight">{file.name}</p>
-        <p className="text-[10px] tabular-nums opacity-80">{humanSize(file.size_bytes)} · {formatItemDate(file.taken_at)}</p>
+        <p dir={ownDir} className="truncate text-[12px] font-medium leading-tight" title={file.name}>{file.name}</p>
+        <p className="text-[10px] tabular-nums opacity-80"><Part>{humanSize(file.size_bytes)}</Part> · <Part>{formatItemDate(file.taken_at)}</Part></p>
       </div>
     </div>
   );
@@ -603,8 +613,10 @@ function VideoCard({ file, selected, anySelected, active, isFavourite, unlockTok
  * context menu behave exactly as a VideoCard.
  */
 function DocumentTile({ file, selected, anySelected, active, isFavourite, unlockToken, onOpen, onToggle, onFavourite, onContextMenu }: TileProps) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const locked = file.lock_mode === "full_lock" && !unlockToken;
-  const ext = extOf(file.name).toUpperCase() || "FILE";
+  const ext = extOf(file.name).toUpperCase() || t("common.label.fileUppercase");
   const onKey = (e: ReactKeyboardEvent) => {
     if (e.key === "Enter") { e.preventDefault(); onOpen(); }
     if (e.key === " " && !locked) { e.preventDefault(); onToggle(); }
@@ -629,14 +641,14 @@ function DocumentTile({ file, selected, anySelected, active, isFavourite, unlock
       {!locked && (
         <input
           type="checkbox"
-          aria-label={`Select ${file.name}`}
+          aria-label={t("files.accessibility.selectName", { name: file.name })}
           checked={selected}
           onChange={onToggle}
           onClick={(e) => e.stopPropagation()}
-          className={`absolute left-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-opacity ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          className={`absolute inset-s-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-opacity ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         />
       )}
-      <div className="absolute right-2 top-2 z-10 flex items-center gap-1">
+      <div className="absolute inset-e-2 top-2 z-10 flex items-center gap-1">
         {locked && (
           <span className="flex h-5 w-5 items-center justify-center rounded bg-[var(--color-bg)]/80 text-[var(--color-text-muted)]" data-testid="lock">
             <Lock size={12} />
@@ -646,16 +658,16 @@ function DocumentTile({ file, selected, anySelected, active, isFavourite, unlock
       </div>
       <button
         type="button"
-        title={isFavourite ? "Remove from favourites" : "Add to favourites"}
-        aria-label={isFavourite ? "Remove from favourites" : "Add to favourites"}
-        className={`absolute bottom-11 right-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-bg)]/80 backdrop-blur-sm transition-opacity hover:bg-[var(--color-bg)] ${isFavourite ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+        title={isFavourite ? t("files.accessibility.removeFromFavourites") : t("files.label.addToFavourites")}
+        aria-label={isFavourite ? t("files.accessibility.removeFromFavourites") : t("files.label.addToFavourites")}
+        className={`absolute bottom-11 inset-e-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-bg)]/80 backdrop-blur-sm transition-opacity hover:bg-[var(--color-bg)] ${isFavourite ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         onClick={(e) => { e.stopPropagation(); onFavourite(); }}
       >
         <Star size={14} className={isFavourite ? "fill-orange-400 text-orange-400" : "text-[var(--color-text-muted)]"} />
       </button>
       <div className="absolute inset-x-0 bottom-0 bg-[var(--color-bg)]/85 px-2 py-1.5 backdrop-blur-sm">
-        <p className="truncate text-xs font-medium">{file.name}</p>
-        <p className="text-[10px] tabular-nums text-[var(--color-text-muted)]">{humanSize(file.size_bytes)} · {formatItemDate(file.taken_at)}</p>
+        <p dir={ownDir} className="truncate text-xs font-medium" title={file.name}>{file.name}</p>
+        <p className="text-[10px] tabular-nums text-[var(--color-text-muted)]"><Part>{humanSize(file.size_bytes)}</Part> · <Part>{formatItemDate(file.taken_at)}</Part></p>
       </div>
     </div>
   );
@@ -673,6 +685,7 @@ function DocumentTile({ file, selected, anySelected, active, isFavourite, unlock
  * line up with the header.
  */
 function LibraryListRow({ file, kind, columns, selected, anySelected, active, isFavourite, unlockToken, onOpen, onToggle, onContextMenu }: RowProps) {
+  const t = useT();
   const locked = file.lock_mode === "full_lock" && !unlockToken;
   const icon = <FileIcon name={file.name} size={28} />;
   const onKey = (e: ReactKeyboardEvent) => {
@@ -698,7 +711,7 @@ function LibraryListRow({ file, kind, columns, selected, anySelected, active, is
       ) : (
         <input
           type="checkbox"
-          aria-label={`Select ${file.name}`}
+          aria-label={t("files.accessibility.selectName", { name: file.name })}
           checked={selected}
           onChange={onToggle}
           onClick={(e) => e.stopPropagation()}
@@ -720,7 +733,7 @@ function LibraryListRow({ file, kind, columns, selected, anySelected, active, is
       </div>
       {columns.map((col) => col.key === "name" ? (
         <div key="name" className="flex flex-1 items-center gap-2" style={{ minWidth: NAME_COL_MIN }}>
-          <span className="truncate text-sm font-medium">{file.name}</span>
+          <span className="truncate text-sm font-medium" title={file.name}>{file.name}</span>
           {locked && <Lock size={12} className="shrink-0 text-[var(--color-text-muted)]" />}
           {isFavourite && <Star size={12} className="shrink-0 fill-orange-400 text-orange-400" />}
         </div>

@@ -57,6 +57,10 @@
 @import "tailwindcss";
 @import "maplibre-gl/dist/maplibre-gl.css";
 
+/* The OS UI is right to left (main.tsx stamps data-os-dir from main): the
+   window buttons sit on the right, whatever language the app is in. */
+@custom-variant os-rtl (&:where(:root[data-os-dir="rtl"] *));
+
 /* ── Custom properties matching dosya.dev web design ─────────────── */
 
 /* ── Theme tokens (parity with apps/web) ─────────────────────────────
@@ -111,6 +115,11 @@
      them. Zero everywhere else - Windows and Linux draw their own controls on
      the right, inside TitleBar. */
   --titlebar-inset-left: 0px;
+  /* The mirror image for Windows, whose minimise/maximise/close buttons are
+     the titleBarOverlay (main/index.ts) painted over the top-right corner.
+     Zero elsewhere: Linux draws its controls inside TitleBar, which a
+     full-window surface simply covers. */
+  --titlebar-inset-right: 0px;
   --card: #ffffff;
   --card-foreground: #181818;
   --popover: #ffffff;
@@ -159,13 +168,46 @@
   --titlebar-inset-left: 80px;
 }
 
+/* An RTL macOS (Arabic, Hebrew, ...) draws the traffic lights top-right, so
+   the reservation moves with them. The app's own language does not matter. */
+:root[data-platform="darwin"][data-os-dir="rtl"] {
+  --titlebar-inset-left: 0px;
+  --titlebar-inset-right: 80px;
+}
+
+/* Windows: the overlay's width, read from the Window Controls Overlay env
+   vars Electron exposes with titleBarOverlay (right inset = viewport minus
+   the free title-bar area's right edge). The fallbacks give the stock three
+   46px caption buttons plus a little air if the env vars are missing.
+   Without this the file viewer's Download and Close buttons sat underneath
+   the window's own controls, so the only X a user could reach closed the
+   whole app (desktop QA TC-032/033/037). */
+:root[data-platform="win32"] {
+  --titlebar-inset-right: calc(
+    100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 140px)) + 8px
+  );
+}
+
+/* An RTL Windows may get the caption overlay mirrored to the left. The free
+   area then starts at titlebar-area-x, which is the left reservation (and the
+   right one above collapses to its 8px of air); unmirrored it is 0 and this
+   stays under the 1rem floor the surfaces already keep. */
+:root[data-platform="win32"][data-os-dir="rtl"] {
+  --titlebar-inset-left: calc(env(titlebar-area-x, 0px) + 8px);
+}
+:root[data-platform="win32"][data-os-dir="rtl"] .titlebar-caption-row {
+  padding-left: max(var(--titlebar-inset-left), 1rem); /* rtl-ok: physical geometry, Windows caption overlay */
+}
+
 /**
  * For a full-window surface that covers the title bar - the file viewer, the
  * editor - rather than sitting below it. Without this the filename renders
  * underneath the close/minimise/zoom buttons and cannot be read or clicked.
  */
 .titlebar-inset {
-  padding-left: max(var(--titlebar-inset-left), 1rem);
+  /* The OS window controls stay where the OS draws them in every language. */
+  padding-left: max(var(--titlebar-inset-left), 1rem); /* rtl-ok: physical geometry, macOS traffic lights */
+  padding-right: max(var(--titlebar-inset-right), 1rem); /* rtl-ok: physical geometry, Windows caption overlay */
 }
 
 .dark {
@@ -305,6 +347,32 @@
 
 /* ── Font families ───────────────────────────────────────────────── */
 
+/* Space Grotesk covers Latin only. CJK and Thai fall through to the platform UI font; naming the
+   usual faces per language keeps Han characters in the right regional shape (html[lang] is set by
+   the i18n provider). Other languages are unchanged. */
+html:lang(zh-Hans) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif; }
+html:lang(zh-Hant) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Microsoft JhengHei UI", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC", sans-serif; }
+html:lang(ja) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo UI", "Noto Sans CJK JP", "Noto Sans JP", sans-serif; }
+html:lang(ko) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR", "Noto Sans KR", sans-serif; }
+html:lang(th) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Thonburi", "Leelawadee UI", "Tahoma", "Noto Sans Thai", sans-serif; }
+/* Arabic, Persian and Hebrew: no bundled face, the platform's own after the Latin one
+   (macOS, then Windows, then Linux). Persian needs پ چ ژ گ, which all of these draw. */
+html:lang(ar) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "SF Arabic", "Geeza Pro", "Segoe UI", "Noto Sans Arabic", "Noto Naskh Arabic", sans-serif; }
+html:lang(fa) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "SF Arabic", "Geeza Pro", "Segoe UI", "Noto Sans Arabic", "Noto Naskh Arabic", sans-serif; }
+html:lang(he) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "SF Hebrew", "Arial Hebrew", "Segoe UI", "Noto Sans Hebrew", sans-serif; }
+/* Language names in the pickers carry their own lang, so each one draws in its own script's face
+   whatever the UI language: the html rules above only follow <html lang>, and font-family is
+   inherited as a resolved value, so these names re-declare it. */
+.lang-name { font-family: var(--font-sans); letter-spacing: normal; }
+.lang-name:lang(zh-Hans) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", sans-serif; }
+.lang-name:lang(zh-Hant) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Microsoft JhengHei UI", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC", sans-serif; }
+.lang-name:lang(ja) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo UI", "Noto Sans CJK JP", "Noto Sans JP", sans-serif; }
+.lang-name:lang(ko) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR", "Noto Sans KR", sans-serif; }
+.lang-name:lang(th) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Thonburi", "Leelawadee UI", "Tahoma", "Noto Sans Thai", sans-serif; }
+.lang-name:lang(ar) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "SF Arabic", "Geeza Pro", "Segoe UI", "Noto Sans Arabic", "Noto Naskh Arabic", sans-serif; }
+.lang-name:lang(fa) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "SF Arabic", "Geeza Pro", "Segoe UI", "Noto Sans Arabic", "Noto Naskh Arabic", sans-serif; }
+.lang-name:lang(he) { --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "SF Hebrew", "Arial Hebrew", "Segoe UI", "Noto Sans Hebrew", sans-serif; }
+
 body {
   font-family: var(--font-sans);
   color: var(--color-text);
@@ -371,6 +439,28 @@ body {
 .anim-pop-in {
   animation: ctx-in 150ms ease-out;
 }
+.anim-popover {
+  /* A transition, not keyframes: opening and closing are one property pair,
+     so reopening mid-close retargets from the current frame. Enter is a
+     strong ease-out (fast start reads as responsive); exit is shorter and
+     eases in, so the surface gets out of the way. */
+  transition:
+    opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+@starting-style {
+  .anim-popover {
+    opacity: 0;
+    transform: scale(0.95) translateY(-4px);
+  }
+}
+.anim-popover[data-closing] {
+  opacity: 0;
+  transform: scale(0.97) translateY(-2px);
+  pointer-events: none;
+  transition-duration: 120ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+}
 .anim-modal-overlay {
   animation: modal-fade 150ms ease-out;
 }
@@ -408,6 +498,88 @@ body {
   visibility: visible;
   transition-delay: 0s;
 }
+
+/* ── Text editor: Markdown preview ──────────────────────────────── */
+
+/* The preview's HTML comes from marked + DOMPurify (lib/md-render.ts), which
+   strips every class and style attribute, so the look lives here and keys off
+   element names alone. Tokens only: the pane follows all eight themes. */
+.md-preview {
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.md-preview > :first-child { margin-top: 0; }
+.md-preview h1, .md-preview h2, .md-preview h3,
+.md-preview h4, .md-preview h5, .md-preview h6 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 20px 0 8px;
+}
+.md-preview h1 { font-size: 24px; }
+.md-preview h2 { font-size: 18px; }
+.md-preview h3 { font-size: 16px; }
+.md-preview h4, .md-preview h5, .md-preview h6 { font-size: 14px; }
+.md-preview p { margin: 0 0 10px; }
+.md-preview ul, .md-preview ol { margin: 0 0 10px; padding-inline-start: 22px; }
+.md-preview ul { list-style: disc; }
+.md-preview ol { list-style: decimal; }
+.md-preview li { margin: 2px 0; }
+.md-preview li > ul, .md-preview li > ol { margin-bottom: 0; }
+/* GFM task items: marked emits <li><input type=checkbox disabled> text</li>. */
+.md-preview li:has(> input[type="checkbox"]) { list-style: none; margin-inline-start: -20px; }
+.md-preview input[type="checkbox"] {
+  accent-color: var(--color-primary);
+  margin: 0;
+  margin-inline-end: 6px;
+  vertical-align: -1px;
+}
+.md-preview a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--color-primary) 40%, transparent);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.md-preview code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--color-bg-secondary);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.md-preview pre {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0 0 12px;
+  overflow-x: auto;
+}
+.md-preview pre code { background: none; padding: 0; font-size: 12px; line-height: 1.6; }
+.md-preview blockquote {
+  margin: 0 0 10px;
+  padding: 2px 12px;
+  border-inline-start: 3px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+.md-preview hr { border: 0; border-top: 1px solid var(--color-border); margin: 16px 0; }
+.md-preview table { border-collapse: collapse; margin: 0 0 12px; display: block; overflow-x: auto; }
+.md-preview th, .md-preview td {
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  text-align: start;
+}
+.md-preview th { background: var(--color-bg-secondary); font-weight: 600; }
+.md-preview img { max-width: 100%; height: auto; border-radius: 6px; }
+.md-preview del { color: var(--color-text-muted); }
+/* Right to left only: each block takes the direction of its own text, so an English
+   paragraph in an Arabic note stays left to right. Code blocks stay left to right
+   through the global pre/code rule. Left-to-right languages are unchanged. */
+[dir="rtl"] .md-preview :is(p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th) { unicode-bidi: plaintext; }
 
 /* ── Accessibility: reduced motion ──────────────────────────────── */
 
@@ -449,6 +621,17 @@ body {
 }
 @keyframes auth-step-back {
   from { opacity: 0; transform: translate3d(-16px, 0, 0); }
+  to   { opacity: 1; transform: none; }
+}
+/* Right-to-left reads the other way: forward arrives from the left. */
+[dir="rtl"] .auth-step { animation-name: auth-step-fwd-rtl; }
+[dir="rtl"] [data-auth-dir="back"] .auth-step { animation-name: auth-step-back-rtl; }
+@keyframes auth-step-fwd-rtl {
+  from { opacity: 0; transform: translate3d(-16px, 0, 0); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes auth-step-back-rtl {
+  from { opacity: 0; transform: translate3d(16px, 0, 0); }
   to   { opacity: 1; transform: none; }
 }
 
@@ -495,6 +678,19 @@ html[data-theme-sweep]::view-transition-new(root) {
   from { clip-path: inset(0 100% 0 0); }
   to { clip-path: inset(0 0 0 0); }
 }
+/* Right-to-left: the wipe starts at the right, where reading starts. */
+html[dir="rtl"][data-theme-sweep]::view-transition-new(root) { animation-name: theme-sweep-rtl; }
+@keyframes theme-sweep-rtl {
+  from { clip-path: inset(0 0 0 100%); }
+  to { clip-path: inset(0 0 0 0); }
+}
+/* While the snapshots animate, the browser hit-tests the transition overlay
+   instead of the page, so every click lands on <html>. Clicking the next
+   swatch during the 520ms wipe then read as a click outside the theme menu
+   and closed it. Let pointer events fall through to the live page. */
+html[data-theme-sweep]::view-transition {
+  pointer-events: none;
+}
 
 
 /* ── Map pins ──────────────────────────────────────────────
@@ -518,10 +714,46 @@ html[data-theme-sweep]::view-transition-new(root) {
   background: linear-gradient(100deg, #d9dee4 30%, #eef2f6 50%, #d9dee4 70%); background-size: 200% 100%;
   animation: dosya-pin-shimmer 1.15s ease-in-out infinite; }
 @keyframes dosya-pin-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
-.dosya-pin__count { position: absolute; left: 6px; bottom: 5px; color: #fff; font-weight: 700; z-index: 1;
+.dosya-pin__count { position: absolute; left: 6px; /* rtl-ok: map marker, a drawn object that does not mirror */ bottom: 5px; color: #fff; font-weight: 700; z-index: 1;
   font-size: 14px; line-height: 1; text-shadow: 0 1px 3px rgba(0,0,0,.9); }
 /* downward tail; its tip is the marker's bottom (anchored to the coordinate) */
 .dosya-pin::after { content: ''; display: block; width: 0; height: 0; margin: -1px auto 0;
-  border-left: 7px solid transparent; border-right: 7px solid transparent; border-top: 10px solid #fff; }
+  border-left: 7px solid transparent; border-right: 7px solid transparent; border-top: 10px solid #fff; } /* rtl-ok: physical geometry, symmetric triangle */
 /* approximate (IP-derived, not exact EXIF GPS): dashed frame so it's never disguised as precise */
 .dosya-pin--approx .dosya-pin__frame { border-style: dashed; opacity: 0.92; }
+
+/* ── Right-to-left ─────────────────────────────────────────────────
+   Ported from apps/web/src/index.css. Code, paths and technical values stay
+   left-to-right and are isolated so they cannot reorder the text around them.
+   A block marked dir="auto" (a text file's preview) takes its own direction. */
+[dir="rtl"] :is(pre, code, kbd, samp):not([dir="auto"]) { direction: ltr; unicode-bidi: isolate; }
+/* Values that are always Latin: typed left-to-right, but flush with the start of the row.
+   In the base layer so a text-center or text-start utility on such an input still wins. */
+@layer base {
+  [dir="rtl"] input:is([type=email], [type=url], [type=tel], [type=password], [type=number]) { direction: ltr; text-align: right; } /* rtl-ok: rtl selector, right is the start edge of an RTL row */
+}
+/* Free text takes the direction of what is typed. */
+[dir="rtl"] :is(input:not([type]), input[type=text], input[type=search], textarea) { unicode-bidi: plaintext; }
+/* Letter-spacing breaks the joining of Arabic and Persian letters. Unlayered on
+   purpose so it beats Tailwind's tracking-* utilities; Hebrew keeps its tracking,
+   and so does a left-to-right island (the LAN room code). */
+:root:is([lang|="ar"], [lang|="fa"]) *:not([dir="ltr"], [dir="ltr"] *),
+:root:is([lang|="ar"], [lang|="fa"]) *:not([dir="ltr"], [dir="ltr"] *)::before,
+:root:is([lang|="ar"], [lang|="fa"]) *:not([dir="ltr"], [dir="ltr"] *)::after { letter-spacing: normal; }
+/* The video player root is left-to-right; its prose panels (report popover,
+   the "?" shortcuts overlay) are text and follow the page. */
+[dir="rtl"] :is(.dp-report, .dp-keys-panel) { direction: rtl; }
+/* A path, URL or identifier shown on its own: always left-to-right, isolated,
+   and in a right-to-left row flush with the row's start. */
+.ltr-value { direction: ltr; unicode-bidi: isolate; }
+[dir="rtl"] .ltr-value { text-align: right; } /* rtl-ok: rtl selector, right is the start edge of an RTL row */
+/* Text in its own direction (dir="auto": names, server and engine text, user
+   content; set only in a right-to-left language, see useAutoDir) still aligns
+   the way the page does: flush with the page's start (inside a left-to-right
+   island, with the island's start); text-end, on the element or an ancestor,
+   keeps the page's end. Centred text is left alone. A left-to-right language
+   never carries dir="auto", so it needs no rule. */
+:root[dir="rtl"] [dir="ltr"] [dir="auto"]:not(.text-center, .text-center *, .text-end, .text-end *),
+:root[dir="rtl"] [dir="auto"]:is(.text-end, .text-end *):not(.text-center, .text-center *, [dir="ltr"] *) { text-align: left; } /* rtl-ok: rtl selector, left is the start edge of an LTR island and the end edge of an RTL page */
+:root[dir="rtl"] [dir="auto"]:not(.text-center, .text-center *, .text-end, .text-end *, [dir="ltr"] *),
+:root[dir="rtl"] [dir="ltr"] [dir="auto"]:is(.text-end, .text-end *):not(.text-center, .text-center *) { text-align: right; } /* rtl-ok: rtl selector, right is the start edge of an RTL page and the end edge of an LTR island */

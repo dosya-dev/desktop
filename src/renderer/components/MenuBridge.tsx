@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
+import { HistoryNavigation } from "@/lib/use-history-nav";
 import { useThemePref } from "@/lib/use-theme-pref";
 import { useUiStore } from "@/lib/ui-store";
 import { reportMenuState, useMenuActions } from "@/lib/menu-bus";
+import { guardNavigation } from "@/lib/nav-guard";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 
 /**
@@ -41,7 +43,7 @@ function MainWindowMenuBridge() {
 
   // Main sends "navigate" for the menu, the tray's Upload item and dosya://
   // deep links. Nothing else in the renderer listens for it.
-  useEffect(() => window.electronAPI.onNavigate((path) => navigate(path)), [navigate]);
+  useEffect(() => window.electronAPI.onNavigate((path) => guardNavigation(() => navigate(path))), [navigate]);
 
   useEffect(() => {
     // The Navigation API (Chromium 102+) knows about same-document hash
@@ -61,7 +63,7 @@ function MainWindowMenuBridge() {
   useMenuActions((action) => {
     switch (action.kind) {
       case "navigate":
-        navigate(action.path);
+        guardNavigation(() => navigate(action.path));
         return true;
       case "appearance":
         void save({ ...pref, mode: action.mode });
@@ -73,13 +75,13 @@ function MainWindowMenuBridge() {
     }
     switch (action.id) {
       case "go-back":
-        navigate(-1);
+        guardNavigation(() => navigate(-1));
         return true;
       case "go-forward":
-        navigate(1);
+        guardNavigation(() => navigate(1));
         return true;
       case "sign-out":
-        void logout();
+        guardNavigation(() => void logout());
         return true;
       case "toggle-sidebar":
         toggleSidebar();
@@ -90,12 +92,17 @@ function MainWindowMenuBridge() {
       case "find":
         // No document open to search in: the app-wide search is the next
         // best answer to ⌘F.
-        navigate("/search");
+        guardNavigation(() => navigate("/search"));
         return true;
       default:
         return false;
     }
   }, { fallback: true });
 
-  return shortcutsOpen ? <ShortcutsDialog onClose={() => setShortcutsOpen(false)} /> : null;
+  return (
+    <>
+      <HistoryNavigation />
+      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+    </>
+  );
 }

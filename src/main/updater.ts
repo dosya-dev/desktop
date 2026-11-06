@@ -6,6 +6,7 @@ import { execFile } from "child_process";
 import { discardStaleShipItState } from "./shipit-cleanup";
 import { armQuitWatchdog, installDownloadedUpdate, type QuitWatchdog } from "./update-install";
 import { markQuitting } from "./quit-state";
+import { tMain as t } from "./i18n";
 import { currentDistribution, isStoreManaged, storeUpdatesUrl, type Distribution } from "./distribution";
 
 export type UpdateStatus =
@@ -37,6 +38,9 @@ export function getUpdateStatus(): UpdateStatus {
 // once initAutoUpdater decides which build this is.
 let checkNow: () => Promise<void> = async () => {};
 let installNow: () => void = () => {};
+/** Asked before the install quits the app; see installDownloadedUpdate's confirmQuit. */
+let installQuitGate: ((proceed: () => void) => boolean) | null = null;
+export function setInstallQuitGate(gate: (proceed: () => void) => boolean): void { installQuitGate = gate; }
 /** Help/app menu "Check for Updates…". No-op on a store build. */
 export function checkForUpdatesNow(): Promise<void> { return checkNow(); }
 /** "Restart to Update…" once a download is ready. */
@@ -280,10 +284,10 @@ export async function initAutoUpdater(gate: IpcGate): Promise<void> {
 
       const isLinux = process.platform === "linux";
       new Notification({
-        title: isLinux ? "Update Downloaded" : "Update Ready",
+        title: isLinux ? t("updater.notificationTitle.updateDownloaded") : t("updater.notificationTitle.updateReady"),
         body: isLinux
-          ? `dosya ${info.version} has been downloaded. Replace the current AppImage to install.`
-          : `dosya ${info.version} is ready to install. Restart to update.`,
+          ? t("updater.message.dosyaVersionHasBeenDownloadedReplaceTheCurrentAppImage", { version: info.version })
+          : t("updater.message.dosyaVersionIsReadyToInstallRestartToUpdate", { version: info.version }),
       }).show();
     });
 
@@ -297,7 +301,7 @@ export async function initAutoUpdater(gate: IpcGate): Promise<void> {
       try {
         await autoUpdater.checkForUpdates();
       } catch (err: any) {
-        broadcastStatus({ state: "error", message: err.message ?? "Check failed" });
+        broadcastStatus({ state: "error", message: err.message ?? t("updater.error.checkFailed") });
       }
     };
     gate.handle("updater:check", () => checkNow());
@@ -313,6 +317,8 @@ export async function initAutoUpdater(gate: IpcGate): Promise<void> {
         // (default true) - which only ever happened once the window could
         // actually close, see installDownloadedUpdate.
         quitAndInstall: () => autoUpdater.quitAndInstall(false, true),
+        // Unsaved text-editor changes: ask before the restart throws them away.
+        confirmQuit: (proceed) => (installQuitGate ? installQuitGate(proceed) : true),
         showDownloadedFile: () => {
           const st = updateStatus;
           if (st.state === "ready" && st.filePath) shell.showItemInFolder(st.filePath);

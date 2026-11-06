@@ -16,6 +16,13 @@ export interface InstallDeps {
   markQuitting: () => void;
   quitAndInstall: () => void;
   showDownloadedFile: () => void;
+  /**
+   * May the app quit for the install now? False holds it while the user is
+   * asked about unsaved editor changes (quit-guard.ts); `proceed` resumes the
+   * install if they choose Quit anyway. Asked BEFORE anything is announced or
+   * marked, so Keep editing leaves the app exactly as it was.
+   */
+  confirmQuit?: (proceed: () => void) => boolean;
 }
 
 export function installDownloadedUpdate(platform: NodeJS.Platform, deps: InstallDeps): void {
@@ -25,6 +32,7 @@ export function installDownloadedUpdate(platform: NodeJS.Platform, deps: Install
     deps.showDownloadedFile();
     return;
   }
+  if (deps.confirmQuit && !deps.confirmQuit(() => installDownloadedUpdate(platform, { ...deps, confirmQuit: undefined }))) return;
   deps.announceInstalling();
   deps.markQuitting();
   deps.quitAndInstall();

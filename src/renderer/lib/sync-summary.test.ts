@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { workspaceSyncSummary, syncSummaryKey, type SyncSummaryPair } from "./sync-summary.ts";
+import { workspaceSyncSummary, syncSummaryKey, syncNavBadge, type SyncSummaryPair } from "./sync-summary.ts";
 
 /**
  * Run with `npm run test:unit` in apps/desktop - Node's own test runner.
@@ -126,4 +126,35 @@ test("key cannot collide between two distinct workspace sets of the same total s
   const oneWorkspace = syncSummaryKey([pair("ws_1", "syncing"), pair("ws_1", "error")]);
   const twoWorkspaces = syncSummaryKey([pair("ws_1", "syncing"), pair("ws_2", "error")]);
   assert.notEqual(oneWorkspace, twoWorkspaces);
+});
+
+// ── syncNavBadge (TC-055) ───────────────────────────────────────────
+
+test("syncNavBadge: per-pair 'Pause all' (global flag false) reads as paused, never error", () => {
+  // The Sync page's "Pause all" pauses each pair individually, so
+  // globalPaused stays false. This rendered as a red "Error" before TC-055.
+  const summary = workspaceSyncSummary([pair("ws_1", "paused"), pair("ws_1", "paused")]).ws_1;
+  assert.equal(syncNavBadge(summary, false), "paused");
+});
+
+test("syncNavBadge: a global pause reads as paused", () => {
+  const summary = workspaceSyncSummary([pair("ws_1", "paused")]).ws_1;
+  assert.equal(syncNavBadge(summary, true), "paused");
+  const idle = workspaceSyncSummary([pair("ws_1", "idle")]).ws_1;
+  assert.equal(syncNavBadge(idle, true), "paused");
+});
+
+test("syncNavBadge: a real error outranks a pause", () => {
+  const summary = workspaceSyncSummary([pair("ws_1", "paused"), pair("ws_1", "error")]).ws_1;
+  assert.equal(syncNavBadge(summary, false), "error");
+  assert.equal(syncNavBadge(summary, true), "error");
+  const held = workspaceSyncSummary([pair("ws_1", "needs-confirmation")]).ws_1;
+  assert.equal(syncNavBadge(held, false), "error");
+});
+
+test("syncNavBadge: no pairs reads as start, healthy pairs as running", () => {
+  assert.equal(syncNavBadge(undefined, false), "start");
+  assert.equal(syncNavBadge(undefined, true), "start");
+  const running = workspaceSyncSummary([pair("ws_1", "idle"), pair("ws_1", "syncing")]).ws_1;
+  assert.equal(syncNavBadge(running, false), "running");
 });

@@ -19,7 +19,11 @@ import { usePermissions } from "@/lib/use-permissions";
 import { canGrantRole } from "@/lib/role-grant";
 import { formatDate, formatRelative } from "@/lib/format";
 import { toast } from "sonner";
+import { autoDir, Bdi, useAutoDir } from "@/lib/bidi-ui";
 import { isValidEmail } from "@dosya-dev/shared";
+import { useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
+import type { MessageKey } from "../../i18n/keys";
 
 interface TeamResponse {
   ok: boolean;
@@ -62,14 +66,17 @@ interface WorkspaceRole {
 
 const CUSTOM_ROLE_COLOR = "#8b5cf6";
 
-const ROLE_LABELS: Record<string, { label: string; color: string; icon: React.ReactNode }> = {
-  role_owner: { label: "Owner", color: "#22c55e", icon: <Crown size={12} /> },
-  role_admin: { label: "Admin", color: "#3b82f6", icon: <Shield size={12} /> },
-  role_member: { label: "Member", color: "#6b7280", icon: <User size={12} /> },
-  role_viewer: { label: "Viewer", color: "#a16207", icon: <Eye size={12} /> },
+/** Built-in role ids to their catalog names; custom role names are shown as the server sends them. */
+const ROLE_LABELS: Record<string, { label: MessageKey; color: string; icon: React.ReactNode }> = {
+  role_owner: { label: "common.label.owner", color: "#22c55e", icon: <Crown size={12} /> },
+  role_admin: { label: "common.label.admin", color: "#3b82f6", icon: <Shield size={12} /> },
+  role_member: { label: "common.label.member", color: "#6b7280", icon: <User size={12} /> },
+  role_viewer: { label: "common.label.viewer", color: "#a16207", icon: <Eye size={12} /> },
 };
 
 export function TeamPage() {
+  const ownDir = useAutoDir();
+  const t = useT();
   const { active } = useWorkspace();
   const queryClient = useQueryClient();
   const [showInvite, setShowInvite] = useState(false);
@@ -109,7 +116,10 @@ export function TeamPage() {
   const grantableRoles = myPerms
     ? assignableRoles.filter((r) => canGrantRole(myPerms, r))
     : assignableRoles;
-  const roleNameOf = (id: string): string => allRoles.find((r) => r.id === id)?.name ?? ROLE_LABELS[id]?.label ?? id;
+  // Built-in roles by their catalog name (the server stores them lowercase,
+  // "admin"), custom roles by the name the workspace gave them.
+  const roleNameOf = (id: string): string =>
+    ROLE_LABELS[id] ? t(ROLE_LABELS[id].label) : (allRoles.find((r) => r.id === id)?.name ?? id);
   // The default of role_member may itself be out of reach (a custom-role
   // inviter who cannot upload may not hand out Member), so the value the
   // dropdown shows is also the one that is sent.
@@ -132,10 +142,10 @@ export function TeamPage() {
       queryClient.invalidateQueries({ queryKey: ["team"] });
       setShowInvite(false);
       setInviteEmail("");
-      toast.success("Invitation sent");
+      toast.success(t("common.label.invitationSent"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to send invite");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("team.error.failedToSendInvite"));
     },
   });
 
@@ -145,10 +155,10 @@ export function TeamPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
       setRemoveTarget(null);
-      toast.success("Member removed");
+      toast.success(t("team.label.memberRemoved"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to remove member");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("team.error.failedToRemoveMember"));
     },
   });
 
@@ -166,10 +176,10 @@ export function TeamPage() {
       api.put(`/api/team/members/${membershipId}`, { role_id: roleId }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
-      toast.success("Role updated");
+      toast.success(t("team.label.roleUpdated"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to change role");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("team.error.failedToChangeRole"));
     },
   });
 
@@ -181,10 +191,10 @@ export function TeamPage() {
       api.post(`/api/team/invites/${id}/revoke`, { workspace_id: active!.id }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team"] });
-      toast.success("Invite revoked");
+      toast.success(t("team.label.inviteRevoked"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to revoke invite");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("team.error.failedToRevokeInvite"));
     },
   });
 
@@ -194,11 +204,11 @@ export function TeamPage() {
   const stats = data?.stats;
 
   return (
-    <div className="flex h-full gap-6">
+    <div className="flex h-full gap-6" data-testid="team-page">
       {/* Main Content */}
       <div className="flex-1 space-y-6">
         <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Team</h1>
+          <h1 className="text-2xl font-semibold">{t("common.label.team")}</h1>
           {/* The endpoints behind this need invite_members. */}
           {canInvite && (
             <button
@@ -207,21 +217,21 @@ export function TeamPage() {
               style={{ background: "var(--color-primary)" }}
             >
               <UserPlus size={16} />
-              Invite
+              {t("common.action.invite")}
             </button>
           )}
         </div>
 
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4">
-          <MiniStat label="Members" value={stats?.members ?? 0} />
-          <MiniStat label="Pending invites" value={stats?.pending ?? 0} />
-          <MiniStat label="Shares this week" value={stats?.shares_this_week ?? 0} />
+          <MiniStat label={t("common.action.members")} value={stats?.members ?? 0} />
+          <MiniStat label={t("team.label.pendingInvites")} value={stats?.pending ?? 0} />
+          <MiniStat label={t("team.label.sharesThisWeek")} value={stats?.shares_this_week ?? 0} />
         </div>
 
         {/* Members Table */}
         <div>
-          <h2 className="mb-3 text-sm font-semibold">Members</h2>
+          <h2 className="mb-3 text-sm font-semibold">{t("common.action.members")}</h2>
           {isLoading ? (
             <div className="space-y-2">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -230,13 +240,13 @@ export function TeamPage() {
             </div>
           ) : (
             <div className="overflow-auto rounded-xl border" style={{ borderColor: "var(--color-border)" }}>
-              <table className="w-full text-left text-sm">
+              <table className="w-full text-start text-sm">
                 <thead>
                   <tr className="border-b bg-[var(--color-bg-secondary)]" style={{ borderColor: "var(--color-border)" }}>
-                    <th className="px-4 py-2.5 text-xs font-medium text-[var(--color-text-muted)]">Member</th>
-                    <th className="px-4 py-2.5 text-xs font-medium text-[var(--color-text-muted)]">Role</th>
-                    <th className="px-4 py-2.5 text-xs font-medium text-[var(--color-text-muted)]">Joined</th>
-                    <th className="w-10 px-4 py-2.5"></th>
+                    <th className="px-4 py-2.5 text-start text-xs font-medium text-[var(--color-text-muted)]">{t("common.label.member")}</th>
+                    <th className="px-4 py-2.5 text-start text-xs font-medium text-[var(--color-text-muted)]">{t("team.label.role")}</th>
+                    <th className="px-4 py-2.5 text-start text-xs font-medium text-[var(--color-text-muted)]">{t("team.column.joined")}</th>
+                    <th className="w-10 px-4 py-2.5 text-start"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -246,22 +256,26 @@ export function TeamPage() {
                   {isError && (
                     <tr>
                       <td colSpan={4} className="px-4 py-10 text-center text-sm text-[var(--color-danger)]">
-                        Team members could not be loaded. Your role may not allow viewing them.
-                        {error instanceof ApiError && (
-                          <span className="mt-1 block text-xs text-[var(--color-text-muted)]">{error.message}</span>
-                        )}
+                        {error instanceof ApiError
+                          ? richText(t, "team.error.teamMembersCouldNotBeLoadedYourRoleMaySentenceCase", {}, {
+                              message: <span dir={ownDir} className="mt-1 block text-xs text-[var(--color-text-muted)]">{error.message}</span>,
+                            })
+                          : t("team.error.teamMembersCouldNotBeLoadedYourRoleMayPeriodSentenceCase")}
                       </td>
                     </tr>
                   )}
                   {!isError && members.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-4 py-10 text-center text-sm text-[var(--color-text-muted)]">
-                        No members yet. Invite teammates by email to give them access.
+                        {t("team.label.noMembersYetInviteTeammatesByEmailToGive")}
                       </td>
                     </tr>
                   )}
                   {members.map((m) => {
-                    const role = ROLE_LABELS[m.role_id] ?? { label: m.role_id, color: "#6b7280", icon: null };
+                    const builtin = ROLE_LABELS[m.role_id];
+                    const role = builtin
+                      ? { label: t(builtin.label), color: builtin.color, icon: builtin.icon }
+                      : { label: roleNameOf(m.role_id), color: "#6b7280", icon: null };
                     return (
                       <tr key={m.membership_id} className="border-b last:border-0" style={{ borderColor: "var(--color-border)" }}>
                         <td className="px-4 py-3">
@@ -274,12 +288,12 @@ export function TeamPage() {
                             </div>
                             <div>
                               <p className="font-medium">
-                                {m.name}
+                                <Bdi>{m.name}</Bdi>
                                 {m.is_you && (
-                                  <span className="ml-1.5 text-xs text-[var(--color-text-muted)]">(you)</span>
+                                  <span className="ms-1.5 text-xs text-[var(--color-text-muted)]">{t("common.label.you")}</span>
                                 )}
                               </p>
-                              <p className="text-xs text-[var(--color-text-muted)]">{m.email}</p>
+                              <p dir="ltr" className="ltr-value text-xs text-[var(--color-text-muted)]">{m.email}</p>
                             </div>
                           </div>
                         </td>
@@ -292,7 +306,7 @@ export function TeamPage() {
                             <select
                               value={m.role_id}
                               disabled={roleMut.isPending}
-                              aria-label={`Role for ${m.name}`}
+                              aria-label={t("team.accessibility.roleForMName", { mName: m.name })}
                               onChange={(e) => roleMut.mutate({ membershipId: m.membership_id, roleId: e.target.value })}
                               className="rounded-md border px-2 py-1 text-xs"
                               style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
@@ -303,7 +317,7 @@ export function TeamPage() {
                                 <option value={m.role_id} disabled>{roleNameOf(m.role_id)}</option>
                               )}
                               {grantableRoles.map((r) => (
-                                <option key={r.id} value={r.id}>{r.name}</option>
+                                <option key={r.id} value={r.id}>{roleNameOf(r.id)}</option>
                               ))}
                             </select>
                           ) : (
@@ -348,10 +362,13 @@ export function TeamPage() {
         {invites.length > 0 && (
           <div>
             <h2 className="mb-3 text-sm font-semibold">
-              Pending invites
-              <span className="ml-2 rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-xs">
-                {invites.length}
-              </span>
+              {richText(t, "team.heading.pendingInvitesInviteCount", {}, {
+                inviteCount: (
+                  <span className="ms-2 rounded-full bg-[var(--color-bg-tertiary)] px-2 py-0.5 text-xs">
+                    {invites.length}
+                  </span>
+                ),
+              })}
             </h2>
             <div className="space-y-2">
               {invites.map((inv) => (
@@ -363,10 +380,11 @@ export function TeamPage() {
                   <div className="flex items-center gap-3">
                     <Mail size={16} className="text-[var(--color-text-muted)]" />
                     <div>
-                      <p className="text-sm font-medium">{inv.email}</p>
+                      <p dir="ltr" className="ltr-value text-sm font-medium">{inv.email}</p>
                       <p className="text-xs text-[var(--color-text-muted)]">
-                        Invited {formatRelative(inv.created_at)}
-                        {inv.invited_by_name && ` by ${inv.invited_by_name}`}
+                        {inv.invited_by_name
+                          ? t("team.description.invitedDateByInvitedByName", { date: formatRelative(inv.created_at), invitedByName: inv.invited_by_name })
+                          : t("team.description.invitedDate", { date: formatRelative(inv.created_at) })}
                       </p>
                     </div>
                   </div>
@@ -377,7 +395,7 @@ export function TeamPage() {
                       disabled={revokeInviteMut.isPending}
                       className="rounded px-2 py-1 text-xs text-[var(--color-danger)] hover:bg-red-50 disabled:opacity-50"
                     >
-                      Revoke
+                      {t("common.action.revoke")}
                     </button>
                   )}
                 </div>
@@ -391,7 +409,7 @@ export function TeamPage() {
       <div className="w-64 space-y-4">
         {/* Recent Activity */}
         <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-          <h3 className="mb-3 text-sm font-semibold">Recent activity</h3>
+          <h3 className="mb-3 text-sm font-semibold">{t("team.heading.recentActivity")}</h3>
           {activity.length > 0 ? (
             <div className="space-y-2">
               {activity.slice(0, 6).map((a) => (
@@ -399,8 +417,8 @@ export function TeamPage() {
                   <div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-primary)]" />
                   <div>
                     <p className="text-xs">
-                      <span className="font-medium">{a.user_name}</span>{" "}
-                      <span className="text-[var(--color-text-secondary)]">{a.action}</span>
+                      <span dir={ownDir} className="font-medium">{a.user_name}</span>{" "}
+                      <span dir={ownDir} className="text-[var(--color-text-secondary)]">{a.action}</span>
                     </p>
                     <p className="text-xs text-[var(--color-text-muted)]">
                       {formatRelative(a.created_at)}
@@ -410,19 +428,19 @@ export function TeamPage() {
               ))}
             </div>
           ) : (
-            <p className="text-xs text-[var(--color-text-muted)]">No recent activity</p>
+            <p className="text-xs text-[var(--color-text-muted)]">{t("common.label.noRecentActivity")}</p>
           )}
         </div>
 
         {/* Role Guide */}
         <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-          <h3 className="mb-3 text-sm font-semibold">Role guide</h3>
+          <h3 className="mb-3 text-sm font-semibold">{t("team.heading.roleGuide")}</h3>
           <div className="space-y-2.5">
             {Object.entries(ROLE_LABELS).map(([id, role]) => (
               <div key={id} className="flex items-center gap-2">
                 <div className="h-2.5 w-2.5 rounded-full" style={{ background: role.color }} />
                 <span className="text-xs font-medium" style={{ color: role.color }}>
-                  {role.label}
+                  {t(role.label)}
                 </span>
               </div>
             ))}
@@ -433,11 +451,11 @@ export function TeamPage() {
               return (
                 <div key={r.id} className="flex items-center gap-2">
                   <div className="h-2.5 w-2.5 rounded-full" style={{ background: CUSTOM_ROLE_COLOR }} />
-                  <span className="text-xs font-medium" style={{ color: CUSTOM_ROLE_COLOR }}>
+                  <span dir={ownDir} className="text-xs font-medium" style={{ color: CUSTOM_ROLE_COLOR }}>
                     {r.name}
                   </span>
                   <span className="text-xs text-[var(--color-text-muted)]">
-                    {granted} permission{granted === 1 ? "" : "s"}
+                    {t("team.label.permission", { granted })}
                   </span>
                 </div>
               );
@@ -450,22 +468,22 @@ export function TeamPage() {
       {showInvite && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl">
-            <h3 className="mb-4 text-lg font-semibold">Invite to workspace</h3>
+            <h3 className="mb-4 text-lg font-semibold">{t("team.heading.inviteToWorkspace")}</h3>
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block text-sm font-medium">Email</label>
+                <label className="mb-1 block text-sm font-medium">{t("common.label.email")}</label>
                 <input
                   type="email"
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
-                  placeholder="colleague@example.com"
+                  placeholder={t("team.placeholder.colleagueExampleCom")}
                   autoFocus
                   className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
                   style={{ borderColor: "var(--color-border)" }}
                 />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium">Role</label>
+                <label className="mb-1 block text-sm font-medium">{t("team.label.role")}</label>
                 <select
                   value={inviteRoleId}
                   onChange={(e) => setInviteRole(e.target.value)}
@@ -477,7 +495,7 @@ export function TeamPage() {
                       here could never invite anyone into a role the workspace
                       had defined for itself. */}
                   {grantableRoles.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
+                    <option key={r.id} value={r.id}>{roleNameOf(r.id)}</option>
                   ))}
                 </select>
               </div>
@@ -488,7 +506,7 @@ export function TeamPage() {
                 className="rounded-lg border px-4 py-2 text-sm"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => inviteMut.mutate()}
@@ -496,7 +514,7 @@ export function TeamPage() {
                 className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                 style={{ background: "var(--color-primary)" }}
               >
-                {inviteMut.isPending ? "Sending..." : "Send invite"}
+                {inviteMut.isPending ? t("common.status.sending") : t("team.action.sendInvite")}
               </button>
             </div>
           </div>
@@ -508,9 +526,11 @@ export function TeamPage() {
       {removeTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl">
-            <h3 className="mb-2 text-lg font-semibold">Remove member</h3>
+            <h3 className="mb-2 text-lg font-semibold">{t("team.heading.removeMember")}</h3>
             <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-              Remove <span className="font-medium text-[var(--color-text)]">{removeTarget.name}</span> from this workspace?
+              {richText(t, "team.description.removeRemoveTargetNameFromThisWorkspace", {}, {
+                removeTargetName: <span className="font-medium text-[var(--color-text)]">{removeTarget.name}</span>,
+              })}
             </p>
             <div className="flex justify-end gap-2">
               <button
@@ -518,13 +538,13 @@ export function TeamPage() {
                 className="rounded-lg border px-4 py-2 text-sm"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => removeMut.mutate(removeTarget.id)}
                 className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white"
               >
-                Remove
+                {t("common.remove")}
               </button>
             </div>
           </div>

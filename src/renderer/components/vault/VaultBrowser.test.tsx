@@ -149,4 +149,55 @@ describe("VaultBrowser", () => {
 
     expect(uploaded).toEqual([]);
   });
+
+  // QA TC-056: an upload blanked the grid into eight skeleton cards for as
+  // long as it ran, because the grid keyed its skeletons on the store-wide
+  // `busy` flag. The files already there now stay, with a card for the upload.
+  it("keeps the existing files visible during an upload and shows the upload's own card", async () => {
+    let finish!: () => void;
+    const listing = [{ id: "e1", name: "w2.pdf", kind: "file" as const }];
+    useVault.getState().__setEngine(engine({
+      listFolder: async () => listing,
+      uploadFile: () => new Promise<void>((r) => { finish = r; }),
+    }));
+    await render();
+    await act(async () => { (q("vault-space-s1") as HTMLButtonElement).click(); });
+    await flush();
+    expect(q("vault-entry-e1")).not.toBeNull();
+
+    const input = q("vault-upload-input") as HTMLInputElement;
+    const file = new File(["hello"], "taxes-2026.pdf");
+    // jsdom's File has no arrayBuffer(); the store reads the bytes with it.
+    Object.defineProperty(file, "arrayBuffer", { value: async () => new ArrayBuffer(5) });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+    await flush();
+
+    expect(useVault.getState().error).toBeNull();
+    expect(useVault.getState().busy).toBe(true);
+    expect(q("vault-busy"), "no skeleton grid mid-upload").toBeNull();
+    expect(q("vault-entry-e1"), "existing file still shown").not.toBeNull();
+    expect(q("vault-uploading")?.textContent).toContain("taxes-2026.pdf");
+
+    listing.push({ id: "e2", name: "taxes-2026.pdf", kind: "file" });
+    await act(async () => { finish(); });
+    await flush();
+    expect(q("vault-uploading")).toBeNull();
+    expect(q("vault-entry-e2")).not.toBeNull();
+  });
+
+  it("still shows skeletons while a Space's first listing loads", async () => {
+    let release!: () => void;
+    useVault.getState().__setEngine(engine({
+      listFolder: () => new Promise((r) => { release = () => r([{ id: "e1", name: "w2.pdf", kind: "file" }]); }),
+    }));
+    await render();
+    await act(async () => { (q("vault-space-s1") as HTMLButtonElement).click(); });
+    await flush();
+    expect(q("vault-busy")).not.toBeNull();
+    await act(async () => { release(); });
+    await flush();
+    expect(q("vault-busy")).toBeNull();
+    expect(q("vault-entry-e1")).not.toBeNull();
+  });
 });

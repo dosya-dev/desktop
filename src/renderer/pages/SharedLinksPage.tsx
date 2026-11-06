@@ -15,6 +15,10 @@ import { api, ApiError } from "@/lib/api-client";
 import { useWorkspace } from "@/lib/workspace-context";
 import { formatDate, formatRelative } from "@/lib/format";
 import { toast } from "sonner";
+import { autoDir, useAutoDir } from "@/lib/bidi-ui";
+import { useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
+import type { MessageKey } from "../../i18n/keys";
 
 interface ShareLink {
   link_id: string;
@@ -51,6 +55,20 @@ interface SharesResponse {
 
 type StatusFilter = "all" | "active" | "expiring" | "expired" | "revoked";
 
+/**
+ * Chip and badge text per status, by the API's stable status value. Shown
+ * with first-letter:uppercase rather than capitalize: the English sources are
+ * single lowercase words, and capitalize would title-case every word of a
+ * longer translation.
+ */
+const STATUS_LABEL: Record<StatusFilter, MessageKey> = {
+  all: "common.label.all",
+  active: "shared-links.label.active",
+  expiring: "shared-links.label.expiring",
+  expired: "shared-links.status.expired",
+  revoked: "shared-links.label.revoked",
+};
+
 const STATUS_COLORS: Record<string, string> = {
   active: "#22c55e",
   expiring: "#f59e0b",
@@ -59,8 +77,10 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export function SharedLinksPage() {
+  const ownDir = useAutoDir();
   const { active } = useWorkspace();
   const queryClient = useQueryClient();
+  const t = useT();
   const [tab, setTab] = useState<"mine" | "shared">("mine");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [search, setSearch] = useState("");
@@ -74,14 +94,16 @@ export function SharedLinksPage() {
   });
 
   const revokeMut = useMutation({
-    mutationFn: (id: string) => api.delete(`/api/shares/${id}/revoke`),
+    // POST is the revoke route's verb. DELETE answered "Not found" until the
+    // API grew an alias for it (TC-050); POST works against every API.
+    mutationFn: (id: string) => api.post(`/api/shares/${id}/revoke`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["shares"] });
       setRevokeTarget(null);
-      toast.success("Share link revoked");
+      toast.success(t("shared-links.label.shareLinkRevoked"));
     },
     onError: (err) => {
-      toast.error(err instanceof ApiError ? err.message : "Failed to revoke share link");
+      toast.error(err instanceof ApiError ? autoDir(err.message) : t("shared-links.error.failedToRevokeShareLink"));
     },
   });
 
@@ -98,14 +120,14 @@ export function SharedLinksPage() {
 
   const copyLink = (url: string) => {
     navigator.clipboard.writeText(url);
-    toast.success("Link copied");
+    toast.success(t("common.label.linkCopied"));
   };
 
   return (
-    <div className="flex h-full gap-6">
+    <div className="flex h-full gap-6" data-testid="shared-links-page">
       {/* Main Content */}
       <div className="flex-1 space-y-4">
-        <h1 className="text-2xl font-semibold">Shared</h1>
+        <h1 className="text-2xl font-semibold">{t("common.label.shared")}</h1>
 
         {/* Tabs */}
         <div className="flex items-center gap-6 border-b" style={{ borderColor: "var(--color-border)" }}>
@@ -117,7 +139,7 @@ export function SharedLinksPage() {
                 : "text-[var(--color-text-secondary)]"
             }`}
           >
-            By me
+            {t("shared-links.action.byMe")}
           </button>
           <button
             onClick={() => setTab("shared")}
@@ -127,7 +149,7 @@ export function SharedLinksPage() {
                 : "text-[var(--color-text-secondary)]"
             }`}
           >
-            With me
+            {t("shared-links.action.withMe")}
           </button>
         </div>
 
@@ -138,27 +160,27 @@ export function SharedLinksPage() {
               <button
                 key={f}
                 onClick={() => setStatusFilter(f)}
-                className={`rounded-full px-3 py-1 text-xs font-medium capitalize transition-colors ${
+                className={`rounded-full px-3 py-1 text-xs font-medium first-letter:uppercase transition-colors ${
                   statusFilter === f
                     ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
                     : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
                 }`}
               >
-                {f}
+                {t(STATUS_LABEL[f])}
               </button>
             ),
           )}
-          <div className="relative ml-auto">
+          <div className="relative ms-auto">
             <Search
               size={14}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
+              className="absolute inset-s-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
             />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Filter..."
-              className="rounded-lg border py-1.5 pl-8 pr-3 text-sm outline-none"
+              placeholder={t("shared-links.placeholder.filter")}
+              className="rounded-lg border py-1.5 ps-8 pe-3 text-sm outline-none"
               style={{ borderColor: "var(--color-border)", width: 180 }}
             />
           </div>
@@ -180,15 +202,15 @@ export function SharedLinksPage() {
                 whatever is left, so the name truncates instead. The fixed
                 widths are deliberately tight: at a narrow window every spare
                 pixel they hold is stolen from the filename. */}
-            <table className="w-full table-fixed text-left text-sm">
+            <table className="w-full table-fixed text-start text-sm">
               <thead>
                 <tr className="border-b text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
-                  <th className="py-2 font-medium">File</th>
-                  <th className="py-2 font-medium w-20">Region</th>
-                  <th className="py-2 font-medium w-14">Views</th>
-                  <th className="py-2 font-medium w-24">Expiry</th>
-                  <th className="py-2 font-medium w-20">Status</th>
-                  <th className="py-2 w-16"></th>
+                  <th className="py-2 text-start font-medium">{t("common.label.fileTitleCase")}</th>
+                  <th className="py-2 text-start font-medium w-20">{t("files.label.region")}</th>
+                  <th className="py-2 text-start font-medium w-14">{t("shared-links.column.views")}</th>
+                  <th className="py-2 text-start font-medium w-24">{t("shared-links.column.expiry")}</th>
+                  <th className="py-2 text-start font-medium w-20">{t("common.column.status")}</th>
+                  <th className="py-2 text-start w-16"></th>
                 </tr>
               </thead>
               <tbody>
@@ -198,13 +220,13 @@ export function SharedLinksPage() {
                     className="border-b hover:bg-[var(--color-bg-secondary)] transition-colors"
                     style={{ borderColor: "var(--color-border)" }}
                   >
-                    <td className="py-3 pr-3">
+                    <td className="py-3 pe-3">
                       {/* min-w-0 is required for the truncate below: a flex
                           item defaults to min-width:auto and refuses to shrink
                           under its content, so the ellipsis never engages. */}
                       <div className="flex min-w-0 items-center gap-2">
                         <Link2 size={14} className="text-[var(--color-text-muted)] shrink-0" />
-                        <span className="truncate font-medium" title={link.display_name}>
+                        <span dir={ownDir} className="truncate font-medium" title={link.display_name}>
                           {link.display_name}
                         </span>
                         {link.is_password_protected === 1 && (
@@ -221,17 +243,17 @@ export function SharedLinksPage() {
                     <td className="py-3 text-xs text-[var(--color-text-muted)]">
                       {link.expires_at
                         ? formatDate(link.expires_at)
-                        : "Never"}
+                        : t("common.label.never")}
                     </td>
                     <td className="py-3">
                       <span
-                        className="inline-block rounded-full px-2 py-0.5 text-xs font-medium capitalize"
+                        className="inline-block rounded-full px-2 py-0.5 text-xs font-medium first-letter:uppercase"
                         style={{
                           color: STATUS_COLORS[link.status],
                           background: STATUS_COLORS[link.status] + "15",
                         }}
                       >
-                        {link.status}
+                        {STATUS_LABEL[link.status] ? t(STATUS_LABEL[link.status]) : link.status}
                       </span>
                     </td>
                     <td className="py-3">
@@ -239,7 +261,7 @@ export function SharedLinksPage() {
                         <button
                           onClick={() => copyLink(link.url)}
                           className="rounded p-1.5 hover:bg-[var(--color-bg-tertiary)]"
-                          title="Copy link"
+                          title={t("common.action.copyLink")}
                         >
                           <Copy size={14} />
                         </button>
@@ -247,7 +269,7 @@ export function SharedLinksPage() {
                           <button
                             onClick={() => setRevokeTarget(link)}
                             className="rounded p-1.5 text-[var(--color-danger)] hover:bg-red-50"
-                            title="Revoke"
+                            title={t("common.action.revoke")}
                           >
                             <Trash2 size={14} />
                           </button>
@@ -259,7 +281,7 @@ export function SharedLinksPage() {
                 {links.length === 0 && (
                   <tr>
                     <td colSpan={6} className="py-16 text-center text-sm text-[var(--color-text-muted)]">
-                      No share links found
+                      {t("shared-links.empty.noShareLinksFound")}
                     </td>
                   </tr>
                 )}
@@ -272,12 +294,12 @@ export function SharedLinksPage() {
       {/* Right Sidebar: Stats */}
       <div className="w-64 space-y-4">
         <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-          <h3 className="mb-3 text-sm font-semibold">Overview</h3>
+          <h3 className="mb-3 text-sm font-semibold">{t("shared-links.heading.overview")}</h3>
           <div className="space-y-3">
-            <StatRow label="Active links" value={stats?.active ?? 0} color="var(--color-primary)" />
-            <StatRow label="Total views" value={stats?.total_views ?? 0} color="#3b82f6" />
-            <StatRow label="Expiring soon" value={stats?.expiring ?? 0} color="#f59e0b" />
-            <StatRow label="Total links" value={stats?.total ?? 0} color="var(--color-text-secondary)" />
+            <StatRow label={t("shared-links.label.activeLinks")} value={stats?.active ?? 0} color="var(--color-primary)" />
+            <StatRow label={t("shared-links.label.totalViews")} value={stats?.total_views ?? 0} color="#3b82f6" />
+            <StatRow label={t("shared-links.label.expiringSoon")} value={stats?.expiring ?? 0} color="#f59e0b" />
+            <StatRow label={t("shared-links.label.totalLinks")} value={stats?.total ?? 0} color="var(--color-text-secondary)" />
           </div>
         </div>
       </div>
@@ -286,13 +308,15 @@ export function SharedLinksPage() {
       {revokeTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] p-6 shadow-xl">
-            <h3 className="mb-2 text-lg font-semibold">Revoke share link</h3>
+            <h3 className="mb-2 text-lg font-semibold">{t("shared-links.heading.revokeShareLink")}</h3>
             <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-              Are you sure you want to revoke the share link for{" "}
-              <span className="font-medium text-[var(--color-text)]">
-                {revokeTarget.display_name}
-              </span>
-              ? This cannot be undone.
+              {richText(t, "shared-links.description.areYouSureYouWantToRevokeTheShare", {}, {
+                displayName: (
+                  <span className="font-medium text-[var(--color-text)]">
+                    {revokeTarget.display_name}
+                  </span>
+                ),
+              })}
             </p>
             <div className="flex justify-end gap-2">
               <button
@@ -300,13 +324,13 @@ export function SharedLinksPage() {
                 className="rounded-lg border px-4 py-2 text-sm"
                 style={{ borderColor: "var(--color-border)" }}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={() => revokeMut.mutate(revokeTarget.link_id)}
                 className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white"
               >
-                Revoke
+                {t("common.action.revoke")}
               </button>
             </div>
           </div>

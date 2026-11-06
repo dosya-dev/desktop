@@ -3,6 +3,10 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    // src/i18n is shared by the main process, the renderer and Node's test
+    // runner, which only resolves a relative import with its .ts extension.
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -14,6 +18,8 @@
   "include": [
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
+    "src/i18n/**/*.ts",
+    "src/i18n/messages/*.json",
     "electron.vite.config.ts",
     "scripts/acknowledgements-plugin.ts",
     "scripts/acknowledgements.d.mts"

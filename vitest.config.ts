@@ -20,8 +20,18 @@ export default defineConfig({
     // test file itself only uses relative imports.
     alias: {
       "@": path.resolve(__dirname, "./src/renderer"),
+      // Straight at the source, like tsconfig.web.json: the package export is the
+      // same file, but a worktree's node_modules can link another checkout's copy.
+      "@dosya-dev/shared/files/ical": path.resolve(__dirname, "../../packages/shared/src/files/ical.ts"),
+      // Longer keys first: the bare key is a prefix of the subpaths.
+      "@dosya-dev/video-player/react": path.resolve(__dirname, "./vendor/video-player/react.tsx"),
+      "@dosya-dev/video-player/skin.css": path.resolve(__dirname, "./vendor/video-player/skin.css"),
+      "@dosya-dev/video-player": path.resolve(__dirname, "./vendor/video-player/index.ts"),
       "@dosya-dev/e2ee-core": path.resolve(__dirname, "./vendor/e2ee-core/index.js"),
       "@dosya-dev/e2ee-client": path.resolve(__dirname, "./vendor/e2ee-client/index.js"),
+      "@dosya-dev/personas-engine": path.resolve(__dirname, "./vendor/personas-engine/index.js"),
+      "@dosya-dev/face-reader": path.resolve(__dirname, "./vendor/face-reader/face_reader.js"),
+      "@dosya-dev/onnxruntime-web": path.resolve(__dirname, "./vendor/onnxruntime-web/ort.webgpu.bundle.min.mjs"),
     },
   },
   test: {
@@ -29,6 +39,9 @@ export default defineConfig({
     globals: false,
     include: [
       "src/renderer/**/*.test.tsx",
+      // i18n.ts imports the catalogs as extensionless/JSON bundler-style specifiers.
+      "src/main/i18n.test.ts",
+      "src/main/i18n.load.test.ts",
       // lan-peer.ts imports lan-protocol.ts with a bundler-style specifier,
       // which node:test cannot resolve, so its suite runs here instead (the
       // same reason as the sync files below).
@@ -45,9 +58,19 @@ export default defineConfig({
       // run. It was swept into the node:test glob and had been red there since
       // it was added.
       "src/renderer/lib/auth-direction.test.ts",
+      // ai-search.ts imports "@/lib/api-client" (path alias), which node:test
+      // cannot resolve - same reason as lan-transport.test.ts above.
+      "src/renderer/lib/ai-search.test.ts",
+      // personas.ts imports "@/lib/api-client" too - same reason as ai-search.
+      "src/renderer/lib/personas.test.ts",
       // The Vault store and its seams use "@/..." and the vendored e2ee alias,
       // which node:test cannot resolve - same reason as lan-peer above.
       "src/renderer/lib/vault/*.test.ts",
+      // On-device Personas: the engine host and its ports use "@/..." and the
+      // vendored engine alias, which node:test cannot resolve - same reason
+      // as the Vault store above.
+      "src/renderer/lib/personas-device/*.test.ts",
+      "src/renderer/lib/personas-device/ort/*.test.ts",
       // remote-client.ts and index.ts (SyncEngine) both use TS parameter
       // properties and extensionless relative imports (bundler-style
       // resolution) - Node's own test runner cannot load either (see the
@@ -60,6 +83,13 @@ export default defineConfig({
       "src/main/sync/filesystem-safety.test.ts",
       "src/main/sync/sync-engine-path-safety.test.ts",
       "src/main/sync/sync-engine-keep-both-loop.test.ts",
+      "src/main/sync/sync-engine-download-guard.test.ts",
+      "src/main/sync/remote-client.download-guard.test.ts",
+      "src/main/sync/remote-poller.truncated.test.ts",
+      "src/main/sync/sync-engine-truncated-listing.test.ts",
+      "src/main/sync/remote-client.download-hash.test.ts",
+      "src/main/sync/remote-client.upload-guard.test.ts",
+      "src/main/sync/sync-engine-upload-prestat.test.ts",
       "src/main/sync/remote-client.path-safety.test.ts",
       "src/main/sync/remote-client.refusals.test.ts",
       "src/main/sync/sync-engine-refusals.test.ts",

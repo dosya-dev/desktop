@@ -1,8 +1,12 @@
 // Ported from apps/web/src/lib/lock-mode.ts - keep in sync with the web copy.
 //
 // The lock dialog's model: everything the dialog says, decided in one place so
-// the three clients describe the same lock_mode the same way. Self-contained on
-// purpose (no imports) so `node --test` can load it without a bundler.
+// the three clients describe the same lock_mode the same way. Only relative
+// `.ts` imports (no `@/` alias), so `node --test` can load it without a bundler.
+// Text goes through `tl` at call time, in the language current at that moment.
+
+import { tl } from "./locale-state.ts";
+import type { MessageKey } from "../../i18n/keys.ts";
 
 export type LockMode = "none" | "view_only" | "full_lock";
 export type LockKind = "file" | "folder";
@@ -10,39 +14,44 @@ export type LockKind = "file" | "folder";
 /** The server rejects anything shorter (POST /api/files/:id/lock). */
 export const MIN_LOCK_PASSWORD_LENGTH = 8;
 
-export const LOCK_MODE_OPTIONS: readonly { value: LockMode; label: string }[] = [
-  { value: "none", label: "Unlocked" },
-  { value: "view_only", label: "View only" },
-  { value: "full_lock", label: "Password" },
+/** One mode. `label` is read at render, so it is always in the current language. */
+function option(value: LockMode, key: MessageKey): { value: LockMode; readonly label: string } {
+  return { value, get label() { return tl(key); } };
+}
+
+export const LOCK_MODE_OPTIONS: readonly { value: LockMode; readonly label: string }[] = [
+  option("none", "file-security.label.unlocked"),
+  option("view_only", "common.status.viewOnly"),
+  option("full_lock", "common.label.password"),
 ];
 
 // Each sentence maps to shipped behaviour in the API's download-guard and
 // share lock-gate: view_only denies the bytes but not the preview; full_lock
 // hands out one-hour unlock tokens, seals a folder against additions, and
 // refuses share links to the item.
-const DESCRIPTIONS: Record<LockKind, Record<LockMode, string>> = {
+const DESCRIPTIONS: Record<LockKind, Record<LockMode, MessageKey>> = {
   file: {
-    none: "Anyone with access to it can open, download and edit it.",
-    view_only: "Members can preview it in the viewer, but not download or edit it.",
-    full_lock: "Opens only with a password. An unlock lasts an hour, and share links to it stop working while it is locked.",
+    none: "file-security.label.anyoneWithAccessToItCanOpenDownloadAnd",
+    view_only: "file-security.label.membersCanPreviewItInTheViewerButNot",
+    full_lock: "file-security.description.opensOnlyWithAPasswordAnUnlockLastsAn",
   },
   folder: {
-    none: "Anyone with access to it can open it and work with everything inside.",
-    view_only: "Members can browse and preview what is inside, but not download it.",
-    full_lock: "Opens only with a password. While it is locked nothing can be added inside and share links to its contents stop working. An unlock lasts an hour.",
+    none: "file-security.label.anyoneWithAccessToItCanOpenItAnd",
+    view_only: "file-security.label.membersCanBrowseAndPreviewWhatIsInsideBut",
+    full_lock: "file-security.description.opensOnlyWithAPasswordWhileItIsLocked",
   },
 };
 
 export function describeLockMode(kind: LockKind, mode: LockMode): string {
-  return DESCRIPTIONS[kind][mode];
+  return tl(DESCRIPTIONS[kind][mode]);
 }
 
 /** What the primary button will do. Neutral while the current mode is unknown. */
 export function lockActionLabel(input: { selected: LockMode; current: LockMode; loading?: boolean }): string {
-  if (input.loading) return "Apply";
-  if (input.selected === "none") return "Remove lock";
-  if (input.selected === "view_only") return "Set view only";
-  return input.current === "full_lock" ? "Update password" : "Lock with password";
+  if (input.loading) return tl("file-security.apply");
+  if (input.selected === "none") return tl("file-security.action.removeLock");
+  if (input.selected === "view_only") return tl("file-security.action.setViewOnly");
+  return tl(input.current === "full_lock" ? "file-security.action.updatePassword" : "file-security.action.lockWithPassword");
 }
 
 /**
@@ -57,12 +66,14 @@ export function canApplyLock(input: { selected: LockMode; current: LockMode; pas
 }
 
 export function passwordFieldLabel(current: LockMode): string {
-  return current === "full_lock" ? "New password" : "Password";
+  return tl(current === "full_lock" ? "common.label.newPassword" : "common.label.password");
 }
 
 export function passwordHint(current: LockMode): string {
-  const base = `At least ${MIN_LOCK_PASSWORD_LENGTH} characters.`;
-  return current === "full_lock" ? `${base} Replaces the current one.` : base;
+  const values = { minLockPasswordLength: MIN_LOCK_PASSWORD_LENGTH };
+  return current === "full_lock"
+    ? tl("file-security.label.atLeastMinLockPasswordLengthCharactersReplacesTheCurrentOne", values)
+    : tl("file-security.label.atLeastMinLockPasswordLengthCharacters", values);
 }
 
 /**
@@ -74,22 +85,23 @@ export function describeLockStatus(input: { lock_mode: string; locked_by_name?: 
   if (mode !== "full_lock" && mode !== "view_only") return null;
   const by = input.locked_by_name?.trim();
   const when = input.lockedWhen?.trim();
-  if (!by && !when) return mode === "full_lock" ? "Currently password-locked" : "Currently view only";
-  const base = mode === "full_lock" ? "Password lock" : "View only";
-  if (by && when) return `${base} · set by ${by}, ${when}`;
-  if (by) return `${base} · set by ${by}`;
-  return `${base} · set ${when}`;
+  if (!by && !when) return tl(mode === "full_lock" ? "file-security.label.currentlyPasswordLocked" : "file-security.label.currentlyViewOnly");
+  // One message per shape, with the mode as a select, so each language words the whole line.
+  const which = mode === "full_lock" ? "password" : "viewOnly";
+  if (by && when) return tl("file-security.label.passwordLockSetByByWhen", { mode: which, by, when });
+  if (by) return tl("file-security.label.passwordLockSetByBy", { mode: which, by });
+  return tl("file-security.label.passwordLockSetWhen", { mode: which, when: when ?? "" });
 }
 
 /** The chip under the title. `size` is pre-formatted; unknown parts are left out. */
 export function describeLockTarget(input: { kind: LockKind; extension?: string | null; size?: string | null; file_count?: number | null }): string {
   const parts: string[] = [];
   if (input.kind === "folder") {
-    parts.push("Folder");
-    if (typeof input.file_count === "number") parts.push(`${input.file_count} ${input.file_count === 1 ? "file" : "files"}`);
+    parts.push(tl("common.label.folder"));
+    if (typeof input.file_count === "number") parts.push(tl("common.label.fileSentenceCase", { fileCount: input.file_count }));
   } else {
     const ext = input.extension?.trim();
-    parts.push(ext ? ext.toUpperCase() : "File");
+    parts.push(ext ? ext.toUpperCase() : tl("common.label.fileTitleCase"));
   }
   if (input.size) parts.push(input.size);
   return parts.join(" · ");

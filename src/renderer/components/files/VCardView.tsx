@@ -7,6 +7,8 @@ import {
 } from "lucide-react";
 import { colorFor, initials } from "@/lib/file-type";
 import { parseVCards, type ParsedVCard } from "@/lib/vcard";
+import { useT } from "@/lib/i18n";
+import type { MessageKey } from "../../../i18n/keys";
 
 interface Props {
   file: { id: string; name: string; mime_type: string };
@@ -14,6 +16,7 @@ interface Props {
 }
 
 export function VCardView({ file, rawUrl }: Props) {
+  const t = useT();
   const [cards, setCards] = useState<ParsedVCard[] | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [selected, setSelected] = useState(0);
@@ -46,14 +49,14 @@ export function VCardView({ file, rawUrl }: Props) {
   }, [cards, query]);
 
   if (state === "loading") {
-    return <div className="text-sm text-[var(--color-text-muted)]">Loading contact…</div>;
+    return <div className="text-sm text-[var(--color-text-muted)]">{t("common.status.loadingContact")}</div>;
   }
   if (state === "error" || !cards) {
     return (
       <div className="rounded-xl border bg-[var(--color-bg)] p-10 text-center" style={{ borderColor: "var(--color-border)", minWidth: 280 }}>
-        <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">VCF</p>
+        <p className="mb-3 text-4xl font-bold tracking-wider text-[var(--color-text-muted)]/40">{t("common.label.vcf")}</p>
         <p className="text-sm text-[var(--color-text-muted)] break-all">{file.name}</p>
-        <p className="mt-2 text-xs text-[var(--color-text-muted)]">This contact file couldn't be read.</p>
+        <p className="mt-2 text-xs text-[var(--color-text-muted)]">{t("common.error.thisContactFileCouldnTBeRead")}</p>
       </div>
     );
   }
@@ -67,12 +70,12 @@ export function VCardView({ file, rawUrl }: Props) {
         <div className="flex w-60 shrink-0 flex-col overflow-hidden rounded-xl border bg-[var(--color-bg)]" style={{ borderColor: "var(--color-border)" }}>
           <div className="border-b p-2" style={{ borderColor: "var(--color-border)" }}>
             <div className="relative">
-              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
+              <Search size={14} className="absolute inset-s-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search contacts"
-                className="h-8 w-full rounded-lg border pl-8 pr-2 text-xs outline-none focus:border-[var(--color-primary)]"
+                placeholder={t("common.placeholder.searchContacts")}
+                className="h-8 w-full rounded-lg border ps-8 pe-2 text-xs outline-none focus:border-[var(--color-primary)]"
                 style={{ borderColor: "var(--color-border)" }}
               />
             </div>
@@ -82,13 +85,13 @@ export function VCardView({ file, rawUrl }: Props) {
               <button
                 key={i}
                 onClick={() => setSelected(i)}
-                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${i === selected ? "bg-[var(--color-bg-tertiary)]" : "hover:bg-[var(--color-bg-secondary)]"}`}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-start transition-colors ${i === selected ? "bg-[var(--color-bg-tertiary)]" : "hover:bg-[var(--color-bg-secondary)]"}`}
               >
                 <Avatar card={c} px={28} />
-                <span className="truncate text-xs font-medium">{c.fullName || "(no name)"}</span>
+                <span className="truncate text-xs font-medium">{c.fullName || t("common.heading.noName")}</span>
               </button>
             ))}
-            {filtered.length === 0 && <p className="py-4 text-center text-xs text-[var(--color-text-muted)]">No matches</p>}
+            {filtered.length === 0 && <p className="py-4 text-center text-xs text-[var(--color-text-muted)]">{t("common.empty.noMatches")}</p>}
           </div>
         </div>
       )}
@@ -118,12 +121,13 @@ function Avatar({ card, px }: { card: ParsedVCard; px: number }) {
 
 // ── Read-only card ─────────────────────────────────────────
 function ContactCard({ card }: { card: ParsedVCard }) {
+  const t = useT();
   return (
     <div className="overflow-hidden rounded-2xl border bg-[var(--color-bg)]" style={{ borderColor: "var(--color-border)" }}>
       <div className="flex flex-col items-center gap-2 bg-[var(--color-bg-secondary)] p-6 pb-5 text-center">
         <Avatar card={card} px={80} />
         <div>
-          <h2 className="text-lg font-semibold">{card.fullName || "(no name)"}</h2>
+          <h2 className="text-lg font-semibold">{card.fullName || t("common.heading.noName")}</h2>
           {(card.title || card.org) && (
             <p className="text-sm text-[var(--color-text-muted)]">
               {[card.title, card.org].filter(Boolean).join(" · ")}
@@ -162,7 +166,30 @@ function ContactCard({ card }: { card: ParsedVCard }) {
   );
 }
 
+// lib/vcard.ts names the common phone/email kinds with these fixed tokens,
+// and the view names its own rows (url, organization, birthday); any other
+// type is the file's own word and shows as written. A Map, not an
+// object: the type comes from the file, and "constructor" or "__proto__"
+// must not resolve to an inherited property.
+const TYPE_KEYS = new Map<string, MessageKey>([
+  ["mobile", "common.label.mobileSentenceCase"],
+  ["work", "common.label.work"],
+  ["home", "common.label.home"],
+  ["fax", "common.label.fax"],
+  ["main", "common.label.main"],
+  ["other", "common.label.other"],
+  ["url", "common.label.url"],
+  ["organization", "common.label.organization"],
+  ["birthday", "common.label.birthday"],
+]);
+
+export function typeLabel(t: (key: MessageKey) => string, type: string): string {
+  const key = TYPE_KEYS.get(type);
+  return key ? t(key) : type;
+}
+
 function FieldRow({ icon, type, value, href, external }: { icon: React.ReactNode; type: string; value: string; href?: string; external?: boolean }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const copy = () => {
     navigator.clipboard?.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200); }).catch(() => {});
@@ -171,12 +198,12 @@ function FieldRow({ icon, type, value, href, external }: { icon: React.ReactNode
     <div className="group flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-[var(--color-bg-secondary)]">
       <span className="shrink-0 text-[var(--color-text-muted)]">{icon}</span>
       <div className="min-w-0 flex-1">
-        <p className="mb-0.5 text-[11px] capitalize leading-none text-[var(--color-text-muted)]">{type}</p>
+        <p className="mb-0.5 text-[11px] capitalize leading-none text-[var(--color-text-muted)]">{typeLabel(t, type)}</p>
         {href
           ? <a href={href} {...(external ? { target: "_blank", rel: "noreferrer" } : {})} className="break-all text-sm text-[var(--color-primary)] hover:underline">{value}</a>
           : <p className="break-all text-sm">{value}</p>}
       </div>
-      <button onClick={copy} title="Copy" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md opacity-0 transition-opacity hover:bg-[var(--color-bg-tertiary)] group-hover:opacity-100">
+      <button onClick={copy} title={t("common.copy")} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md opacity-0 transition-opacity hover:bg-[var(--color-bg-tertiary)] group-hover:opacity-100">
         {copied ? <Check size={14} className="text-green-600" /> : <Copy size={14} className="text-[var(--color-text-muted)]" />}
       </button>
     </div>

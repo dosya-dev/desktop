@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import { access, readdir, stat, statfs, unlink, mkdir } from "fs/promises";
 import { join, resolve, sep, basename, dirname } from "path";
 import { toRelPath, normalizeRel, pathKey, absKey, longPath } from "./paths";
+import { baselineFor, baselineFromStat, localMatchesRecord, LocalChangedDuringDownloadError, updateMayReplace } from "./download-guard";
 import { prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
 import { loadConfig, saveConfig, loadPairState, deletePairState, openSyncIndex, syncStateDir, setSyncDataDir } from "./config";
 import type { SyncIndex, PairMeta } from "./index-db";
@@ -28,6 +29,8 @@ import {
   buildRemotePaths, unknownParentError, isUnknownParentError,
   resolveParentFolderId, missingParentError,
 } from "./remote-paths";
+import { FOLDS_CASE, findCaseCollisions, isCaseCollisionError } from "./case-collisions";
+import { syncDirectory } from "./dir-sync";
 import { hashFile } from "./hash";
 import { chunkFile } from "./chunker";
 import { blockTrackingApplies, shouldAttemptDelta, deltaIsWorthIt } from "./delta-eligibility";
@@ -142,6 +145,29 @@ function isPermissionRefusal(err: unknown): boolean {
 
 // ── Runtime types ───���───────────────────────────────────────────────
 
+/** Downloads that landed but are not yet durable-and-recorded; see flushLanded. */
+interface LandedBatch {
+  dirs: Set<string>;
+  records: SyncFileRecord[];
+  /** When the oldest unflushed landing was noted; 0 while empty. */
+  firstAt: number;
+}
+
+function newLandedBatch(): LandedBatch {
+  return { dirs: new Set(), records: [], firstAt: 0 };
+}
+
+/**
+ * A pending batch is flushed (directories fsynced once, then its rows written
+ * in one transaction) when it holds this many records or its oldest landing
+ * is this old. Bounds what a quit, update-restart or crash in the middle of a
+ * long download phase can leave unrecorded: a landed file with no row comes
+ * back next cycle as a both-sides-present file with no history, which costs
+ * a conflict per file. 200 rows keeps the per-slice fsync cost negligible.
+ */
+const LANDED_FLUSH_RECORDS = 200;
+const LANDED_FLUSH_MS = 1_000;
+
 interface PairRuntime {
   pair: SyncPair;
   state: SyncPairState;
@@ -152,6 +178,11 @@ interface PairRuntime {
   status: SyncPairStatus;
   errorMessage: string | null;
   syncing: boolean;
+  /** A pull-mode keep-both vacated a path during a run; poll again when the
+   *  run ends so the server copy lands there. */
+  repollAfterSync?: boolean;
+  /** Download batches still collecting landings, so stop() can flush them. */
+  pendingLanded?: Set<LandedBatch>;
   queuedSync: boolean;
   /** Watcher events that arrived while a sync was in flight, deduped by path.
    *  Drained after the sync so deletes/moves aren't lost (a plain rescan
@@ -239,6 +270,16 @@ function getRetryAfterMs(err: unknown): number {
  *   pull-safe  - download only, never delete local
  */
 const SESSION_EXPIRED_MESSAGE = "Session expired. Please log in again.";
+
+const INCOMPLETE_LISTING_MESSAGE =
+  "Server listing was incomplete - skipping this sync cycle rather than treating missing files as deleted";
+
+/** A truncated full listing: never reconciled, the cycle is retried later. */
+class IncompleteListingError extends Error {
+  constructor() {
+    super(INCOMPLETE_LISTING_MESSAGE);
+  }
+}
 
 export class SyncEngine extends EventEmitter {
   private config: SyncConfig | null = null;
@@ -368,6 +409,29 @@ export class SyncEngine extends EventEmitter {
 
   private putError(rt: PairRuntime, err: SyncFileError): void {
     this.index.upsertError(rt.pair.id, err);
+  }
+
+  /**
+   * Remote names that differ only by letter case on a filesystem that folds
+   * case. The reconciler already left them out of the plan; this makes them
+   * visible. Permanent so the retry loop does not hammer a name that only a
+   * rename on the web can fix.
+   */
+  private clearCaseCollisionErrors(rt: PairRuntime): void {
+    for (const err of [...this.index.iterErrors(rt.pair.id)]) {
+      if (isCaseCollisionError(err)) this.dropError(rt, err.filePath);
+    }
+  }
+
+  private recordCaseCollisions(rt: PairRuntime, groups: { remoteId: string; relPath: string }[][]): void {
+    for (const group of groups) {
+      const names = group.map((g) => `"${g.relPath}"`).join(" and ");
+      const message = `${names} differ only by letter case. This device cannot keep both, so neither is synced until one of them is renamed on the web.`;
+      for (const g of group) {
+        this.putError(rt, { filePath: g.relPath, error: message, retryCount: 0, lastAttemptAt: Date.now(), permanent: true });
+      }
+      this.log(rt.pair.id, message);
+    }
   }
 
   private dropError(rt: PairRuntime, relPath: string): void {
@@ -663,9 +727,20 @@ export class SyncEngine extends EventEmitter {
     // status and bail out before we clear runtimes.
     await new Promise<void>(r => setTimeout(r, 100));
 
-    // No "persist state before quitting" phase any more: every mutation was
-    // already written through to the index as it happened, so there is
-    // nothing buffered to lose and nothing to race a shutdown timeout.
+    // Every mutation is written through to the index as it happens, with one
+    // exception: downloads that landed in the current slice of a download
+    // phase (at most LANDED_FLUSH_RECORDS rows, see noteLanded) wait for
+    // their directory fsync. Flush those now, or the next cycle would meet
+    // each of those files with no history and raise a conflict for it.
+    for (const rt of this.runtimes.values()) {
+      for (const batch of rt.pendingLanded ?? []) {
+        try {
+          await this.flushLanded(rt, batch);
+        } catch (err) {
+          this.logSwallowed("stop: flush landed downloads", err);
+        }
+      }
+    }
     for (const rt of this.runtimes.values()) {
       rt.releaseFolderAccess?.();
       rt.releaseFolderAccess = null;
@@ -1491,6 +1566,7 @@ export class SyncEngine extends EventEmitter {
 
       let actions: SyncAction[];
       this.clearUnknownParentErrors(rt);
+      this.clearCaseCollisionErrors(rt);
       // Re-raised below if this cycle withholds deletions too.
       rt.notices.delete("deletions-held");
       if (needsFullScan) {
@@ -1503,7 +1579,8 @@ export class SyncEngine extends EventEmitter {
           this.emitStatus();
         }, (skipped) => this.reportSkippedTooLarge(rt, skipped), (files) => this.recordUnknownParents(rt, files),
            (count, reason) => this.reportSuppressedDeletions(rt, count, reason),
-           (ids) => ids.forEach(id => this.dropFile(rt, id)));
+           (ids) => ids.forEach(id => this.dropFile(rt, id)),
+           (groups) => this.recordCaseCollisions(rt, groups));
         rt.localDirty = false;
         rt.lastFullLocalScanAt = Date.now();
       } else {
@@ -1511,7 +1588,8 @@ export class SyncEngine extends EventEmitter {
         // against stored state. No local filesystem walk.
         actions = await reconcileRemoteOnly(rt.pair, snapshot, this.baseViewFor(rt),
           (files) => this.recordUnknownParents(rt, files),
-          (count, reason) => this.reportSuppressedDeletions(rt, count, reason));
+          (count, reason) => this.reportSuppressedDeletions(rt, count, reason),
+          (groups) => this.recordCaseCollisions(rt, groups));
       }
 
       await this.executeActions(rt, actions);
@@ -1636,6 +1714,7 @@ export class SyncEngine extends EventEmitter {
       }
 
       const DOWNLOAD_CONCURRENCY = presignedMap.size > 0 ? this.directTransferConcurrency() : 8;
+      const landed = this.openLandedBatch(rt);
       let dlIdx = 0;
       let dlFatalErr: Error | null = null;
 
@@ -1659,6 +1738,25 @@ export class SyncEngine extends EventEmitter {
           if (dlErr?.permanent) continue;
           if (dlErr && dlErr.retryCount >= MAX_FILE_RETRIES) { this.putError(rt, { ...dlErr, permanent: true }); continue; }
 
+          // download-update may replace the local file only if nothing changed
+          // since the plan looked at it (the scan-time view, or the base
+          // record when the plan never scanned). A planned last-write-wins
+          // overwrite proceeds; an edit saved after the scan is refused. A
+          // path that is now empty is safe to fill.
+          // download-new expects NO file at the target; one that appeared since
+          // the scan is the user's and must not be renamed over.
+          const beforeReplace = action.type === "download-update"
+            ? async () => {
+                const now = await stat(longPath(absPath)).catch(() => null);
+                if (!updateMayReplace(now, baselineFor(action))) {
+                  throw new LocalChangedDuringDownloadError(relPath);
+                }
+              }
+            : async () => {
+                const now = await stat(longPath(absPath)).catch(() => null);
+                if (now) throw new LocalChangedDuringDownloadError(relPath);
+              };
+
           try {
             const destination = await this.prepareDownloadTarget(rt, relPath);
             absPath = destination.absPath;
@@ -1667,13 +1765,15 @@ export class SyncEngine extends EventEmitter {
               // Direct download from R2 via presigned URL - no Worker proxy
               await this.client.downloadFromPresignedUrl(
                 presigned.url, absPath, action.remoteFile.size_bytes, undefined,
-                destination.assertPathSafe,
+                destination.assertPathSafe, beforeReplace,
               );
               // Give the file its real date (Contract 2), then record THAT
               // mtime so the next scan does not read the touch as an edit.
               const s = await applyDownloadedMtime(longPath(absPath), action.remoteFile.source_modified_at);
               this.markRecentDownload(absPath);
-              this.putFile(rt, {
+              // Recorded by flushLanded() with its slice, once the directory
+              // holding it has been fsynced.
+              await this.noteLanded(rt, landed, dirname(absPath), {
                 remoteId: action.remoteFile.id,
                 remoteName: action.remoteFile.name,
                 remoteFolderId: action.remoteFile.folder_id,
@@ -1687,14 +1787,30 @@ export class SyncEngine extends EventEmitter {
               });
             } else {
               // Fallback: download through Worker
-              await this.downloadRemoteFile(rt, action.remoteFile, absPath, relPath);
+              await this.downloadRemoteFile(rt, action.remoteFile, absPath, relPath, beforeReplace, landed);
             }
-            this.dropError(rt, relPath);
           } catch (dlE: any) {
             if (dlE.message === "SESSION_EXPIRED") { dlFatalErr = dlE; return; }
             if (isRateLimitError(dlE)) { dlFatalErr = dlE; return; }
             if (dlE instanceof UnsafeSyncPathError) {
               this.recordUnsafePath(rt, relPath, dlE);
+              continue;
+            }
+            if (dlE instanceof LocalChangedDuringDownloadError) {
+              this.log(rt.pair.id, `"${relPath}" was ${action.type === "download-new" ? "created" : "edited"} here while the server copy was downloading - keeping your ${action.type === "download-new" ? "file" : "edit"} and treating it as a conflict`);
+              const now = await stat(longPath(absPath)).catch(() => null);
+              await this.raiseConflict(rt, {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+                pairId: rt.pair.id,
+                localPath: absPath,
+                remoteName: action.remoteFile.name,
+                remoteId: action.remoteFile.id,
+                localMtimeMs: now?.mtimeMs ?? (action.type === "download-update" ? action.existingRecord.localMtimeMs : 0),
+                remoteUpdatedAt: action.remoteFile.updated_at,
+                localSizeBytes: now?.size ?? (action.type === "download-update" ? action.existingRecord.localSizeBytes : 0),
+                remoteSizeBytes: action.remoteFile.size_bytes,
+                detectedAt: Date.now(),
+              });
               continue;
             }
             const prev = this.index.getError(rt.pair.id, relPath);
@@ -1711,7 +1827,13 @@ export class SyncEngine extends EventEmitter {
         }
       };
 
-      await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, downloadActions.length) }, () => dlWorker()));
+      try {
+        await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, downloadActions.length) }, () => dlWorker()));
+      } finally {
+        // Whatever landed is made durable and recorded, even when a fatal
+        // error (session, rate limit) cut the phase short.
+        await this.closeLandedBatch(rt, landed);
+      }
       if (dlFatalErr) throw dlFatalErr;
     }
 
@@ -2916,6 +3038,11 @@ export class SyncEngine extends EventEmitter {
       // string comparisons twice over.
       const mChunkByPath = new Map(mChunk.map(f => [f.relPath, f]));
 
+      // One stat per file BEFORE its PUT. This is what the record will carry
+      // (not a stat taken after the PUT, which would describe a save that was
+      // never sent), and what the transport checks the file against after.
+      const preStats = new Map<string, import("fs").Stats>();
+      const md5ByPath = new Map<string, string>();
       const uploadWorker = async (): Promise<void> => {
         while (uploadIdx < manifest.uploads.length) {
           if (this.stopped || (rt.status as SyncPairStatus) === "paused" || uploadFatalErr) return;
@@ -2926,12 +3053,16 @@ export class SyncEngine extends EventEmitter {
           if (!entry) continue;
 
           try {
-            await this.client.uploadToPresignedUrl(
+            const pre = await stat(longPath(entry.absPath));
+            preStats.set(upload.relPath, pre);
+            const put = await this.client.uploadToPresignedUrl(
               upload.url,
               entry.absPath,
               upload.size,
               upload.contentType,
+              { expect: { size: pre.size, mtimeMs: pre.mtimeMs } },
             );
+            md5ByPath.set(upload.relPath, put.md5);
             uploaded.push(upload);
 
             // Update progress
@@ -2973,13 +3104,13 @@ export class SyncEngine extends EventEmitter {
           if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
           const cChunk = uploaded.slice(cStart, cStart + COMMIT_BATCH);
-          // One stat per file, taken BEFORE the commit so its mtime can ride
-          // along as source_modified_at (Contract 2) and be reused for the
-          // record below - this loop used to stat after the commit instead.
+          // The stat taken BEFORE each file's PUT (see preStats). It rides
+          // along as source_modified_at (Contract 2) and is the state the
+          // record below stores, so an edit saved during the PUT still looks
+          // changed to the next scan.
           const statsByPath = new Map<string, import("fs").Stats | null>();
           for (const u of cChunk) {
-            const entry = mChunkByPath.get(u.relPath);
-            statsByPath.set(u.relPath, entry ? await stat(entry.absPath).catch(() => null) : null);
+            statsByPath.set(u.relPath, preStats.get(u.relPath) ?? null);
           }
           // A guard only makes sense when the manifest handed back the id we
           // already track for that path - a fresh id is a create, and
@@ -3037,40 +3168,45 @@ export class SyncEngine extends EventEmitter {
             }
 
             // Update local state (prefer server-authoritative version/updated_at)
-            for (const u of cChunk) {
-              if (commitRes.conflicts.has(u.fileId)) continue; // raised above
-              // A refused file did NOT land (oversized, or the name is already
-              // taken in that folder) - marking it synced here is how refusals
-              // used to become phantoms that never retried and never surfaced.
-              const refusal = commitRes.refused.get(u.fileId);
-              if (refusal) {
-                this.log(pair.id, `Server refused "${u.relPath}" - ${refusal}`);
-                const existing = this.index.getError(rt.pair.id, u.relPath);
-                this.putError(rt, {
-                  filePath: u.relPath,
-                  error: refusal,
-                  retryCount: (existing?.retryCount ?? 0) + 1,
-                  lastAttemptAt: Date.now(),
-                  permanent: false,
+            // One index transaction per commit chunk: at synchronous=FULL an
+            // autocommitted row is an fsync each. Everything inside is sync.
+            this.index.transaction(() => {
+              for (const u of cChunk) {
+                if (commitRes.conflicts.has(u.fileId)) continue; // raised above
+                // A refused file did NOT land (oversized, or the name is already
+                // taken in that folder) - marking it synced here is how refusals
+                // used to become phantoms that never retried and never surfaced.
+                const refusal = commitRes.refused.get(u.fileId);
+                if (refusal) {
+                  this.log(pair.id, `Server refused "${u.relPath}" - ${refusal}`);
+                  const existing = this.index.getError(rt.pair.id, u.relPath);
+                  this.putError(rt, {
+                    filePath: u.relPath,
+                    error: refusal,
+                    retryCount: (existing?.retryCount ?? 0) + 1,
+                    lastAttemptAt: Date.now(),
+                    permanent: false,
+                  });
+                  continue;
+                }
+                const s = statsByPath.get(u.relPath) ?? null;
+                const srv = commitRes.results.get(u.fileId);
+                this.putFile(rt, {
+                  remoteId: u.fileId,
+                  remoteName: u.name,
+                  remoteFolderId: u.folderId,
+                  remoteSizeBytes: u.size,
+                  remoteUpdatedAt: srv?.updatedAt ?? Math.floor(Date.now() / 1000),
+                  remoteVersion: srv?.version ?? 1,
+                  localPath: u.relPath,
+                  localSizeBytes: s?.size ?? u.size,
+                  localMtimeMs: s?.mtimeMs ?? Date.now(),
+                  contentHash: md5ByPath.get(u.relPath),
+                  syncedAt: Date.now(),
                 });
-                continue;
+                this.dropError(rt, u.relPath);
               }
-              const s = statsByPath.get(u.relPath) ?? null;
-              const srv = commitRes.results.get(u.fileId);
-              this.putFile(rt, {
-                remoteId: u.fileId,
-                remoteName: u.name,
-                remoteFolderId: u.folderId,
-                remoteSizeBytes: u.size,
-                remoteUpdatedAt: srv?.updatedAt ?? Math.floor(Date.now() / 1000),
-                remoteVersion: srv?.version ?? 1,
-                localPath: u.relPath,
-                localSizeBytes: s?.size ?? u.size,
-                localMtimeMs: s?.mtimeMs ?? Date.now(),
-                syncedAt: Date.now(),
-              });
-              this.dropError(rt, u.relPath);
-            }
+            });
           } catch (err: any) {
             if (err.message === "SESSION_EXPIRED") throw err;
             console.error("[sync] Commit failed:", err.message);
@@ -3542,9 +3678,22 @@ export class SyncEngine extends EventEmitter {
       const unresolved: RemoteFileInfo[] = [];
       const unknownIds = new Set(unknownParent.map((f) => f.id));
 
+      // Remote names that fold to one local path (macOS, Windows) would land
+      // on one file, the second download over the first. Same rule as the
+      // reconciler: every member of a group is left alone and reported.
+      this.clearCaseCollisionErrors(rt);
+      const collisions = findCaseCollisions(
+        [...filePathMap].map(([remoteId, relPath]) => ({ remoteId, relPath })),
+        FOLDS_CASE,
+      );
+      const collidedIds = new Set<string>();
+      for (const group of collisions.values()) for (const m of group) collidedIds.add(m.remoteId);
+      if (collisions.size > 0) this.recordCaseCollisions(rt, [...collisions.values()]);
+
       // Guard disk space up-front - pull can otherwise fill the volume.
       let neededBytes = 0;
       for (const [remoteId, file] of snapshot.files) {
+        if (collidedIds.has(remoteId)) continue;
         const existing = this.index.getFileById(rt.pair.id, remoteId);
         if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
           neededBytes += file.size_bytes;
@@ -3553,31 +3702,96 @@ export class SyncEngine extends EventEmitter {
       await this.ensureDiskSpace(rt.pair.localPath, neededBytes);
 
       // Download new/changed remote files
-      for (const [remoteId, file] of snapshot.files) {
-        if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
-        const existing = this.index.getFileById(rt.pair.id, remoteId);
-        // A file whose folder is not in this snapshot: keep a previously
-        // synced copy at its last known path (content may still update in
-        // place); a never-seen file waits for its folder.
-        const resolved = filePathMap.get(remoteId);
-        if (resolved === undefined || unknownIds.has(remoteId)) {
-          if (!existing) { unresolved.push(file); continue; }
-        }
-        const relPath = resolved ?? existing!.localPath;
+      const landed = this.openLandedBatch(rt);
+      try {
+        for (const [remoteId, file] of snapshot.files) {
+          if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
+          if (collidedIds.has(remoteId)) continue;
+          const existing = this.index.getFileById(rt.pair.id, remoteId);
+          // A file whose folder is not in this snapshot: keep a previously
+          // synced copy at its last known path (content may still update in
+          // place); a never-seen file waits for its folder.
+          const resolved = filePathMap.get(remoteId);
+          if (resolved === undefined || unknownIds.has(remoteId)) {
+            if (!existing) { unresolved.push(file); continue; }
+          }
+          const relPath = resolved ?? existing!.localPath;
 
-        const absPath = join(rt.pair.localPath, relPath);
-        if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
-          try {
-            await this.downloadRemoteFile(rt, file, absPath, relPath);
-          } catch (error) {
-            if (error instanceof UnsafeSyncPathError) {
-              this.recordUnsafePath(rt, relPath, error);
+          const absPath = join(rt.pair.localPath, relPath);
+          if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
+            // Strategy-aware, like the planner's both-edited case: a file the
+            // user edited since the last sync is never discarded under
+            // keep-both, even on a download-only pair (every local edit there
+            // is unsynced for good). It becomes a conflict and nothing is
+            // downloaded for it now. Under last-write-wins, or when the file
+            // is unchanged, it downloads, and the hook compares with the file
+            // as it was at this decision, so only a save landing DURING the
+            // download is refused. A tracked path that is empty at rename time
+            // is safe to fill. A never-tracked path must stay empty (same rule
+            // as the worker's download-new): a file there is the user's.
+            const decided = existing ? await stat(longPath(absPath)).catch(() => null) : null;
+            if (
+              existing && decided && !localMatchesRecord(decided, existing)
+              && (rt.pair.conflictStrategy || "keep-both") === "keep-both"
+            ) {
+              this.log(rt.pair.id, `"${relPath}" was edited here since it was last synced and the server has a newer copy - keeping your edit and treating it as a conflict`);
+              await this.raiseConflict(rt, {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+                pairId: rt.pair.id,
+                localPath: absPath,
+                remoteName: file.name,
+                remoteId: file.id,
+                localMtimeMs: decided.mtimeMs,
+                remoteUpdatedAt: file.updated_at,
+                localSizeBytes: decided.size,
+                remoteSizeBytes: file.size_bytes,
+                detectedAt: Date.now(),
+              });
               continue;
             }
-            throw error;
+            const beforeReplace = existing
+              ? async () => {
+                  const now = await stat(longPath(absPath)).catch(() => null);
+                  if (now && (!decided || !localMatchesRecord(now, baselineFromStat(decided)))) {
+                    throw new LocalChangedDuringDownloadError(relPath);
+                  }
+                }
+              : async () => {
+                  const now = await stat(longPath(absPath)).catch(() => null);
+                  if (now) throw new LocalChangedDuringDownloadError(relPath);
+                };
+            try {
+              await this.downloadRemoteFile(rt, file, absPath, relPath, beforeReplace, landed);
+            } catch (error) {
+              if (error instanceof UnsafeSyncPathError) {
+                this.recordUnsafePath(rt, relPath, error);
+                continue;
+              }
+              if (error instanceof LocalChangedDuringDownloadError) {
+                this.log(rt.pair.id, existing
+                  ? `"${relPath}" was edited here while the server copy was downloading - keeping your edit and treating it as a conflict`
+                  : `"${relPath}" already exists here and was never synced - keeping your file and treating it as a conflict`);
+                const now = await stat(longPath(absPath)).catch(() => null);
+                await this.raiseConflict(rt, {
+                  id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+                  pairId: rt.pair.id,
+                  localPath: absPath,
+                  remoteName: file.name,
+                  remoteId: file.id,
+                  localMtimeMs: now?.mtimeMs ?? existing?.localMtimeMs ?? 0,
+                  remoteUpdatedAt: file.updated_at,
+                  localSizeBytes: now?.size ?? existing?.localSizeBytes ?? 0,
+                  remoteSizeBytes: file.size_bytes,
+                  detectedAt: Date.now(),
+                });
+                continue;
+              }
+              throw error;
+            }
           }
         }
-
+      } finally {
+        await this.closeLandedBatch(rt, landed);
       }
       if (unresolved.length > 0) this.recordUnknownParents(rt, unresolved);
 
@@ -3637,6 +3851,10 @@ export class SyncEngine extends EventEmitter {
     } finally {
       rt.syncing = false;
       this.emitStatus();
+      if (rt.repollAfterSync) {
+        rt.repollAfterSync = false;
+        rt.poller?.triggerNow();
+      }
     }
   }
 
@@ -3685,11 +3903,71 @@ export class SyncEngine extends EventEmitter {
 
   // ── Download a single remote file ────────��────────────────────────
 
+  /** A batch for one download phase, registered so stop() can flush it. */
+  private openLandedBatch(rt: PairRuntime): LandedBatch {
+    const batch = newLandedBatch();
+    (rt.pendingLanded ??= new Set()).add(batch);
+    return batch;
+  }
+
+  /** End of a phase: flush the tail and unregister the batch. */
+  private async closeLandedBatch(rt: PairRuntime, batch: LandedBatch): Promise<void> {
+    try {
+      await this.flushLanded(rt, batch);
+    } finally {
+      rt.pendingLanded?.delete(batch);
+    }
+  }
+
+  /**
+   * Add one landing to its batch and flush the slice once it reaches
+   * LANDED_FLUSH_RECORDS rows or its oldest landing is LANDED_FLUSH_MS old
+   * (checked as landings arrive; stop() and the end of the phase flush the
+   * rest).
+   */
+  private async noteLanded(rt: PairRuntime, batch: LandedBatch, dir: string, record: SyncFileRecord): Promise<void> {
+    const now = Date.now();
+    if (batch.records.length === 0) batch.firstAt = now;
+    batch.dirs.add(dir);
+    batch.records.push(record);
+    if (batch.records.length >= LANDED_FLUSH_RECORDS || now - batch.firstAt >= LANDED_FLUSH_MS) {
+      await this.flushLanded(rt, batch);
+    }
+  }
+
+  /**
+   * Make a batch of downloads durable and record them, in that order: each
+   * parent directory is fsynced once (the renames become durable), THEN the
+   * base rows are written in one transaction. A record written before its
+   * file's name is durable could, after a power cut, describe a file that is
+   * gone, and the next scan would read that as a local delete.
+   */
+  private async flushLanded(rt: PairRuntime, batch: LandedBatch): Promise<void> {
+    // Take the slice synchronously: landings noted while this awaits go to
+    // the next slice, and two concurrent flushes never write a row twice.
+    const dirs = [...batch.dirs];
+    const records = batch.records.splice(0);
+    batch.dirs.clear();
+    batch.firstAt = 0;
+    for (const dir of dirs) await syncDirectory(dir);
+    if (records.length === 0) return;
+    this.index.transaction(() => {
+      for (const record of records) {
+        this.putFile(rt, record);
+        this.dropError(rt, record.localPath);
+      }
+    });
+  }
+
   private async downloadRemoteFile(
     rt: PairRuntime,
     file: RemoteFileInfo,
     absPath: string,
     relPath: string,
+    beforeReplace?: () => Promise<void>,
+    /** Collects the landing for flushLanded() instead of syncing its
+     *  directory and writing its record now. */
+    landed?: LandedBatch,
   ): Promise<void> {
     if (this.stopped) return;
     const destination = await this.prepareDownloadTarget(rt, relPath);
@@ -3726,6 +4004,7 @@ export class SyncEngine extends EventEmitter {
           }
         },
         destination.assertPathSafe,
+        beforeReplace,
       );
 
       // The server's source mtime becomes the file's mtime (Contract 2); the
@@ -3735,7 +4014,8 @@ export class SyncEngine extends EventEmitter {
       // Mark as recently downloaded to suppress watcher re-upload
       this.markRecentDownload(absPath);
 
-      this.putFile(rt, {
+      const batch = landed ?? newLandedBatch();
+      await this.noteLanded(rt, batch, dirname(absPath), {
         remoteId: file.id,
         remoteName: file.name,
         remoteFolderId: file.folder_id,
@@ -3747,8 +4027,7 @@ export class SyncEngine extends EventEmitter {
         localMtimeMs: s.mtimeMs,
         syncedAt: Date.now(),
       });
-
-      this.dropError(rt, relPath);
+      if (!landed) await this.flushLanded(rt, batch);
     } finally {
       this.activeTransfers.delete(transfer);
       this.transferSemaphore.release();
@@ -3876,8 +4155,10 @@ export class SyncEngine extends EventEmitter {
         throw err;
       }
 
-      // Re-stat after upload to get the actual mtime (file may have been modified during upload)
-      const postStat = await stat(longPath(absPath)).catch(() => s);
+      // Record `s`, the stat from BEFORE the upload, whichever door sent the
+      // bytes (the delta door has no unchanged-check of its own). If the
+      // file was edited during the upload, the next scan then sees a size or
+      // mtime that differs from the record and sends the edit.
 
       // Prefer the server's authoritative version/updated_at when returned;
       // fall back to a client estimate only if the endpoint omitted them.
@@ -3896,18 +4177,27 @@ export class SyncEngine extends EventEmitter {
       // lets a 2 GB rename cost nothing and a 1 MB edit to a 2 GB file send
       // roughly 1 MB. hashFile streams, so the cost is one sequential read,
       // and a file that cannot be hashed still syncs, just without dedup.
-      const fileHash = await hashFile(longPath(absPath)).catch(() => undefined);
+      //
+      // The hash is read AFTER the upload, so it is only kept when the file
+      // still matches the pre-upload stat once hashed. A hash of an edit the
+      // server never received would let the next content check call that
+      // edit already synced.
+      const rawHash = await hashFile(longPath(absPath)).catch(() => undefined);
+      const hashedStat = rawHash ? await stat(longPath(absPath)).catch(() => null) : null;
+      const fileHash = hashedStat && hashedStat.size === s.size && hashedStat.mtimeMs === s.mtimeMs
+        ? rawHash
+        : undefined;
 
       this.putFile(rt, {
         remoteId: result.fileId,
         remoteName: result.name,
         remoteFolderId: remoteFolderId,
-        remoteSizeBytes: postStat.size,
+        remoteSizeBytes: s.size,
         remoteUpdatedAt,
         remoteVersion: version,
         localPath: relPath,
-        localSizeBytes: postStat.size,
-        localMtimeMs: postStat.mtimeMs,
+        localSizeBytes: s.size,
+        localMtimeMs: s.mtimeMs,
         syncedAt: Date.now(),
         contentHash: fileHash,
       });
@@ -3916,7 +4206,7 @@ export class SyncEngine extends EventEmitter {
       // parts that changed. Deliberately after the upload has landed and
       // deliberately swallowed: chunking is an optimization for later, and a
       // failure here must never fail a transfer that already succeeded.
-      void this.recordBlocks(rt, result.fileId, absPath, postStat.size);
+      void this.recordBlocks(rt, result.fileId, absPath, s.size);
 
       // Collect file ID for batched sync-flag call (done at end of scan, not per-file).
       // For individual watcher events, set the flag inline.
@@ -4583,7 +4873,17 @@ export class SyncEngine extends EventEmitter {
         await prepareSafeSyncPath(rt.pair.localPath, conflictRelPath, { kind: "file", createParents: false });
         await fsRename(longPath(safeOriginal), longPath(conflictPath));
 
-        await this.uploadLocalFile(rt, conflictPath, conflictRelPath);
+        const mode = rt.pair.syncMode || "push-safe";
+        if (mode === "pull" || mode === "pull-safe") {
+          // Download-only pair: the copy stays on this device and nothing is
+          // sent. The vacated original is refilled by the next poll; one
+          // asked for now would be dropped while a pull run is in progress,
+          // so it waits for that run to end.
+          if (rt.syncing) rt.repollAfterSync = true;
+          else rt.poller?.triggerNow();
+        } else {
+          await this.uploadLocalFile(rt, conflictPath, conflictRelPath);
+        }
       }
 
       console.log(`[sync] Conflict resolved (${resolution}): ${conflict.remoteName}`);
@@ -4688,6 +4988,8 @@ export class SyncEngine extends EventEmitter {
       },
     );
     if (!fast) return null;
+    // A partial listing must never seed base rows or feed the reconciler.
+    if (fast.truncated) throw new IncompleteListingError();
 
     const snapshot: RemoteSnapshot = {
       files: new Map(fast.files.map(f => [f.id, f] as const)),
@@ -4704,28 +5006,33 @@ export class SyncEngine extends EventEmitter {
     );
     if (unknownParent.length > 0) this.recordUnknownParents(rt, unknownParent);
 
-    // Pre-populate folder state
-    for (const [id, f] of snapshot.folders) {
-      const relPath = folderPathMap.get(id);
-      if (relPath) {
-        this.putFolder(rt, {
-          remoteId: id, remoteName: f.name, remoteParentId: f.parent_id,
-          localPath: relPath, syncedAt: Date.now(),
+    // One transaction for the whole seed: at synchronous=FULL an
+    // autocommitted row is an fsync each, and a large tree pays seconds of
+    // main-thread time for it. It also means a crash seeds all or nothing.
+    this.index.transaction(() => {
+      // Pre-populate folder state
+      for (const [id, f] of snapshot.folders) {
+        const relPath = folderPathMap.get(id);
+        if (relPath) {
+          this.putFolder(rt, {
+            remoteId: id, remoteName: f.name, remoteParentId: f.parent_id,
+            localPath: relPath, syncedAt: Date.now(),
+          });
+        }
+      }
+
+      // Pre-populate file state with localMtimeMs=0 sentinel
+      for (const [id, f] of snapshot.files) {
+        const relPath = filePathMap.get(id);
+        if (relPath === undefined) continue; // unknown parent - see above
+        this.putFile(rt, {
+          remoteId: id, remoteName: f.name, remoteFolderId: f.folder_id,
+          remoteSizeBytes: f.size_bytes, remoteUpdatedAt: f.updated_at,
+          remoteVersion: f.current_version, localPath: relPath,
+          localSizeBytes: f.size_bytes, localMtimeMs: 0, syncedAt: Date.now(),
         });
       }
-    }
-
-    // Pre-populate file state with localMtimeMs=0 sentinel
-    for (const [id, f] of snapshot.files) {
-      const relPath = filePathMap.get(id);
-      if (relPath === undefined) continue; // unknown parent - see above
-      this.putFile(rt, {
-        remoteId: id, remoteName: f.name, remoteFolderId: f.folder_id,
-        remoteSizeBytes: f.size_bytes, remoteUpdatedAt: f.updated_at,
-        remoteVersion: f.current_version, localPath: relPath,
-        localSizeBytes: f.size_bytes, localMtimeMs: 0, syncedAt: Date.now(),
-      });
-    }
+    });
 
     this.log(pair.id, `Found ${snapshot.files.size.toLocaleString()} files and ${snapshot.folders.size.toLocaleString()} folders on server`);
     return snapshot;
@@ -4768,6 +5075,7 @@ export class SyncEngine extends EventEmitter {
             this.emitStatus();
           },
         );
+        if (fast?.truncated) throw new IncompleteListingError();
         if (fast) {
           snapshot = {
             files: new Map(fast.files.map(f => [f.id, f] as const)),
@@ -4786,6 +5094,7 @@ export class SyncEngine extends EventEmitter {
       rt.statusText = "Scanning local files...";
       this.emitStatus();
       this.clearUnknownParentErrors(rt);
+      this.clearCaseCollisionErrors(rt);
       rt.notices.delete("deletions-held");
       const actions = await reconcile(rt.pair, snapshot, this.baseViewFor(rt), (files, folders) => {
         rt.scannedFiles = files;
@@ -4795,7 +5104,8 @@ export class SyncEngine extends EventEmitter {
         this.emitStatus();
       }, (skipped) => this.reportSkippedTooLarge(rt, skipped), (files) => this.recordUnknownParents(rt, files),
          (count, reason) => this.reportSuppressedDeletions(rt, count, reason),
-         (ids) => ids.forEach(id => this.dropFile(rt, id)));
+         (ids) => ids.forEach(id => this.dropFile(rt, id)),
+           (groups) => this.recordCaseCollisions(rt, groups));
 
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
 
@@ -4818,6 +5128,12 @@ export class SyncEngine extends EventEmitter {
       this.log(pairId, "Initial sync complete");
     } catch (err: any) {
       if (this.stopped || (rt.status as SyncPairStatus) === "paused") return;
+      if (err instanceof IncompleteListingError) {
+        // Same outcome as a failed fetch: leave state alone, retry next poll.
+        this.log(pairId, INCOMPLETE_LISTING_MESSAGE);
+        rt.status = "idle";
+        return;
+      }
       if (err.message === "SESSION_EXPIRED") {
         this.sessionExpired(rt);
       } else if (isRateLimitError(err)) {

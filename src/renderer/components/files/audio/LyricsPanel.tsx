@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { MicVocal } from 'lucide-react';
 import type { LyricLine } from '@dosya-dev/audio-player';
+import { useT } from '@/lib/i18n';
+import { useAutoDir } from "@/lib/bidi-ui";
 
 interface Props {
   lines: LyricLine[] | null;
@@ -10,6 +12,8 @@ interface Props {
 }
 
 export function LyricsPanel({ lines, synced, position }: Props) {
+  const ownDir = useAutoDir();
+  const t = useT();
   const bodyRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLLIElement>(null);
 
@@ -37,9 +41,9 @@ export function LyricsPanel({ lines, synced, position }: Props) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-12 text-center">
         <MicVocal className="size-[26px] text-[var(--color-text-secondary)] opacity-80" />
-        <h4 className="m-0 text-sm font-semibold">No lyrics in this file</h4>
+        <h4 className="m-0 text-sm font-semibold">{t('common.heading.noLyricsInThisFile')}</h4>
         <p className="m-0 max-w-[42ch] text-[13px] leading-relaxed text-[var(--color-text-secondary)]">
-          Lyrics show up when the file carries them in its own tags.
+          {t('common.description.lyricsShowUpWhenTheFileCarriesThemIn')}
         </p>
       </div>
     );
@@ -54,6 +58,7 @@ export function LyricsPanel({ lines, synced, position }: Props) {
           <li
             key={`${l.t}-${i}`}
             ref={i === activeIndex ? activeRef : undefined}
+            dir={ownDir}
             className={`py-px text-base leading-[1.85] transition-opacity duration-300 ${
               i === activeIndex
                 ? 'font-bold text-[var(--color-text)] opacity-100'

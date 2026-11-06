@@ -1,13 +1,28 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { toast } from "sonner";
+import { autoDir, ltrDir } from "@/lib/bidi-ui";
 import { ApiError } from "@/lib/api-client";
 import { SESSION_RESET_EVENT } from "@/lib/session-reset";
-import { defaultEngine, type E2eeEngine, type EncryptedEntry, type WorkspaceMember } from "./engine";
+import { lastPersonasUser, stopPersonas } from "@/lib/personas-device/teardown";
+import { wipePersonasDevice } from "@/lib/personas-device/wipe";
+import { currentDir, t, onLocaleChange } from "@/lib/i18n";
+import type { MessageKey } from "../../../i18n/keys";
+import type { T } from "../../../i18n/translator";
+import {
+  defaultEngine,
+  ENGINE_LOCKED,
+  ENGINE_NO_ACTIVE_WORKSPACE,
+  ENGINE_RECOVERY_UNAVAILABLE,
+  type DestroyProof,
+  type E2eeEngine,
+  type EncryptedEntry,
+  type WorkspaceMember,
+} from "./engine";
 import { getActiveGlobalWorkspaceId } from "./active-workspace";
 import { normalizeRecoveryKey } from "./client";
 
-export type { E2eeEngine, EncryptedEntry, WorkspaceMember } from "./engine";
+export type { DestroyProof, E2eeEngine, EncryptedEntry, WorkspaceMember } from "./engine";
 
 export type E2eeStatus = "locked" | "unlocking" | "unlocked";
 /**
@@ -39,6 +54,16 @@ export type KnownWorkspace = {
 };
 
 /**
+ * What a Space is called on screen. A placeholder (`stub`) is stored as the
+ * English "Space" / "Shared Space" and never written into the Space, so it is
+ * shown in the chosen language here instead; a real name is the user's own.
+ */
+export function spaceName(ws: KnownWorkspace, t: T): string {
+  if (ws.stub !== true) return ws.name;
+  return t(ws.shared ? "vault.status.sharedSpace" : "vault.label.space");
+}
+
+/**
  * Where a decrypted file is written, one chunk at a time (see
  * src/main/vault-save.ts). The renderer passes a NAME and gets back an opaque
  * id; the dialog, the path and the file handle stay in the main process, and
@@ -65,6 +90,16 @@ const ipcSink: VaultSaveSink = {
 interface VaultState {
   status: E2eeStatus;
   error: string | null;
+  /**
+   * The last destroyIdentity() refusal asked for a two-factor code. Decided
+   * from the server's answer, not from `error`, which is in the chosen language.
+   */
+  destroyNeedsCode: boolean;
+  /**
+   * The last destroyIdentity() refusal said this account must confirm with
+   * the emailed code (no password, or email-code 2FA).
+   */
+  destroyNeedsEmailCode: boolean;
   engine: E2eeEngine;
   hasIdentity: boolean | null;
   workspaces: KnownWorkspace[];
@@ -78,6 +113,16 @@ interface VaultState {
   ownerUserId: string | null;
   activeWorkspaceId: string | null;
   entries: EncryptedEntry[];
+  /**
+   * Which listing `entries` holds ("<space id>:<folder id>"). A refresh of the
+   * same listing keeps the old entries on screen while it runs; only a move to
+   * a different folder or Space empties them first (QA TC-056).
+   */
+  entriesKey: string | null;
+  /** A folder listing is in flight. The grid shows skeletons only while this is true AND there is nothing to show. */
+  loadingFolder: boolean;
+  /** The file being encrypted and uploaded right now, for the in-grid progress card. In-memory only. */
+  uploading: { name: string; index: number; total: number } | null;
   /** The currently-open workspace's members. In-memory only - cleared on lock, never persisted. */
   members: WorkspaceMember[];
   busy: boolean;
@@ -96,7 +141,7 @@ interface VaultState {
    * on success; on refusal `error` carries the server's sentence (wrong
    * password, missing 2FA code) and the identity is untouched.
    */
-  destroyIdentity(password: string, totpCode?: string): Promise<boolean>;
+  destroyIdentity(proof: DestroyProof, totpCode?: string): Promise<boolean>;
   lock(): void;
   /**
    * Drops `workspaces` when the signed-in account differs from the last one
@@ -162,8 +207,51 @@ function isScopeRequired(e: unknown): boolean {
   return e instanceof Error && /\(412\)/.test(e.message);
 }
 
-function errorMessage(e: unknown, fallback: string): string {
-  return e instanceof Error && e.message ? e.message : fallback;
+/** The engine facade's own refusals, by their fixed English text. */
+const ENGINE_ERRORS: Record<string, MessageKey> = {
+  [ENGINE_LOCKED]: "vault.error.e2eeLocked",
+  [ENGINE_NO_ACTIVE_WORKSPACE]: "vault.error.e2eeNoActiveWorkspace",
+  [ENGINE_RECOVERY_UNAVAILABLE]: "vault.error.e2eeRecoveryUnlockUnavailableInThisBuild",
+};
+
+/**
+ * The client-written sentence `error` holds right now, with its key, so a
+ * language switch can say it again in the new language (see the listener at
+ * the bottom). Server and library text is never recorded: it stays as sent.
+ */
+let lastSaid: { key: MessageKey; text: string } | null = null;
+
+// Every message the store wrote itself, so a view can tell its own (translated)
+// words, which follow the page, from the engine's or server's, which take
+// their own direction.
+const SAID = new Set<string>();
+
+function say(key: MessageKey): string {
+  const text = t(key);
+  lastSaid = { key, text };
+  SAID.add(text);
+  return text;
+}
+
+/** dir for a block showing the store's `error`: "auto" for the engine's or server's own words in a right-to-left language, none for a translation or in a left-to-right language. */
+export function vaultErrorDir(error: string | null | undefined): "auto" | undefined {
+  return currentDir() === "rtl" && error && !SAID.has(error) ? "auto" : undefined;
+}
+
+/**
+ * The sentence for a failure: the engine's own refusals in the chosen
+ * language, any other error's text as it came (server or e2ee library), and
+ * `fallback` when there is none.
+ */
+/** errorMessage for a toast: the engine's own words take their own direction, a translation follows the page. */
+function ownText(message: string) {
+  return vaultErrorDir(message) ? autoDir(message) : message;
+}
+
+function errorMessage(e: unknown, fallback: MessageKey): string {
+  if (!(e instanceof Error) || !e.message) return say(fallback);
+  const own = ENGINE_ERRORS[e.message];
+  return own ? say(own) : e.message;
 }
 
 /**
@@ -173,8 +261,26 @@ function errorMessage(e: unknown, fallback: string): string {
  * the sentence is presentation.
  */
 function describeDestroyError(e: unknown): string {
-  if (e instanceof ApiError && e.message === "2fa_required") return "Enter your two-factor code to continue.";
-  return errorMessage(e, "Could not destroy the Vault.");
+  if (e instanceof ApiError && e.message === "2fa_required") return say("vault.label.enterYourTwoFactorCodeToContinue");
+  return errorMessage(e, "vault.error.couldNotDestroyTheVault");
+}
+
+/**
+ * Whether a destroy refusal is about the two-factor code: the 2fa_required
+ * code, or a server sentence about two-factor. Read from the server's own
+ * text, which is English whatever language the app is in.
+ */
+function destroyWantsCode(e: unknown): boolean {
+  return e instanceof Error && /two-factor|2fa/i.test(e.message);
+}
+
+/**
+ * Whether the password path refused an account it cannot serve: 400 "This
+ * account has no password. Confirm with the emailed code instead." or 409 for
+ * email-code 2FA. The dialog then moves to the emailed code.
+ */
+function destroyWantsEmailCode(e: unknown): boolean {
+  return e instanceof Error && /emailed code|email codes for two-factor/i.test(e.message);
 }
 
 export const useVault = create<VaultState>()(
@@ -182,12 +288,17 @@ export const useVault = create<VaultState>()(
     (set, get) => ({
       status: "locked",
       error: null,
+      destroyNeedsCode: false,
+      destroyNeedsEmailCode: false,
       engine: defaultEngine(),
       hasIdentity: null,
       workspaces: [],
       ownerUserId: null,
       activeWorkspaceId: null,
       entries: [],
+      entriesKey: null,
+      loadingFolder: false,
+      uploading: null,
       members: [],
       busy: false,
       recoveryKeyOnce: null,
@@ -204,7 +315,7 @@ export const useVault = create<VaultState>()(
           // identity keys, silently orphaning any real encrypted workspaces.
           // Leave `hasIdentity` as `null` (unknown) and surface `error` so the
           // gate shows a retry banner instead of Setup.
-          set({ hasIdentity: null, error: errorMessage(e, "Could not check encryption status.") });
+          set({ hasIdentity: null, error: errorMessage(e, "vault.error.couldNotCheckEncryptionStatus") });
         }
       },
 
@@ -220,7 +331,7 @@ export const useVault = create<VaultState>()(
             error: null,
           });
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not set up encryption.") });
+          set({ busy: false, error: errorMessage(e, "vault.error.couldNotSetUpEncryption") });
         }
       },
 
@@ -236,7 +347,7 @@ export const useVault = create<VaultState>()(
           set({
             status: "locked",
             busy: false,
-            error: "Incorrect passphrase or no identity found.",
+            error: say("vault.error.incorrectPassphraseOrNoIdentityFound"),
           });
         }
       },
@@ -258,16 +369,20 @@ export const useVault = create<VaultState>()(
             status: "locked",
             busy: false,
             error: unavailable
-              ? "Recovery key unlock is not available in this version yet. Please try again after the next update."
-              : "That recovery key did not unlock your Vault.",
+              ? say("vault.error.recoveryKeyUnlockIsNotAvailableInThisVersion")
+              : say("vault.error.thatRecoveryKeyDidNotUnlockYourVault"),
           });
         }
       },
 
-      async destroyIdentity(password, totpCode) {
-        set({ busy: true, error: null });
+      async destroyIdentity(proof, totpCode) {
+        set({ busy: true, error: null, destroyNeedsCode: false, destroyNeedsEmailCode: false });
         try {
-          await get().engine.destroyIdentity(password, totpCode);
+          await get().engine.destroyIdentity(proof, totpCode);
+          // The personas key was sealed to the identity that is gone: drop the
+          // copy cached on this device too (never throws).
+          stopPersonas(); // so nothing running re-persists the key
+          await wipePersonasDevice(lastPersonasUser());
           // Everything the old identity described is gone with it: the
           // persisted Spaces list would otherwise point at grants that no
           // longer exist. hasIdentity=false routes the gate to Setup.
@@ -284,14 +399,19 @@ export const useVault = create<VaultState>()(
           });
           return true;
         } catch (e) {
-          set({ busy: false, error: describeDestroyError(e) });
+          set({
+            busy: false,
+            error: describeDestroyError(e),
+            destroyNeedsCode: !destroyWantsEmailCode(e) && destroyWantsCode(e),
+            destroyNeedsEmailCode: destroyWantsEmailCode(e),
+          });
           return false;
         }
       },
 
       lock() {
         get().engine.lock();
-        set({ status: "locked", entries: [], activeWorkspaceId: null, members: [], error: null });
+        set({ status: "locked", entries: [], entriesKey: null, loadingFolder: false, uploading: null, activeWorkspaceId: null, members: [], error: null });
       },
 
       bindOwner(userId) {
@@ -302,7 +422,7 @@ export const useVault = create<VaultState>()(
         // not its answer to "does an identity exist" (the gate re-asks).
         set(prev == null
           ? { ownerUserId: userId }
-          : { ownerUserId: userId, workspaces: [], activeWorkspaceId: null, entries: [], members: [], recoveryKeyOnce: null, hasIdentity: null });
+          : { ownerUserId: userId, workspaces: [], activeWorkspaceId: null, entries: [], entriesKey: null, uploading: null, members: [], recoveryKeyOnce: null, hasIdentity: null });
       },
 
       async createWorkspace(name) {
@@ -325,11 +445,13 @@ export const useVault = create<VaultState>()(
             busy: false,
           }));
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not create Space.") });
+          set({ busy: false, error: errorMessage(e, "vault.error.couldNotCreateSpace") });
         }
       },
 
       async openWorkspace(id) {
+        // Another Space's files must not stay on screen while this one opens.
+        if (id !== get().activeWorkspaceId) set({ entries: [], entriesKey: null });
         set({ busy: true, error: null });
         try {
           // SECURITY: `selfFounded` comes ONLY from our own persisted
@@ -343,7 +465,7 @@ export const useVault = create<VaultState>()(
           set({ activeWorkspaceId: id, members: [], busy: false });
           void get().reconcileWorkspaceName(id);
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not open Space.") });
+          set({ busy: false, error: errorMessage(e, "vault.error.couldNotOpenSpace") });
         }
       },
 
@@ -409,7 +531,7 @@ export const useVault = create<VaultState>()(
             busy: false,
           }));
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not rename Space.") });
+          set({ busy: false, error: errorMessage(e, "vault.error.couldNotRenameSpace") });
         }
       },
 
@@ -444,7 +566,7 @@ export const useVault = create<VaultState>()(
           // The list is already on screen; the labels arrive behind it.
           void get().resolveSpaceNames();
         } catch (e) {
-          set({ error: errorMessage(e, "Could not check for shared Spaces.") });
+          set({ error: errorMessage(e, "vault.error.couldNotCheckForSharedSpaces") });
         }
       },
 
@@ -460,19 +582,25 @@ export const useVault = create<VaultState>()(
       },
 
       async refreshFolder(folderId = "") {
-        set({ busy: true, error: null });
+        const key = `${get().activeWorkspaceId ?? ""}:${folderId}`;
+        // Re-listing the folder already on screen (after an upload, say)
+        // keeps its entries visible; only a different listing starts empty.
+        if (key !== get().entriesKey) set({ entries: [], entriesKey: null });
+        set({ busy: true, loadingFolder: true, error: null });
         try {
           const entries = await get().engine.listFolder(folderId);
-          set({ entries, busy: false });
+          set({ entries, entriesKey: key, busy: false, loadingFolder: false });
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not load folder.") });
+          set({ busy: false, loadingFolder: false, error: errorMessage(e, "vault.error.couldNotLoadFolder") });
         }
       },
 
       async uploadFiles(files, folderId = "") {
         set({ busy: true, error: null });
+        const list = Array.from(files);
         try {
-          for (const file of Array.from(files)) {
+          for (const [i, file] of list.entries()) {
+            set({ uploading: { name: file.name, index: i + 1, total: list.length } });
             // One buffer per file is the floor here, not an oversight: the
             // content-defined chunker (chunkBoundaries, FastCDC) must see the
             // whole file to pick boundaries, and those boundaries are a
@@ -500,14 +628,16 @@ export const useVault = create<VaultState>()(
               await get().engine.uploadFile(folderId, file.name, bytes);
             }
           }
+          // The progress card stays until the re-listed folder shows the file.
           await get().refreshFolder(folderId);
-          set({ busy: false });
-          toast.success("Uploaded", {
-            description: files.length === 1 ? Array.from(files)[0].name : `${files.length} files`,
+          set({ busy: false, uploading: null });
+          toast.success(t("common.status.uploaded"), {
+            description: files.length === 1 ? Array.from(files)[0].name : t("common.label.filecountFiles", { fileCount: files.length }),
           });
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not upload file.") });
-          toast.error("Upload failed", { description: errorMessage(e, "Could not upload file.") });
+          const message = errorMessage(e, "vault.error.couldNotUploadFile");
+          set({ busy: false, uploading: null, error: message });
+          toast.error(t("common.error.uploadFailed"), { description: ownText(message) });
         }
       },
 
@@ -535,13 +665,14 @@ export const useVault = create<VaultState>()(
           const { path } = await get().sink.close(sinkId);
           sinkId = null;
           set({ busy: false });
-          toast.success("Saved", { description: path ? `Saved to ${path}` : name });
+          toast.success(t("vault.status.saved"), { description: path ? t("common.description.savedToPath", { path }) : autoDir(name) });
         } catch (e) {
           // Main removes the partial file on abort, so a failure part-way
           // through never leaves a truncated plaintext that looks complete.
           if (sinkId) await get().sink.abort(sinkId).catch(() => {});
-          set({ busy: false, error: errorMessage(e, "Could not download file.") });
-          toast.error("Download failed", { description: errorMessage(e, "Could not download file.") });
+          const message = errorMessage(e, "vault.error.couldNotDownloadFile");
+          set({ busy: false, error: message });
+          toast.error(t("common.error.downloadFailed"), { description: ownText(message) });
         }
       },
 
@@ -551,7 +682,7 @@ export const useVault = create<VaultState>()(
           const members = await get().engine.listMembers();
           set({ members, busy: false });
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not load members.") });
+          set({ busy: false, error: errorMessage(e, "vault.error.couldNotLoadMembers") });
         }
       },
 
@@ -561,17 +692,17 @@ export const useVault = create<VaultState>()(
           await get().engine.inviteMember(email);
           await get().refreshMembers();
           set({ busy: false });
-          toast.success("Invited", { description: email });
+          toast.success(t("common.status.invited"), { description: ltrDir(email) });
         } catch (e) {
           // The engine's directory-lookup failure is worded for a developer
           // ("that user has no E2EE identity"); surface a friendly,
           // user-facing message instead of leaking that phrasing verbatim.
           const message =
             e instanceof Error && e.message.includes("no E2EE identity")
-              ? "That user hasn't set up encryption yet"
-              : errorMessage(e, "Could not invite that user.");
+              ? say("vault.label.thatUserHasnTSetUpEncryptionYet")
+              : errorMessage(e, "vault.error.couldNotInviteThatUser");
           set({ busy: false, error: message });
-          toast.error("Invite failed", { description: message });
+          toast.error(t("vault.error.inviteFailed"), { description: ownText(message) });
         }
       },
 
@@ -581,10 +712,11 @@ export const useVault = create<VaultState>()(
           await get().engine.revokeMember(userId, ed25519Pub);
           await get().refreshMembers();
           set({ busy: false });
-          toast.success("Access revoked");
+          toast.success(t("vault.label.accessRevoked"));
         } catch (e) {
-          set({ busy: false, error: errorMessage(e, "Could not revoke that member.") });
-          toast.error("Revoke failed", { description: errorMessage(e, "Could not revoke that member.") });
+          const message = errorMessage(e, "vault.error.couldNotRevokeThatMember");
+          set({ busy: false, error: message });
+          toast.error(t("common.error.revokeFailed"), { description: ownText(message) });
         }
       },
 
@@ -630,3 +762,11 @@ if (typeof window !== "undefined") {
     useVault.setState({ recoveryKeyOnce: null, hasIdentity: null });
   });
 }
+
+// A sentence the store wrote itself follows a language switch; one that has
+// since been replaced or cleared, or came from the server, is left alone.
+onLocaleChange(() => {
+  const said = lastSaid;
+  if (!said || useVault.getState().error !== said.text) return;
+  useVault.setState({ error: say(said.key) });
+});

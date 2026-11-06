@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { autoDir, useAutoDir } from "@/lib/bidi-ui";
 import {
   ArrowUpDown,
   Check,
@@ -15,6 +16,16 @@ import { ApiError } from "@/lib/api-client";
 import { LanSession, type LanState } from "@/lib/lan-peer";
 import { ipcSink, signalTransport } from "@/lib/lan-transport";
 import { formatBytes } from "@/lib/format";
+import { t as translate, useT } from "@/lib/i18n";
+import type { MessageKey } from "../../i18n/keys";
+
+/** The four "How it works" steps; each message carries its own number. */
+const HOW_IT_WORKS: MessageKey[] = [
+  "lan-transfer.label.oneOneDeviceCreatesARoomAndGetsA",
+  "lan-transfer.label.twoTheOtherDeviceJoinsUsingThatCode",
+  "lan-transfer.label.threeFilesGoStraightBetweenTheTwoDevicesNever",
+  "lan-transfer.description.fourBothDevicesMustBeOnTheSameNetwork",
+];
 
 type Mode = "idle" | "hosting" | "joining";
 
@@ -24,6 +35,7 @@ interface ReceivedFile {
 }
 
 export function LanTransferPage() {
+  const t = useT();
   const [mode, setMode] = useState<Mode>("idle");
   const [roomCode, setRoomCode] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -41,9 +53,10 @@ export function LanTransferPage() {
     session.onState = (state: LanState) => setPeerConnected(state === "connected");
     session.onFileReceived = (file) => {
       setReceived((prev) => [...prev, file]);
-      toast.success(`Received "${file.name}"`);
+      // Module-level translate: this callback outlives the render that set it.
+      toast.success(translate("lan-transfer.label.receivedFileName", { fileName: file.name }));
     };
-    session.onError = (message) => toast.error(message);
+    session.onError = (message, raw) => toast.error(raw ? autoDir(message) : message);
     sessionRef.current = session;
   }, []);
 
@@ -58,7 +71,7 @@ export function LanTransferPage() {
       setRoomCode(session.roomCode);
       setMode("hosting");
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed to create room"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("lan-transfer.error.failedToCreateRoom")),
   });
 
   const joinMut = useMutation({
@@ -67,7 +80,7 @@ export function LanTransferPage() {
       adopt(session);
       setMode("joining");
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed to join room"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("lan-transfer.error.failedToJoinRoom")),
   });
 
   const leave = () => {
@@ -90,7 +103,7 @@ export function LanTransferPage() {
   const sendFiles = async (files: File[]) => {
     const session = sessionRef.current;
     if (!session || !peerConnected) {
-      toast.error("The other device is not connected yet");
+      toast.error(t("lan-transfer.label.theOtherDeviceIsNotConnectedYet"));
       return;
     }
     // One at a time: the channel carries one file's frames at a time, and a
@@ -100,9 +113,9 @@ export function LanTransferPage() {
       session.onSendProgress = (sent, total) => setSending({ name: file.name, sent, total });
       try {
         await session.sendFile(file);
-        toast.success(`Sent "${file.name}"`);
+        toast.success(translate("lan-transfer.label.sentFileName", { fileName: file.name }));
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : `Could not send "${file.name}"`);
+        toast.error(err instanceof Error ? err.message : translate("lan-transfer.error.couldNotSendFileName", { fileName: file.name }));
         break;
       }
     }
@@ -112,16 +125,16 @@ export function LanTransferPage() {
   const connected = peerConnected;
 
   return (
-    <div className="flex h-full flex-col items-center justify-center">
+    <div className="flex h-full flex-col items-center justify-center" data-testid="lan-transfer-page">
       <div className="w-full max-w-md space-y-6">
         {/* Header */}
         <div className="text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--color-primary)]/10">
             <ArrowUpDown size={28} className="text-[var(--color-primary)]" />
           </div>
-          <h1 className="text-2xl font-semibold">LAN Transfer</h1>
+          <h1 className="text-2xl font-semibold">{t("lan-transfer.heading.lanTransfer")}</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-            Transfer files directly between devices on the same network. Fast, private, peer-to-peer.
+            {t("lan-transfer.description.transferFilesDirectlyBetweenDevicesOnTheSameNetwork")}
           </p>
         </div>
 
@@ -130,7 +143,7 @@ export function LanTransferPage() {
             <button
               onClick={() => createMut.mutate()}
               disabled={createMut.isPending}
-              className="flex w-full items-center gap-4 rounded-xl border p-5 text-left hover:bg-[var(--color-bg-secondary)] transition-colors"
+              className="flex w-full items-center gap-4 rounded-xl border p-5 text-start hover:bg-[var(--color-bg-secondary)] transition-colors"
               style={{ borderColor: "var(--color-border)" }}
             >
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--color-primary)]/10">
@@ -139,25 +152,26 @@ export function LanTransferPage() {
                   : <Plus size={20} className="text-[var(--color-primary)]" />}
               </div>
               <div>
-                <p className="text-sm font-semibold">Create a room</p>
+                <p className="text-sm font-semibold">{t("lan-transfer.label.createARoom")}</p>
                 <p className="text-xs text-[var(--color-text-muted)]">
-                  Get a code to share with the other device
+                  {t("lan-transfer.description.getACodeToShareWithTheOtherDevice")}
                 </p>
               </div>
             </button>
 
             <div className="rounded-xl border p-5" style={{ borderColor: "var(--color-border)" }}>
-              <p className="text-sm font-semibold">Join a room</p>
+              <p className="text-sm font-semibold">{t("lan-transfer.label.joinARoom")}</p>
               <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-                Enter the code from the other device
+                {t("lan-transfer.label.enterTheCodeFromTheOtherDevice")}
               </p>
               <div className="flex gap-2">
                 <input
                   value={joinCode}
                   onChange={(e) => setJoinCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                  placeholder="6-digit code"
+                  placeholder={t("common.label.sixDigitCode")}
+                  dir="ltr"
                   inputMode="numeric"
-                  className="flex-1 rounded-lg border px-3 py-2 font-mono text-sm"
+                  className="ltr-value flex-1 rounded-lg border px-3 py-2 font-mono text-sm"
                   style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
                 />
                 <button
@@ -166,18 +180,15 @@ export function LanTransferPage() {
                   className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
                   style={{ background: "var(--color-primary)" }}
                 >
-                  {joinMut.isPending ? "Joining..." : "Join"}
+                  {joinMut.isPending ? t("lan-transfer.status.joining") : t("lan-transfer.action.join")}
                 </button>
               </div>
             </div>
 
             <div className="rounded-xl border p-5" style={{ borderColor: "var(--color-border)" }}>
-              <p className="mb-2 text-sm font-semibold">How it works</p>
+              <p className="mb-2 text-sm font-semibold">{t("lan-transfer.label.howItWorks")}</p>
               <ul className="space-y-1 text-xs text-[var(--color-text-muted)]">
-                <li>1. One device creates a room and gets a 6-digit code</li>
-                <li>2. The other device joins using that code</li>
-                <li>3. Files go straight between the two devices, never through our servers</li>
-                <li>4. Both devices must be on the same network</li>
+                {HOW_IT_WORKS.map((key) => <li key={key}>{t(key)}</li>)}
               </ul>
             </div>
           </div>
@@ -187,13 +198,13 @@ export function LanTransferPage() {
           <div className="space-y-4">
             <div className="rounded-xl border p-6 text-center" style={{ borderColor: "var(--color-border)" }}>
               <p className="mb-2 text-sm text-[var(--color-text-secondary)]">
-                Share this code with the other device
+                {t("lan-transfer.label.shareThisCodeWithTheOtherDevice")}
               </p>
               <div className="mb-3 flex items-center justify-center gap-3">
-                <span className="text-4xl font-bold tracking-[0.2em] font-mono">{roomCode}</span>
+                <span dir="ltr" className="text-4xl font-bold tracking-[0.2em] font-mono">{roomCode}</span>
                 <button
                   onClick={copyCode}
-                  aria-label="Copy code"
+                  aria-label={t("lan-transfer.accessibility.copyCode")}
                   className="rounded-lg border p-2 hover:bg-[var(--color-bg-secondary)]"
                   style={{ borderColor: "var(--color-border)" }}
                 >
@@ -208,7 +219,7 @@ export function LanTransferPage() {
               className="w-full rounded-lg border px-4 py-2 text-sm hover:bg-[var(--color-bg-secondary)]"
               style={{ borderColor: "var(--color-border)" }}
             >
-              {connected ? "Disconnect" : "Cancel"}
+              {connected ? t("lan-transfer.action.disconnect") : t("common.cancel")}
             </button>
           </div>
         )}
@@ -227,7 +238,7 @@ export function LanTransferPage() {
               className="w-full rounded-lg border px-4 py-2 text-sm hover:bg-[var(--color-bg-secondary)]"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Disconnect
+              {t("lan-transfer.action.disconnect")}
             </button>
           </div>
         )}
@@ -239,17 +250,18 @@ export function LanTransferPage() {
     return isOn ? (
       <div className="flex items-center justify-center gap-2 text-sm text-[var(--color-primary)]">
         <MonitorSmartphone size={16} />
-        Device connected
+        {t("lan-transfer.label.deviceConnected")}
       </div>
     ) : (
       <div className="flex items-center justify-center gap-2 text-sm text-[var(--color-text-muted)]">
         <Loader2 size={14} className="animate-spin" />
-        Waiting for the other device to join...
+        {t("lan-transfer.status.waitingForTheOtherDeviceToJoin")}
       </div>
     );
   }
 
   function TransferPanel() {
+    const ownDir = useAutoDir();
     return (
       <div className="space-y-3">
         <div
@@ -269,8 +281,8 @@ export function LanTransferPage() {
           }}
         >
           <Upload size={22} className="mx-auto mb-2 text-[var(--color-text-muted)]" />
-          <p className="text-sm font-medium">Drop files to send</p>
-          <p className="text-xs text-[var(--color-text-muted)]">or click to choose them</p>
+          <p className="text-sm font-medium">{t("lan-transfer.label.dropFilesToSend")}</p>
+          <p className="text-xs text-[var(--color-text-muted)]">{t("lan-transfer.label.orClickToChooseThem")}</p>
           <input
             ref={fileInputRef}
             type="file"
@@ -287,9 +299,9 @@ export function LanTransferPage() {
         {sending && (
           <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
             <div className="mb-2 flex items-center justify-between text-xs">
-              <span className="truncate font-medium">{sending.name}</span>
+              <span dir={ownDir} className="truncate font-medium">{sending.name}</span>
               <span className="text-[var(--color-text-muted)]">
-                {formatBytes(sending.sent)} of {formatBytes(sending.total)}
+                {t("lan-transfer.label.sentOfTotal", { sent: formatBytes(sending.sent), total: formatBytes(sending.total) })}
               </span>
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-bg-secondary)]">
@@ -306,13 +318,13 @@ export function LanTransferPage() {
 
         {received.length > 0 && (
           <div className="rounded-xl border p-4" style={{ borderColor: "var(--color-border)" }}>
-            <p className="mb-2 text-xs font-semibold text-[var(--color-text-secondary)]">Received</p>
+            <p className="mb-2 text-xs font-semibold text-[var(--color-text-secondary)]">{t("lan-transfer.label.received")}</p>
             <ul className="space-y-1">
               {received.map((f) => (
                 <li key={f.path} className="flex items-center gap-2 text-xs">
                   <FileCheck2 size={14} className="shrink-0 text-[var(--color-primary)]" />
-                  <span className="truncate font-medium">{f.name}</span>
-                  <span className="truncate text-[var(--color-text-muted)]">{f.path}</span>
+                  <span dir={ownDir} className="truncate font-medium">{f.name}</span>
+                  <span dir="ltr" className="ltr-value truncate text-[var(--color-text-muted)]">{f.path}</span>
                 </li>
               ))}
             </ul>

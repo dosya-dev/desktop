@@ -50,8 +50,14 @@ function electronEnv(): Record<string, string | undefined> {
   return env;
 }
 
-export async function launchApp(apiBase: string, extraEnv: Record<string, string> = {}) {
+export async function launchApp(
+  apiBase: string,
+  extraEnv: Record<string, string> = {},
+  /** A profile directory to start from (a stored locale, say); default a fresh one. */
+  seedUserData?: (dir: string) => void,
+) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "dosya-e2e-"));
+  seedUserData?.(userDataDir);
   const app = await electron.launch({
     args: [
       path.join(__dirname, "../out/main/index.js"),

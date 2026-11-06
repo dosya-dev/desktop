@@ -6,6 +6,7 @@ import {
   encodeControl,
   type ReceiveSink,
 } from "./lan-protocol";
+import { tl } from "./locale-state";
 
 /**
  * LAN Transfer: the peer connection and the signalling that sets it up.
@@ -68,7 +69,8 @@ export class LanSession {
   onFileReceived?: (file: { name: string; path: string }) => void;
   onReceiveProgress?: (id: string, received: number, size: number) => void;
   onSendProgress?: (sent: number, total: number) => void;
-  onError?: (message: string) => void;
+  /** `raw` is true for an error's own words (engine or server), false for a translation. */
+  onError?: (message: string, raw: boolean) => void;
 
   private readonly transport: SignalTransport;
   private readonly secret: string;
@@ -173,7 +175,7 @@ export class LanSession {
         // The room expires after ten minutes; a poll failing then is normal
         // and only matters if we never connected.
         if (this.peer.connectionState !== "connected") {
-          this.onError?.(err instanceof Error ? err.message : "Signalling failed");
+          this.onError?.(err instanceof Error ? err.message : tl("lan-transfer.error.signallingFailed"), err instanceof Error);
         }
       }
       if (!this.polling) break;
@@ -197,7 +199,7 @@ export class LanSession {
     channel.bufferedAmountLowThreshold = LOW_WATER_BYTES;
     channel.onopen = () => { this.markChannelReady(); this.onState?.("connected"); };
     channel.onclose = () => { this.onState?.("closed"); void this.assembler.reset(); };
-    channel.onerror = () => this.onError?.("The transfer connection failed");
+    channel.onerror = () => this.onError?.(tl("lan-transfer.error.theTransferConnectionFailed"), false);
     channel.onmessage = (e: MessageEvent) => { void this.handleMessage(e.data); };
   }
 
@@ -206,7 +208,7 @@ export class LanSession {
       if (typeof data === "string") {
         const outcome = await this.assembler.handleControl(data);
         if (outcome.kind === "complete") this.onFileReceived?.({ name: outcome.name, path: outcome.path });
-        else if (outcome.kind === "declined") this.onError?.(`"${outcome.name}" was not saved`);
+        else if (outcome.kind === "declined") this.onError?.(tl("lan-transfer.error.outcomenameWasNotSaved", { outcomeName: outcome.name }), false);
         return;
       }
       const bytes =
@@ -216,7 +218,7 @@ export class LanSession {
       if (!bytes) return;
       await this.assembler.handleBinary(bytes);
     } catch (err) {
-      this.onError?.(err instanceof Error ? err.message : "Transfer failed");
+      this.onError?.(err instanceof Error ? err.message : tl("lan-transfer.error.transferFailed"), err instanceof Error);
     }
   }
 
@@ -225,7 +227,7 @@ export class LanSession {
   async sendFile(file: File): Promise<void> {
     await this.channelReady;
     const channel = this.channel;
-    if (!channel || channel.readyState !== "open") throw new Error("The other device is not connected");
+    if (!channel || channel.readyState !== "open") throw new Error(tl("lan-transfer.error.theOtherDeviceIsNotConnected"));
 
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     channel.send(encodeControl({
@@ -236,13 +238,17 @@ export class LanSession {
     try {
       for (const { start, end } of chunkOffsets(file.size)) {
         await this.waitForDrain(channel);
-        if (channel.readyState !== "open") throw new Error("The connection closed mid-transfer");
+        // Shown to this user only: the channel is not open, so the catch below
+        // never puts this text on the wire.
+        if (channel.readyState !== "open") throw new Error(tl("lan-transfer.error.theConnectionClosedMidTransfer"));
         const slice = await file.slice(start, end).arrayBuffer();
         channel.send(slice);
         sent += end - start;
         this.onSendProgress?.(sent, file.size);
       }
     } catch (err) {
+      // The peer's copy of the reason stays in English whatever this user's
+      // language: it is protocol text, not UI.
       const message = err instanceof Error ? err.message : "Transfer failed";
       if (channel.readyState === "open") {
         channel.send(encodeControl({ v: PROTOCOL_VERSION, t: "error", id, message }));

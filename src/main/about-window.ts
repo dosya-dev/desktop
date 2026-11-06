@@ -1,5 +1,6 @@
 import { BrowserWindow, shell, type BrowserWindowConstructorOptions } from "electron";
 import { aboutUrl } from "./about-url";
+import { onMainLocaleChange, tMain } from "./i18n";
 
 /**
  * "About dosya": a small window of our own, in place of Electron's bare
@@ -31,7 +32,7 @@ export function openAboutWindow(deps: AboutWindowDeps): BrowserWindow {
   const mac = process.platform === "darwin";
   const options: BrowserWindowConstructorOptions = {
     ...ABOUT_WINDOW_SIZE,
-    title: "About dosya",
+    title: tMain("about.window.aboutDosya"),
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -66,7 +67,12 @@ export function openAboutWindow(deps: AboutWindowDeps): BrowserWindow {
   // The renderer's <title> is the app name; this window keeps its own.
   win.on("page-title-updated", (e) => e.preventDefault());
   win.once("ready-to-show", () => win.show());
+  // An open panel follows a language change made in the main window.
+  const offLocale = onMainLocaleChange(() => {
+    if (!win.isDestroyed()) win.setTitle(tMain("about.window.aboutDosya"));
+  });
   win.on("closed", () => {
+    offLocale();
     if (aboutWindow === win) aboutWindow = null;
   });
   void win.loadURL(aboutUrl(deps.rendererUrl));

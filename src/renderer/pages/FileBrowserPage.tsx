@@ -1,11 +1,11 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { isSortKey, parseSort, serializeSort, toggleSort, type SortKey } from "@/lib/list-sort";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   ChevronRight,
   LayoutGrid,
   LayoutList,
-  Plus,
   Search,
   Upload,
   Download,
@@ -29,6 +29,8 @@ import {
   SlidersHorizontal,
   RotateCcw,
   Loader2,
+  ArrowUp,
+  ArrowDown,
   SquarePen,
   ZoomIn,
   ZoomOut,
@@ -40,23 +42,23 @@ import {
   purgeTrashedFolder, purgeSummary, bulkPurgeSummary,
   type PurgeResponse, type PurgeMessage, type UnfinishedFolder,
 } from "@/lib/folder-purge";
-import {
-  validateFileName, validateFolderName, validateFolderPath,
-  checkUploadFile, checkBatchFitsQuota, summariseRejections,
-} from "@dosya-dev/shared";
+import { checkBatchFitsQuota } from "@dosya-dev/shared";
+import { folderPathError, nameError, uploadFileError, rejectionsSummary } from "@/lib/policy-error";
 import { fetchUploadLimits } from "@/lib/upload-limits";
 import { useWorkspace } from "@/lib/workspace-context";
 import { usePermissions } from "@/lib/use-permissions";
 import { formatBytes, formatDate } from "@/lib/format";
-import { activeFilter as readActiveFilter } from "@/lib/files-params";
+import { activeFilter as readActiveFilter, searchCommitParams } from "@/lib/files-params";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { restoreTarget } from "@/lib/view-restore";
 import { useLibrary } from "@/lib/use-library";
 import {
-  kindForFilter, sortOptionsFor, plural, KIND_COPY, LIBRARY_QUERY_ROOT,
+  kindForFilter, sortOptionsFor, KIND_COPY, LIBRARY_QUERY_ROOT,
   loadLibraryLayouts, saveLibraryLayout, type LibrarySort, type LibraryLayout,
 } from "@/lib/library-request";
 import { timeAgo, extOf, colorFor, originLabel, isOfficeFile, hiddenTitle, kindLabel, regionLabel } from "@/lib/file-type";
 import { toast } from "sonner";
+import { autoDir, Bdi, namedLine, Part, useAutoDir } from "@/lib/bidi-ui";
 import { FileIcon, FolderIcon, fileIconSrc } from "@/components/files/FileIcon";
 import { FolderPickerModal } from "@/components/files/FolderPickerModal";
 import { FileViewer, downloadViaDialog } from "@/components/files/FileViewer";
@@ -73,6 +75,15 @@ import {
   type ColumnKey, type FileRow, type FolderRow,
 } from "@/lib/file-columns";
 import { Modal } from "@/components/files/Modal";
+import { NewMenuButton, NewChoiceIcon, useNewChoices, type NewChoice } from "@/components/files/NewMenu";
+import { NewFileDialog } from "@/components/files/NewFileDialog";
+import { NEW_FILE_TYPES, blankFileBytes, nameTaken, nameTakenInFolder, type NewFileKind } from "@/lib/blank-files";
+import { canEditText } from "@/lib/text-edit";
+import { MoveConfirmModal } from "@/components/files/MoveConfirmModal";
+import {
+  DRAG_MOVE_TYPE, dragItems, itemCount, isMoveDrag, isOsFileDrag, isValidDropTarget, encodeMovePayload, decodeMovePayload,
+  type MovePayload,
+} from "@/lib/drag-move";
 import { isSimple, useMenuActions, useMenuState } from "@/lib/menu-bus";
 import {
   readDroppedEntries, orderedDirs, createFolderTree, resolveTargets,
@@ -82,6 +93,9 @@ import {
   collapseLiveTwins, twinsUnderStills, isLiveStill, isLiveTwin, liveTwinIds, twinDeleteEndpoint,
 } from "@/lib/live-photos";
 import { LiveBadge } from "@/components/files/LiveBadge";
+import { intlLocale } from "@/lib/locale-state";
+import { useDir, useLocale, useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
 
 interface FilesResponse {
   ok: boolean;
@@ -130,7 +144,31 @@ function loadSavedTileSize(): TileSize {
 const NO_FOLDERS: FolderRow[] = [];
 const NO_BREADCRUMBS: { id: string; name: string }[] = [];
 
+/** A folder row in the table while a drag-to-move hovers it. */
+const ROW_DROP_ACTIVE = "bg-[var(--color-primary)]/10 outline outline-2 -outline-offset-2 outline-[var(--color-primary)]";
+
+/** A breadcrumb segment while a drag-to-move hovers it. */
+const CRUMB_DROP_ACTIVE = "bg-[var(--color-primary)]/15 !text-[var(--color-primary)] ring-1 ring-[var(--color-primary)]";
+
+/**
+ * The inline position of a menu opened at the cursor, kept 224px (its width
+ * plus a margin) inside the window. In a right-to-left language the menu's
+ * right edge sits at the cursor and it opens leftward, clamped the same way.
+ */
+function atCursor(x: number, dir: "ltr" | "rtl"): { left: number } | { right: number } {
+  return dir === "rtl"
+    ? { right: Math.min(window.innerWidth - x, window.innerWidth - 224) } // rtl-ok: mirrored
+    : { left: Math.min(x, window.innerWidth - 224) }; // rtl-ok: mirrored
+}
+
+/** The six orders the sort menu offers as its own options. */
+const PRESET_SORTS: ReadonlySet<string> = new Set(["newest", "oldest", "name_asc", "name_desc", "largest", "smallest"]);
+
 export function FileBrowserPage() {
+  const ownDir = useAutoDir();
+  const t = useT();
+  const dir = useDir();
+  const { locale } = useLocale();
   const { active } = useWorkspace();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -179,7 +217,7 @@ export function FileBrowserPage() {
   const [photoSort, setPhotoSortState] = useState<LibrarySort>(loadSavedPhotoSort);
   const setPhotoSort = (s: LibrarySort) => { setPhotoSortState(s); localStorage.setItem(PHOTO_SORT_KEY, s); };
   const [tileSize, setTileSizeState] = useState<TileSize>(loadSavedTileSize);
-  const setTileSize = (t: TileSize) => { setTileSizeState(t); localStorage.setItem(PHOTO_TILE_KEY, t); };
+  const setTileSize = (size: TileSize) => { setTileSizeState(size); localStorage.setItem(PHOTO_TILE_KEY, size); };
 
   // Where an upload started from this page lands. The library spans every
   // folder and ignores the `folder` param (which filterNavParams keeps so
@@ -221,15 +259,28 @@ export function FileBrowserPage() {
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+  // Search lives in the URL (?q=). `searchInput` is the raw typed value; it is
+  // committed after a pause in typing (web parity, apps/web/src/pages/files.tsx),
+  // at once on Enter, and at once when the box is emptied - so clearing the
+  // search restores the full listing without having to press anything (QA
+  // TC-022: the filtered view used to stay until Enter was pressed on an empty
+  // box).
   const [searchInput, setSearchInput] = useState(search);
+  const debouncedSearch = useDebouncedValue(searchInput, 300);
   const [dragging, setDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
     item: { id: string; name: string; kind: "file" | "folder" };
   } | null>(null);
+  /** Right-click on empty space in the listing: the "New" menu. */
+  const [blankMenu, setBlankMenu] = useState<{ x: number; y: number } | null>(null);
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
+  /** The kind of blank file being named, while the New file dialog is open. */
+  const [newFileKind, setNewFileKind] = useState<NewFileKind | null>(null);
+  /** A file just created here, to scroll into view once the refreshed listing has it. */
+  const [revealId, setRevealId] = useState<string | null>(null);
   const [renameItem, setRenameItem] = useState<{ id: string; name: string; kind: "file" | "folder" } | null>(null);
   const [renameName, setRenameName] = useState("");
   const [moveTarget, setMoveTarget] = useState<{ id: string; name: string; kind: "file" | "folder" } | null>(null);
@@ -247,7 +298,9 @@ export function FileBrowserPage() {
 
   // Viewer + detail panel + modals (web parity)
   const [viewerFile, setViewerFile] = useState<FileRow | null>(null);
-  const [panel, setPanel] = useState<{ file: FileRow; tab: "info" | "comments" } | null>(null);
+  // `versions`: opened from "Version history", so the panel lists versions even
+  // for a file that has only one (it hides a lone version otherwise).
+  const [panel, setPanel] = useState<{ file: FileRow; tab: "info" | "comments"; versions?: boolean } | null>(null);
   const [shareTarget, setShareTarget] = useState<{ target: ShareTarget; name: string } | null>(null);
   const [lockTarget, setLockTarget] = useState<LockTarget | null>(null);
   const [hideTarget, setHideTarget] = useState<{ id: string; name: string; type: "file" | "folder" } | null>(null);
@@ -280,9 +333,11 @@ export function FileBrowserPage() {
   // Updated immutably so memo/callback dependents (selectableFiles,
   // openFileWithLockCheck) recompute after a file is unlocked.
   const [unlockedFiles, setUnlockedFiles] = useState(() => new Map<string, string>());
-  const [unlockPrompt, setUnlockPrompt] = useState<{ file: FileRow; action: "detail" | "view" } | null>(null);
+  const [unlockPrompt, setUnlockPrompt] = useState<{ file: FileRow; action: "detail" | "versions" | "view" } | null>(null);
   const [unlockPassword, setUnlockPassword] = useState("");
   const [unlockError, setUnlockError] = useState("");
+  // The server's own sentence takes its own direction; a translation follows the page.
+  const [unlockErrorRaw, setUnlockErrorRaw] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
 
   // Deep-link restore memory (see `restoreTarget` in @/lib/view-restore):
@@ -298,7 +353,7 @@ export function FileBrowserPage() {
   /** Open state of the collapsed-breadcrumb "…" menu. */
   const [crumbsOpen, setCrumbsOpen] = useState(false);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isPlaceholderData: listingIsPlaceholder } = useQuery({
     queryKey: ["files", active?.id, folderId, filter, sort, search, page, showDeleted, showHidden],
     queryFn: () => {
       const params = new URLSearchParams({
@@ -342,19 +397,51 @@ export function FileBrowserPage() {
     [setSearchParams, showDeleted],
   );
 
+  // The URL keeps the API's wire format ("newest", "comments_desc"); the
+  // column headers work with the parsed key + direction.
+  const sortSpec = parseSort(sort);
   const setSort = (s: string) => {
     const p = new URLSearchParams(searchParams);
     p.set("sort", s);
-    setSearchParams(p);
-  };
-
-  const doSearch = () => {
-    const p = new URLSearchParams(searchParams);
-    if (searchInput) p.set("q", searchInput);
-    else p.delete("q");
+    // A page number only means something within one ordering.
     p.delete("page");
     setSearchParams(p);
   };
+
+  // The last term this box itself wrote to the URL. Its own commit must not be
+  // mirrored back into the box, or a keystroke typed while that commit lands
+  // would be overwritten.
+  const committedSearch = useRef(search);
+  const commitSearch = (term: string) => {
+    const next = searchCommitParams(searchParams, term);
+    if (!next) return;
+    committedSearch.current = term;
+    setSearchParams(next, { replace: true });
+  };
+
+  // Back/forward, the sidebar and folder navigation can change ?q= without
+  // going through the box, so mirror those changes back into it.
+  useEffect(() => {
+    if (search === committedSearch.current) return;
+    committedSearch.current = search;
+    setSearchInput(search);
+  }, [search]);
+
+  useEffect(() => {
+    if (debouncedSearch !== search) commitSearch(debouncedSearch);
+    // Only a settled keystroke commits; `search` changing on its own (the
+    // mirror above) must not write the stale debounced value back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
+
+  // A search is in flight while the typed text has not been committed yet
+  // (the 300 ms pause) or while the list still shows the results of a
+  // previous term (placeholder data). `shownSearch` is the term the rows on
+  // screen belong to, so a sort or page change alone never spins the box.
+  const listingPlaceholder = isLibraryView ? library.isPlaceholder : listingIsPlaceholder;
+  const shownSearch = useRef(search);
+  if (!listingPlaceholder) shownSearch.current = search;
+  const searching = searchInput !== search || (listingPlaceholder && shownSearch.current !== search);
 
   const toggleSelect = (id: string) => {
     const file = allFiles.find((f) => f.id === id);
@@ -408,14 +495,14 @@ export function FileBrowserPage() {
         setFavourites((prev) => new Set(prev).add(fileId));
       }
     } catch {
-      toast.error("Something went wrong", { description: "Could not update favourites." });
+      toast.error(t("files.error.somethingWentWrong"), { description: t("files.error.couldNotUpdateFavourites") });
     }
   };
 
   // ── Open with lock gate (web parity) ───────────────────────
 
-  const openFileWithLockCheck = useCallback((file: FileRow, action: "detail" | "view") => {
-    if (showDeleted && action === "detail") {
+  const openFileWithLockCheck = useCallback((file: FileRow, action: "detail" | "versions" | "view") => {
+    if (showDeleted && action !== "view") {
       // Trash view is read-only for row activation: no detail panel means no
       // reachable "Delete file" button and no live Delete/Backspace shortcut
       // (both gated on `panel`, which now never gets set here). A plain
@@ -430,8 +517,8 @@ export function FileBrowserPage() {
       setUnlockError("");
       return;
     }
-    if (action === "detail") setPanel({ file, tab: "info" });
-    else setViewerFile(file);
+    if (action === "view") setViewerFile(file);
+    else setPanel({ file, tab: "info", versions: action === "versions" });
   }, [unlockedFiles, showDeleted]);
 
   const handleUnlockSubmit = async () => {
@@ -447,14 +534,14 @@ export function FileBrowserPage() {
         setUnlockedFiles((prev) => new Map(prev).set(unlockPrompt.file.id, res.unlock_token!));
         const { file, action } = unlockPrompt;
         setUnlockPrompt(null);
-        if (action === "detail") setPanel({ file, tab: "info" });
-        else setViewerFile(file);
+        if (action === "view") setViewerFile(file);
+        else setPanel({ file, tab: "info", versions: action === "versions" });
       } else {
-        setUnlockError(res.error ?? "Incorrect password");
+        setUnlockError(res.error ?? t("files.error.incorrectPassword")); setUnlockErrorRaw(res.error != null);
         setUnlockPassword("");
       }
     } catch (err) {
-      setUnlockError(err instanceof ApiError ? err.message : "Can't reach the server. Check your connection and try again.");
+      setUnlockError(err instanceof ApiError ? err.message : t("common.error.canTReachTheServerCheckYourConnectionAnd")); setUnlockErrorRaw(err instanceof ApiError);
       if (err instanceof ApiError) setUnlockPassword("");
     }
     setUnlocking(false);
@@ -475,7 +562,7 @@ export function FileBrowserPage() {
       // The field takes a path, so this is the path validator: 500 total, 100
       // per segment, single-segment character policy on each. Same function the
       // API runs, so the thrown message is the one it would have returned.
-      const problem = validateFolderPath(name);
+      const problem = folderPathError(name);
       if (problem) throw new Error(problem);
       return api.post("/api/folders", {
         workspace_id: active!.id,
@@ -487,30 +574,30 @@ export function FileBrowserPage() {
       refresh();
       setShowCreateFolder(false);
       setNewFolderName("");
-      toast.success("Folder created");
+      toast.success(t("common.label.folderCreated"));
     },
     // This mutation had no onError at all, so a refused create - a duplicate
     // name, no permission, and now an invalid one - closed nothing and said
     // nothing. Any Error carries a message worth showing, not just ApiError.
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Folder could not be created"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : e instanceof Error ? e.message : t("common.error.folderCouldNotBeCreated")),
   });
 
   const renameMut = useMutation({
     mutationFn: ({ id, name, kind }: { id: string; name: string; kind: string }) => {
       // Files cap at 255, folders at 100, both single-segment. Checked before
       // the request so a slash in the name fails instantly with the reason.
-      const problem = kind === "folder" ? validateFolderName(name) : validateFileName(name);
+      const problem = nameError(name, kind === "folder" ? "folder" : "file");
       if (problem) throw new Error(problem);
       return api.put(`/api/${kind === "folder" ? "folders" : "files"}/${id}/rename`, { name });
     },
     onSuccess: () => {
       refresh();
       setRenameItem(null);
-      toast.success("Renamed");
+      toast.success(t("files.label.renamed"));
     },
     // Widened from ApiError: a local policy refusal is a plain Error and its
     // message is the same sentence the API would have sent.
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Rename failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : e instanceof Error ? e.message : t("common.error.renameFailed")),
   });
 
   const moveMut = useMutation({
@@ -520,7 +607,7 @@ export function FileBrowserPage() {
       }
       return api.put(`/api/files/${id}/move`, { folder_id: targetId });
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Move failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.moveFailed")),
   });
 
   const copyMut = useMutation({
@@ -530,9 +617,9 @@ export function FileBrowserPage() {
       refresh();
       setCopyTarget(null);
       setPickerFolder(null);
-      toast.success("Copied successfully");
+      toast.success(t("files.label.copiedSuccessfully"));
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Copy failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.copyFailed")),
   });
 
   // Folder tree for picker modal
@@ -549,9 +636,9 @@ export function FileBrowserPage() {
     try {
       await window.electronAPI.openFile(fileId, fileName);
     } catch {
-      toast.error("Failed to open file");
+      toast.error(t("files.error.failedToOpenFile"));
     }
-  }, []);
+  }, [t]);
 
   // One of the two feeds, chosen here so nothing below has to know which.
   const allFolders = isLibraryView ? NO_FOLDERS : data?.folders ?? [];
@@ -599,7 +686,7 @@ export function FileBrowserPage() {
     ids: [f.id],
     names: [f.name],
     kinds: ["file" as const],
-    twin: isLiveStill(f) ? { id: f.live_video_id!, name: allFiles.find((x) => x.id === f.live_video_id)?.name ?? "its Live Photo video" } : null,
+    twin: isLiveStill(f) ? { id: f.live_video_id!, name: allFiles.find((x) => x.id === f.live_video_id)?.name ?? t("files.label.itsLivePhotoVideo") } : null,
     withTwin: true,
   });
 
@@ -637,6 +724,228 @@ export function FileBrowserPage() {
     () => (deleteConfirm?.bulk ? liveTwinIds(files, new Set(deleteConfirm.ids)) : []),
     [files, deleteConfirm],
   );
+
+  // ── Move (shared by Move to…, the bulk bar and drag-and-drop) ──
+
+  /**
+   * The one move runner. `bulk` keeps the two paths' own rules: a single item
+   * is one request whose refusal moveMut has already toasted (returns false,
+   * so the picker can stay open for another choice), while a bulk move tries
+   * every item, lets a refused one fail on its own toast, reports the count
+   * the user picked and clears the selection. Either way a Live Photo still
+   * takes its twin video along - looked up from the full listing, since the
+   * twin's own row may be paged, filtered or collapsed under the still.
+   */
+  const runMove = async ({ fileIds, folderIds, targetId, bulk }: {
+    fileIds: string[]; folderIds: string[]; targetId: string | null; bulk: boolean;
+  }): Promise<boolean> => {
+    if (!bulk) {
+      const kind: "file" | "folder" = fileIds.length > 0 ? "file" : "folder";
+      const id = kind === "file" ? fileIds[0] : folderIds[0];
+      if (!id) return false;
+      // moveMut's onError already toasted the reason ("File is already in
+      // this folder"); a rethrow here escaped as an unhandled rejection
+      // (Sentry dosya-desktop 154628913).
+      try {
+        await moveMut.mutateAsync({ id, kind, targetId });
+      } catch {
+        return false;
+      }
+      if (kind === "file") {
+        const still = allFiles.find((f) => f.id === id);
+        if (still && isLiveStill(still)) {
+          // The still already moved; a twin refusal is toasted by onError.
+          try { await moveMut.mutateAsync({ id: still.live_video_id!, kind: "file", targetId }); } catch {}
+        }
+      }
+      toast.success(t("files.status.movedSuccessfully"));
+    } else {
+      // The twins are appended rather than counted: the toast reports the
+      // selection the user made, not the rows the request touched.
+      const twinIds = liveTwinIds(files, new Set(fileIds));
+      for (const id of [...fileIds, ...twinIds]) {
+        try { await moveMut.mutateAsync({ id, kind: "file", targetId }); } catch {}
+      }
+      for (const id of folderIds) {
+        try { await moveMut.mutateAsync({ id, kind: "folder", targetId }); } catch {}
+      }
+      toast.success(t("files.status.moved"), { description: t("files.description.movedItemCount", { count: String(fileIds.length + folderIds.length) }) });
+      clearSelection();
+    }
+    refresh();
+    return true;
+  };
+
+  // Drag-to-move. Only the folder listing takes part: the trash, the Hidden
+  // view and the library have no folder to move into (and their rows stay
+  // undraggable). Moving needs the same permissions as the Move to… entries.
+  const canDragMove = !showDeleted && !showHidden && !isLibraryView;
+  // New folder / file: the same three views have no folder to create in (the
+  // trash and the Hidden view would not even show what was made).
+  const canCreateHere = !showDeleted && !showHidden && !isLibraryView;
+  const newChoices = useNewChoices(canCreateHere && can("create_folders"), canCreateHere && can("upload_files"));
+  /**
+   * The drag in flight. Kept in a ref as well as the dataTransfer because a
+   * dragover may only read the types, never the data - and the targets need
+   * the dragged ids to know whether they are valid.
+   */
+  const moveDragRef = useRef<{ payload: MovePayload; fromSelection: boolean } | null>(null);
+  /** The highlighted target: a folder id, "" for the workspace root, null for none. */
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  /** Folder that files dragged in from the computer will upload into, while one is hovered. */
+  const [uploadHover, setUploadHover] = useState<{ key: string; name: string } | null>(null);
+  /** OS files can be dropped onto a folder (or crumb) to upload straight into it. */
+  const canUploadInto = canDragMove && can("upload_files");
+  /** The collapsed crumb menu opened by hovering "…" mid-drag (no click-catcher, closes with the drag). */
+  const [crumbsDragOpen, setCrumbsDragOpen] = useState(false);
+  const [moveConfirm, setMoveConfirm] = useState<{
+    payload: MovePayload; fromSelection: boolean; targetId: string | null; folderName: string;
+  } | null>(null);
+  const [moveConfirmPending, setMoveConfirmPending] = useState(false);
+
+  const canDragItem = (item: { id: string; kind: "file" | "folder" }) => {
+    if (!canDragMove) return false;
+    const inSelection = item.kind === "file" ? selected.has(item.id) : selectedFolders.has(item.id);
+    // The bulk bar's Move gate for a selection, the context menu's per kind otherwise.
+    if (inSelection) return can("upload_files") || can("rename_folders");
+    return item.kind === "file" ? can("upload_files") : can("rename_folders");
+  };
+
+  const endMoveDrag = () => {
+    moveDragRef.current = null;
+    setDropTarget(null);
+    setCrumbsDragOpen(false);
+  };
+
+  /** Props that make a row or tile a drag source. */
+  const dragSourceProps = (item: { id: string; name: string; kind: "file" | "folder" }) => {
+    if (!canDragItem(item)) return { draggable: false };
+    return {
+      draggable: true,
+      onDragStart: (e: React.DragEvent) => {
+        const { fileIds, folderIds, fromSelection } = dragItems(item, selected, selectedFolders);
+        const payload: MovePayload = { fileIds, folderIds, name: item.name };
+        moveDragRef.current = { payload, fromSelection };
+        // A drag that starts on a thumbnail would otherwise also carry the
+        // image (and could be dropped on the OS desktop as a file).
+        e.dataTransfer.clearData();
+        e.dataTransfer.setData(DRAG_MOVE_TYPE, encodeMovePayload(payload));
+        e.dataTransfer.effectAllowed = "move";
+        setContextMenu(null);
+        const count = itemCount(payload);
+        if (count > 1) {
+          const ghost = document.createElement("div");
+          ghost.textContent = t("common.label.item", { count });
+          Object.assign(ghost.style, {
+            // rtl-ok: pointer coordinates, parked off screen for the drag image
+            position: "fixed", top: "-1000px", left: "-1000px",
+            padding: "4px 10px", borderRadius: "8px",
+            background: "var(--color-primary)", color: "var(--color-primary-fg, #fff)",
+            font: "500 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            whiteSpace: "nowrap", pointerEvents: "none",
+          });
+          document.body.appendChild(ghost);
+          e.dataTransfer.setDragImage(ghost, 0, 0);
+          // The browser snapshots the image during dragstart.
+          setTimeout(() => ghost.remove(), 0);
+        }
+      },
+      onDragEnd: endMoveDrag,
+    };
+  };
+
+  /**
+   * Props that make a folder row/tile or a breadcrumb a move target. Drags from
+   * the OS pass straight through to the page's upload drop zone; an in-app
+   * drag stops here, highlighted only where the move would do something.
+   */
+  const dropTargetProps = (targetId: string | null, folderName: string) => {
+    if (!canDragMove) return {};
+    const key = targetId ?? "";
+    const valid = () => !!moveDragRef.current && isValidDropTarget(targetId, moveDragRef.current.payload, folderId);
+    // Files from the computer: a folder other than the open one takes them
+    // straight in. The open folder's own crumb is left to the page's drop zone,
+    // which already uploads there. dragover is not stopped, so the page keeps
+    // its upload overlay; the drop is, so the page does not upload twice.
+    const uploadsHere = canUploadInto && (targetId ?? null) !== (uploadFolderId || null);
+    const hoverUpload = (e: React.DragEvent) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      setDropTarget(key);
+      setUploadHover((cur) => (cur?.key === key ? cur : { key, name: folderName }));
+    };
+    return {
+      onDragEnter: (e: React.DragEvent) => {
+        if (isOsFileDrag(e.dataTransfer.types)) { if (uploadsHere) hoverUpload(e); return; }
+        if (!isMoveDrag(e.dataTransfer.types)) return;
+        e.stopPropagation();
+        if (valid()) { e.preventDefault(); setDropTarget(key); }
+      },
+      onDragOver: (e: React.DragEvent) => {
+        if (isOsFileDrag(e.dataTransfer.types)) { if (uploadsHere) hoverUpload(e); return; }
+        if (!isMoveDrag(e.dataTransfer.types)) return;
+        e.stopPropagation();
+        if (!valid()) { e.dataTransfer.dropEffect = "none"; return; }
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        // Re-asserted on every dragover, so a leave fired by a child (or out
+        // of order with the next enter) never leaves the target dark.
+        setDropTarget(key);
+      },
+      onDragLeave: (e: React.DragEvent) => {
+        const osFiles = isOsFileDrag(e.dataTransfer.types);
+        if (!osFiles && !isMoveDrag(e.dataTransfer.types)) return;
+        if (!osFiles) e.stopPropagation();
+        const to = e.relatedTarget as Node | null;
+        if (to && e.currentTarget.contains(to)) return;
+        setDropTarget((cur) => (cur === key ? null : cur));
+        if (osFiles) setUploadHover((cur) => (cur?.key === key ? null : cur));
+      },
+      onDrop: (e: React.DragEvent) => {
+        if (isOsFileDrag(e.dataTransfer.types)) {
+          if (!uploadsHere) return; // the page's drop zone uploads to the open folder
+          e.preventDefault();
+          e.stopPropagation();
+          setDragging(false);
+          setDropTarget(null);
+          setUploadHover(null);
+          uploadDropped(e.dataTransfer, targetId ?? null);
+          return;
+        }
+        if (!isMoveDrag(e.dataTransfer.types)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const drag = moveDragRef.current;
+        const payload = decodeMovePayload(e.dataTransfer.getData(DRAG_MOVE_TYPE)) ?? drag?.payload ?? null;
+        endMoveDrag();
+        if (!payload || !isValidDropTarget(targetId, payload, folderId)) return;
+        setMoveConfirm({ payload, fromSelection: drag?.fromSelection ?? false, targetId, folderName });
+      },
+    };
+  };
+
+  const confirmDragMove = async () => {
+    if (!moveConfirm || moveConfirmPending) return;
+    const { payload, fromSelection, targetId } = moveConfirm;
+    setMoveConfirmPending(true);
+    try {
+      await runMove({ fileIds: payload.fileIds, folderIds: payload.folderIds, targetId, bulk: itemCount(payload) > 1 });
+      if (fromSelection) clearSelection();
+    } finally {
+      setMoveConfirmPending(false);
+      setMoveConfirm(null);
+    }
+  };
+
+  /** Names for the confirm's list, looked up from the listing (ids it no longer shows are skipped). */
+  const moveConfirmNames = moveConfirm
+    ? itemCount(moveConfirm.payload) === 1
+      ? [moveConfirm.payload.name]
+      : [
+        ...moveConfirm.payload.folderIds.map((id) => allFolders.find((f) => f.id === id)?.name),
+        ...moveConfirm.payload.fileIds.map((id) => allFiles.find((f) => f.id === id)?.name),
+      ].filter((n): n is string => !!n)
+    : [];
 
   // Selection is per-view. The folder listing clears it on navigation
   // (navigateToFolder), but the library has no folder to navigate into: it
@@ -724,6 +1033,9 @@ export function FileBrowserPage() {
       if (viewerFile) { next.set("view", viewerFile.id); next.delete("panel"); }
       else if (panel) { next.set("panel", panel.file.id); next.delete("view"); }
       else { next.delete("view"); next.delete("panel"); }
+      // `versions=1` rides along only while the panel it opened is the one shown.
+      if (panel?.versions && !viewerFile) next.set("versions", "1");
+      else next.delete("versions");
       return next.toString() === prev.toString() ? prev : next;
     }, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -734,14 +1046,18 @@ export function FileBrowserPage() {
   // Takes an explicit folder per file rather than reading `folderId` for all of
   // them: a dropped folder tree lands across many folders in one batch.
   const uploadFiles = useCallback(async (targets: { file: File; folderId: string | null }[]) => {
-    if (!active?.id) return { uploaded: 0, failed: 0 };
+    // fileIds/errors: what New > file needs - the id to open or select, and
+    // the server's sentence when it refused.
+    const fileIds: string[] = [];
+    const errors: string[] = [];
+    if (!active?.id) return { uploaded: 0, failed: 0, fileIds, errors };
     let uploaded = 0;
     let failed = 0;
     for (const { file, folderId: target } of targets) {
       try {
         // Single PUT under 50 MB, resumable parts above - the edge refuses
         // any one request body over 100 MB, so a big file must be split.
-        await uploadFileInParts(
+        const out = await uploadFileInParts(
           {
             file, fileName: file.name, mimeType: file.type,
             workspaceId: active.id, folderId: target,
@@ -751,14 +1067,16 @@ export function FileBrowserPage() {
           uploadTransport,
         );
         uploaded++;
+        if (out.fileId) fileIds.push(out.fileId);
       } catch (err) {
         // Page unmounted (logout/navigation) mid-upload - stop silently,
         // don't count the aborted-and-unattempted rest as failures.
         if (isUploadCancelled(err) || (err as { name?: string })?.name === "AbortError") break;
         failed++;
+        if (err instanceof Error && err.message) errors.push(err.message);
       }
     }
-    return { uploaded, failed };
+    return { uploaded, failed, fileIds, errors };
   }, [active?.id]);
 
   /** Find-or-create one folder; the server reuses an existing row by name. */
@@ -766,24 +1084,116 @@ export function FileBrowserPage() {
     const res = await api.post<{ ok: boolean; folder?: { id: string }; error?: string }>("/api/folders", {
       workspace_id: active?.id, parent_id: parentId, name,
     });
-    if (!res.ok || !res.folder?.id) throw new Error(res.error ?? "Could not create folder");
+    if (!res.ok || !res.folder?.id) throw new Error(res.error ?? t("common.error.couldNotCreateFolder"));
     return res.folder.id;
-  }, [active?.id]);
+  }, [active?.id, t]);
 
-  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); if (!showDeleted) setDragging(true); };
-  const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); if (e.currentTarget === e.target) setDragging(false); };
+  // ── New (toolbar dropdown + right-click on empty space) ─────
+
+  const pickNew = (choice: NewChoice) => {
+    setBlankMenu(null);
+    if (choice === "folder") setShowCreateFolder(true);
+    else setNewFileKind(choice);
+  };
+
+  /** Right-click on the listing's empty space. Rows and tiles open their own menu first. */
+  const openBlankMenu = (e: React.MouseEvent) => {
+    if (e.isDefaultPrevented() || newChoices.length === 0) return;
+    e.preventDefault();
+    setContextMenu(null);
+    setBlankMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  /**
+   * Creates a blank file in the open folder. Answers with a sentence for the
+   * dialog to show (the name is taken), "" to stay open after a toast (the
+   * upload failed), or null once the file exists.
+   *
+   * The upload API turns a same-name upload into a new version of the file
+   * already there, so a taken name never reaches it: the loaded rows are
+   * checked first, then the API, for rows this page does not have.
+   */
+  const createBlankFile = async (kind: NewFileKind, name: string): Promise<string | null> => {
+    if (!active?.id) return t("files.error.fileCouldNotBeCreated");
+    const target = uploadFolderId || null;
+    const taken = t("files.error.aFileWithThisNameAlreadyExists");
+    if (nameTaken(name, [...allFiles, ...allFolders])) return taken;
+    try {
+      if (await nameTakenInFolder(api.get, active.id, target, name)) return taken;
+    } catch (err) {
+      return err instanceof Error && err.message ? err.message : t("files.error.fileCouldNotBeCreated");
+    }
+    const file = new File([blankFileBytes(kind)], name, { type: NEW_FILE_TYPES[kind].mime });
+    const { uploaded, fileIds, errors } = await uploadFiles([{ file, folderId: target }]);
+    if (!pageAliveRef.current) return null;
+    if (uploaded === 0) {
+      // Nothing failed either: the upload was cancelled because the page is going away.
+      if (errors.length === 0) return null;
+      toast.error(t("files.error.fileCouldNotBeCreated"), { description: errors[0] });
+      return "";
+    }
+    toast.success(t("files.status.createdName", { name }));
+    refresh();
+    const id = fileIds[0];
+    if (id && kind === "word") {
+      // Same route as "Open in editor".
+      navigate(`/editor/${id}`);
+    } else if (id) {
+      // Markdown and text open in the text editor, like Word opens in its
+      // own. `back` lets its close return here instead of to the folder root.
+      navigate(`/text-editor/${id}`, { state: { back: true } });
+    }
+    return null;
+  };
+
+  // The empty-space menu holds no focus, so Escape is heard on the document.
+  useEffect(() => {
+    if (!blankMenu) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setBlankMenu(null); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [blankMenu]);
+
+  // Scroll a just-created file into view once the refreshed listing renders it.
+  useEffect(() => {
+    if (!revealId) return;
+    const el = document.getElementById(`file-${revealId}`);
+    if (!el) return;
+    el.scrollIntoView?.({ block: "nearest" });
+    setRevealId(null);
+  }, [revealId, allFiles]);
+
+  // An in-app move drag (rows and tiles carry DRAG_MOVE_TYPE) is not an
+  // upload: the zone neither shows its overlay nor accepts the drop, so
+  // releasing one anywhere but a move target does nothing.
+  const handleDragOver = (e: React.DragEvent) => { if (isMoveDrag(e.dataTransfer.types)) return; e.preventDefault(); e.stopPropagation(); if (!showDeleted) setDragging(true); };
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (isMoveDrag(e.dataTransfer.types)) return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.currentTarget === e.target) { setDragging(false); setDropTarget(null); setUploadHover(null); }
+  };
   // Not `async`, and it must stay that way: readDroppedEntries reads
   // dataTransfer.items - the only API that can see inside a dropped folder -
   // before its own first await, and that list is dead once this handler
   // returns. Passing dataTransfer.files instead (as this used to) handed the
   // uploader an unreadable directory handle for the folder itself.
   const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault(); e.stopPropagation(); setDragging(false);
-    if (showDeleted || !active?.id) return;
+    if (isMoveDrag(e.dataTransfer.types)) { e.preventDefault(); endMoveDrag(); return; }
+    e.preventDefault(); e.stopPropagation(); setDragging(false); setDropTarget(null); setUploadHover(null);
     // "" is the URL's spelling of the workspace root; the API and the folder plan speak null.
-    const root = uploadFolderId || null;
+    uploadDropped(e.dataTransfer, uploadFolderId || null);
+  };
 
-    void readDroppedEntries(e.dataTransfer).then(async (tree) => {
+  /**
+   * Uploads what was dropped into `root` (null = workspace root): the open
+   * folder from the page's drop zone, or a folder row / tile / crumb the files
+   * were released on. Must be called synchronously from the drop handler -
+   * see readDroppedEntries above.
+   */
+  const uploadDropped = (dataTransfer: DataTransfer, root: string | null) => {
+    if (showDeleted || !active?.id) return;
+
+    void readDroppedEntries(dataTransfer).then(async (tree) => {
       if (tree.entries.length === 0 && tree.dirs.length === 0) return;
 
       // Screen before a single folder is created. The tree recreation below is
@@ -794,7 +1204,7 @@ export function FileBrowserPage() {
         if (!pageAliveRef.current) return;
         const rejected: { name: string; reason: string }[] = [];
         const accepted = tree.entries.filter((entry) => {
-          const reason = checkUploadFile(
+          const reason = uploadFileError(
             { name: entry.file.name, size: entry.file.size }, limits,
           );
           if (reason) { rejected.push({ name: entry.file.name, reason }); return false; }
@@ -803,9 +1213,11 @@ export function FileBrowserPage() {
         if (rejected.length > 0) {
           toast.error(
             accepted.length > 0
-              ? `${rejected.length} file${rejected.length === 1 ? "" : "s"} left out`
-              : "Nothing could be uploaded",
-            { description: summariseRejections(rejected) },
+              ? t("files.label.fileLeftOut", { rejectedCount: rejected.length })
+              : t("files.label.nothingCouldBeUploaded"),
+            // One file: its name isolated, the reason (a translation)
+            // following the page. Otherwise the translated summary as is.
+            { description: rejected.length === 1 ? namedLine(rejected[0].name, rejected[0].reason) : rejectionsSummary(rejected) },
           );
         }
         if (accepted.length === 0) return;
@@ -813,8 +1225,8 @@ export function FileBrowserPage() {
           accepted.reduce((n, entry) => n + entry.file.size, 0), limits,
         );
         if (!fit.fits) {
-          toast.warning("This may not all fit", {
-            description: "This upload is larger than the space left in this workspace. Some files may be refused.",
+          toast.warning(t("files.label.thisMayNotAllFit"), {
+            description: t("files.error.thisUploadIsLargerThanTheSpaceLeftIn"),
           });
         }
         tree = { ...tree, entries: accepted };
@@ -825,14 +1237,14 @@ export function FileBrowserPage() {
         const dirs = orderedDirs(tree);
         // Recreating a deep tree is a round trip per folder - say so up front,
         // or the drop looks dead until the first file finishes.
-        toast.info("Uploading folder", {
-          description: `Recreating ${dirs.length} folder${dirs.length === 1 ? "" : "s"}, then uploading ${tree.entries.length} file${tree.entries.length === 1 ? "" : "s"}.`,
+        toast.info(t("common.label.uploadingFolder"), {
+          description: t("common.description.recreatingFolderThenUploadingFile", { dirCount: dirs.length, entryCount: tree.entries.length }),
         });
         plan = await createFolderTree(dirs, root, createFolder);
         if (!pageAliveRef.current) return;
         if (plan.failed.length > 0) {
-          toast.error("Some folders could not be created", {
-            description: `${plan.failed.length} folder${plan.failed.length === 1 ? "" : "s"} failed. ${plan.error ?? ""}`.trim(),
+          toast.error(t("common.error.someFoldersCouldNotBeCreated"), {
+            description: t("common.error.folderFailedError", { failedCount: plan.failed.length, error: plan.error ?? "" }).trim(),
           });
         }
         // Folders exist before their files finish, so show them now.
@@ -841,18 +1253,20 @@ export function FileBrowserPage() {
 
       const { targets, skipped } = resolveTargets(tree.entries, plan, root);
       if (skipped > 0 && pageAliveRef.current) {
-        toast.error("Some files were skipped", {
-          description: `${skipped} file${skipped === 1 ? "" : "s"} had no folder to go in.`,
+        toast.error(t("common.label.someFilesWereSkipped"), {
+          description: t("common.description.fileHadNoFolderToGoIn", { skipped }),
         });
       }
       if (tree.skipped > 0 && pageAliveRef.current) {
-        toast.error("Too many files in one go", {
-          description: `Only the first ${MAX_DROPPED_FILES.toLocaleString()} files were uploaded - ${tree.skipped} left out.`,
+        toast.error(t("common.error.tooManyFilesInOneGo"), {
+          description: t("files.description.onlyTheFirstMaxDroppedFilesFilesWereUploadedSkippedLeft", {
+            maxDroppedFiles: MAX_DROPPED_FILES.toLocaleString(intlLocale()), skipped: String(tree.skipped),
+          }),
         });
       }
       if (targets.length === 0) {
         if (tree.hadDirectory && plan.ids.size > 0 && pageAliveRef.current) {
-          toast.success("Folder created", { description: "There were no files inside to upload." });
+          toast.success(t("common.label.folderCreated"), { description: t("common.description.thereWereNoFilesInsideToUpload") });
         }
         return;
       }
@@ -860,11 +1274,11 @@ export function FileBrowserPage() {
       const { uploaded, failed } = await uploadFiles(targets);
       if (!pageAliveRef.current) return; // page (or session) is gone - no toasts
       if (uploaded > 0) {
-        toast.success("Uploaded", { description: `${uploaded} file${uploaded > 1 ? "s" : ""} uploaded` });
+        toast.success(t("common.status.uploaded"), { description: t("files.message.fileUploaded", { count: uploaded }) });
         refresh();
       }
       if (failed > 0) {
-        toast.error("Some uploads failed", { description: `${failed} file${failed > 1 ? "s" : ""} could not be uploaded` });
+        toast.error(t("files.error.someUploadsFailed"), { description: t("files.error.fileCouldNotBeUploaded", { count: failed }) });
       }
     });
   };
@@ -884,12 +1298,12 @@ export function FileBrowserPage() {
         uploadTransport,
       );
       if (!pageAliveRef.current) return;
-      toast.success("Version uploaded", { description: "The file now points to your new version." });
+      toast.success(t("files.label.versionUploaded"), { description: t("files.description.theFileNowPointsToYourNewVersion") });
       refresh();
     } catch (err) {
       if (!pageAliveRef.current || isUploadCancelled(err)) return;
-      const why = err instanceof Error && err.message ? err.message : "The new version could not be uploaded.";
-      toast.error("Upload failed", { description: why });
+      const why = err instanceof ApiError && err.message ? autoDir(err.message) : err instanceof Error && err.message ? err.message : t("files.error.theNewVersionCouldNotBeUploaded");
+      toast.error(t("common.error.uploadFailed"), { description: why });
     }
   };
 
@@ -936,10 +1350,10 @@ export function FileBrowserPage() {
         void (async () => {
           try {
             const r = await window.electronAPI.downloadArchive(Array.from(selected), Array.from(selectedFolders));
-            if (r.ok) toast.success("Downloaded", { description: `Saved to ${r.path ?? "disk"}` });
-            else if (!r.canceled) toast.error("Download failed");
+            if (r.ok) toast.success(t("common.status.downloaded"), { description: r.path ? t("common.description.savedToPath", { path: r.path }) : t("common.description.savedToDisk") });
+            else if (!r.canceled) toast.error(t("common.error.downloadFailed"));
           } catch (e: any) {
-            toast.error(e instanceof ApiError ? e.message : "Failed");
+            toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed"));
           }
         })();
         return true;
@@ -952,12 +1366,12 @@ export function FileBrowserPage() {
         const folderIds = Array.from(selectedFolders);
         if (fileIds.length === 1 && folderIds.length === 0) {
           const file = allFiles.find((f) => f.id === fileIds[0]);
-          setShareTarget({ target: { kind: "file", fileIds: [fileIds[0]] }, name: file?.name ?? "file" });
+          setShareTarget({ target: { kind: "file", fileIds: [fileIds[0]] }, name: file?.name ?? t("files.label.file") });
         } else if (folderIds.length === 1 && fileIds.length === 0) {
           const folder = allFolders.find((f) => f.id === folderIds[0]);
-          setShareTarget({ target: { kind: "folder", folderId: folderIds[0] }, name: folder?.name ?? "folder" });
+          setShareTarget({ target: { kind: "folder", folderId: folderIds[0] }, name: folder?.name ?? t("files.label.folder") });
         } else if (fileIds.length + folderIds.length > 0) {
-          toast.error("Select one file or one folder to share");
+          toast.error(t("files.label.selectOneFileOrOneFolderToShare"));
         }
         return true;
       }
@@ -1010,8 +1424,8 @@ export function FileBrowserPage() {
     for (const id of selectedFolders) {
       try { await api.put(`/api/folders/${id}`); ok++; } catch { fail++; }
     }
-    if (fail === 0) toast.success("Restored", { description: `${ok} item${ok === 1 ? "" : "s"} restored` });
-    else toast.error("Some items could not be restored", { description: `${ok} restored, ${fail} failed` });
+    if (fail === 0) toast.success(t("files.status.restored"), { description: t("files.description.itemRestored", { ok }) });
+    else toast.error(t("files.error.someItemsCouldNotBeRestored"), { description: t("files.error.okRestoredFailFailed", { ok: String(ok), fail: String(fail) }) });
     clearSelection();
     refresh();
   };
@@ -1054,10 +1468,10 @@ export function FileBrowserPage() {
   const restoreItem = async (id: string, kind: "file" | "folder") => {
     try {
       await api.put(kind === "folder" ? `/api/folders/${id}` : `/api/files/${id}`);
-      toast.success("Restored");
+      toast.success(t("files.status.restored"));
       refresh();
     } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Restore failed");
+      toast.error(e instanceof ApiError ? autoDir(e.message) : t("files.error.restoreFailed"));
     }
   };
 
@@ -1096,8 +1510,10 @@ export function FileBrowserPage() {
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-[var(--color-primary)] bg-[var(--color-primary)]/5">
           <div className="flex flex-col items-center gap-2 text-[var(--color-primary)]">
             <Upload size={40} />
-            <p className="text-sm font-semibold">Drop files or folders to upload</p>
-            <p className="text-xs opacity-70">{uploadFolderId ? `to ${breadcrumbs.at(-1)?.name ?? "folder"}` : "to root folder"}</p>
+            <p className="text-sm font-semibold">{t("files.label.dropFilesOrFoldersToUpload")}</p>
+            <p className="text-xs opacity-70">{uploadHover
+              ? t("files.description.toValueName", { valueName: uploadHover.name })
+              : uploadFolderId ? t("files.description.toValueName", { valueName: breadcrumbs.at(-1)?.name ?? t("files.label.folder") }) : t("files.label.toRootFolder")}</p>
           </div>
         </div>
       )}
@@ -1118,18 +1534,19 @@ export function FileBrowserPage() {
           {libraryKind ? (
             <div className="flex min-w-0 items-center gap-2.5 text-sm">
               <LibraryIcon size={16} className="shrink-0" />
-              <span className="font-semibold">{KIND_COPY[libraryKind].title}</span>
+              <span className="font-semibold">{t(KIND_COPY[libraryKind].title)}</span>
               <span className="truncate whitespace-nowrap text-xs tabular-nums text-[var(--color-text-muted)]">
-                {library.isLoading ? "Loading…" : `${plural(libraryKind, library.total)} · all folders`}
+                {library.isLoading ? t("common.status.loading") : t("files.status.photoAllFolders", { count: library.total, kind: libraryKind })}
               </span>
             </div>
           ) : (
           <div className="flex min-w-0 items-center gap-1 text-sm">
             <button
               onClick={() => setSearchParams({})}
-              className="shrink-0 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              {...dropTargetProps(null, t("common.label.files"))}
+              className={`-mx-1 shrink-0 rounded px-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] ${dropTarget === "" ? CRUMB_DROP_ACTIVE : ""}`}
             >
-              Files
+              {t("common.label.files")}
             </button>
 
             {/* Past a few levels the middle of the trail collapses behind a "…"
@@ -1138,28 +1555,39 @@ export function FileBrowserPage() {
                 every level equally hides both. */}
             {hiddenCrumbs.length > 0 && (
               <span className="relative flex shrink-0 items-center gap-1">
-                <ChevronRight size={14} className="text-[var(--color-text-muted)]" />
+                <ChevronRight size={14} className="text-[var(--color-text-muted)] rtl:-scale-x-100" />
                 <button
                   onClick={() => setCrumbsOpen((v) => !v)}
+                  // Mid-drag, hovering "…" springs the hidden ancestors open
+                  // so they can take the drop too.
+                  onDragEnter={(e) => {
+                    if (!canDragMove || !moveDragRef.current || !isMoveDrag(e.dataTransfer.types)) return;
+                    e.stopPropagation();
+                    setCrumbsDragOpen(true);
+                  }}
                   title={hiddenCrumbs.map((c) => c.name).join(" / ")}
-                  aria-label={`Show ${hiddenCrumbs.length} hidden folder${hiddenCrumbs.length === 1 ? "" : "s"}`}
+                  aria-label={t("files.accessibility.showHiddenFolder", { hiddenCrumbCount: hiddenCrumbs.length })}
                   aria-expanded={crumbsOpen}
                   className="rounded px-1 leading-none text-[var(--color-text-muted)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text)]"
                 >
                   …
                 </button>
-                {crumbsOpen && (
+                {(crumbsOpen || crumbsDragOpen) && (
                   <>
-                    <div className="fixed inset-0 z-40" onClick={() => setCrumbsOpen(false)} />
+                    {/* The click-catcher only for a click-opened menu: during a
+                        drag it would sit over every row and tile target. */}
+                    {crumbsOpen && <div className="fixed inset-0 z-40" onClick={() => setCrumbsOpen(false)} />}
                     <div
-                      className="absolute left-4 top-6 z-50 max-h-64 w-56 overflow-y-auto rounded-lg border py-1 shadow-lg"
+                      className="absolute inset-s-4 top-6 z-50 max-h-64 w-56 overflow-y-auto rounded-lg border py-1 shadow-lg"
                       style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
                     >
                       {hiddenCrumbs.map((c) => (
                         <button
                           key={c.id}
                           onClick={() => { setCrumbsOpen(false); navigateToFolder(c.id); }}
-                          className="block w-full truncate px-3 py-1.5 text-left text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)]"
+                          {...dropTargetProps(c.id, c.name)}
+                          dir={ownDir}
+                          className={`block w-full truncate px-3 py-1.5 text-start text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text)] ${dropTarget === c.id ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] outline outline-1 -outline-offset-1 outline-[var(--color-primary)]" : ""}`}
                           title={c.name}
                         >
                           {c.name}
@@ -1173,15 +1601,17 @@ export function FileBrowserPage() {
 
             {shownCrumbs.map((bc, i) => (
               <span key={bc.id} className="flex min-w-0 items-center gap-1">
-                <ChevronRight size={14} className="shrink-0 text-[var(--color-text-muted)]" />
+                <ChevronRight size={14} className="shrink-0 text-[var(--color-text-muted)] rtl:-scale-x-100" />
                 <button
                   onClick={() => navigateToFolder(bc.id)}
+                  {...dropTargetProps(bc.id, bc.name)}
                   title={bc.name}
+                  dir={ownDir}
                   // The folder you are in keeps the most room; its ancestors
                   // give way first, which is the order you can afford to lose.
-                  className={`truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text)] ${
+                  className={`-mx-1 truncate rounded px-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] ${
                     i === shownCrumbs.length - 1 ? "max-w-[22rem] font-medium text-[var(--color-text)]" : "max-w-[10rem]"
-                  }`}
+                  } ${dropTarget === bc.id ? CRUMB_DROP_ACTIVE : ""}`}
                 >
                   {bc.name}
                 </button>
@@ -1197,20 +1627,39 @@ export function FileBrowserPage() {
         <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Search */}
           <div className="relative">
-            <Search
-              size={14}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
-            />
+            {/* The magnifier turns into a spinner from the first keystroke
+                until the results for that text are on screen: the typing
+                pause plus the request, which otherwise looked like nothing
+                was happening. */}
+            {searching ? (
+              <Loader2
+                size={14}
+                aria-hidden
+                data-testid="files-search-spinner"
+                className="absolute inset-s-2.5 top-1/2 -translate-y-1/2 animate-spin text-[var(--color-primary)]"
+              />
+            ) : (
+              <Search
+                size={14}
+                className="absolute inset-s-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]"
+              />
+            )}
             <input
               type="text"
               value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && doSearch()}
-              placeholder={libraryKind ? KIND_COPY[libraryKind].searchPlaceholder : "Search files..."}
+              onChange={(e) => {
+                setSearchInput(e.target.value);
+                // Emptying the box restores the full listing at once rather
+                // than after the typing pause.
+                if (e.target.value === "") commitSearch("");
+              }}
+              onKeyDown={(e) => e.key === "Enter" && commitSearch(searchInput)}
+              aria-busy={searching}
+              placeholder={libraryKind ? t(KIND_COPY[libraryKind].searchPlaceholder) : t("files.placeholder.searchFiles")}
               // Was a hard 200px, which is a lot to spend on one control in a
               // 700px window. It now gives way down to 120 before anything
               // else in the row has to.
-              className="w-[200px] min-w-[120px] max-w-full rounded-lg border py-1.5 pl-8 pr-3 text-sm outline-none focus:border-[var(--color-primary)]"
+              className="w-[200px] min-w-[120px] max-w-full rounded-lg border py-1.5 ps-8 pe-3 text-sm outline-none focus:border-[var(--color-primary)]"
               style={{ borderColor: "var(--color-border)" }}
             />
           </div>
@@ -1222,7 +1671,7 @@ export function FileBrowserPage() {
             <select
               value={photoSort}
               onChange={(e) => setPhotoSort(e.target.value as LibrarySort)}
-              aria-label={`Sort ${KIND_COPY[libraryKind].nounPlural}`}
+              aria-label={t("files.accessibility.sortPhotos", { kind: libraryKind })}
               className="rounded-lg border px-2.5 py-1.5 text-sm outline-none"
               style={{ borderColor: "var(--color-border)" }}
             >
@@ -1237,12 +1686,22 @@ export function FileBrowserPage() {
             className="rounded-lg border px-2.5 py-1.5 text-sm outline-none"
             style={{ borderColor: "var(--color-border)" }}
           >
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
-            <option value="name_asc">Name A-Z</option>
-            <option value="name_desc">Name Z-A</option>
-            <option value="largest">Largest</option>
-            <option value="smallest">Smallest</option>
+            <option value="newest">{t("files.option.newest")}</option>
+            <option value="oldest">{t("files.option.oldest")}</option>
+            <option value="name_asc">{t("files.option.nameAZ")}</option>
+            <option value="name_desc">{t("files.option.nameZA")}</option>
+            <option value="largest">{t("files.option.largest")}</option>
+            <option value="smallest">{t("files.option.smallest")}</option>
+            {/* A column-header sort (e.g. Comments) is not one of the six
+                presets; list it so the menu still names the active order. */}
+            {!PRESET_SORTS.has(sort) && (
+              <option value={sort}>
+                {t("files.label.allColumnsfindcSortdirascSelectTrueOther", {
+                  ALL_COLUMNSFindC: ALL_COLUMNS.find((c) => c.key === sortSpec.key)?.label ?? sortSpec.key,
+                  sortDirAsc: sortSpec.dir === "asc" ? "true" : "false",
+                })}
+              </option>
+            )}
           </select>
           )}
 
@@ -1257,18 +1716,18 @@ export function FileBrowserPage() {
               <div className="flex rounded-lg border" style={{ borderColor: "var(--color-border)" }}>
                 <button
                   onClick={() => changeLibraryLayout("list")}
-                  aria-label="List view"
+                  aria-label={t("files.accessibility.listView")}
                   aria-pressed={libraryLayout === "list"}
-                  title="List view"
+                  title={t("files.accessibility.listView")}
                   className={`p-1.5 ${libraryLayout === "list" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
                 >
                   <LayoutList size={16} />
                 </button>
                 <button
                   onClick={() => changeLibraryLayout("grid")}
-                  aria-label="Grid view"
+                  aria-label={t("files.accessibility.gridView")}
                   aria-pressed={libraryLayout === "grid"}
-                  title="Grid view"
+                  title={t("files.accessibility.gridView")}
                   className={`p-1.5 ${libraryLayout === "grid" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
                 >
                   <LayoutGrid size={16} />
@@ -1281,18 +1740,18 @@ export function FileBrowserPage() {
                 <div className="flex rounded-lg border" style={{ borderColor: "var(--color-border)" }}>
                   <button
                     onClick={() => setTileSize("small")}
-                    aria-label="Small tiles"
+                    aria-label={t("files.accessibility.smallTiles")}
                     aria-pressed={tileSize === "small"}
-                    title="Small tiles"
+                    title={t("files.accessibility.smallTiles")}
                     className={`p-1.5 ${tileSize === "small" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
                   >
                     <ZoomOut size={16} />
                   </button>
                   <button
                     onClick={() => setTileSize("large")}
-                    aria-label="Large tiles"
+                    aria-label={t("files.accessibility.largeTiles")}
                     aria-pressed={tileSize === "large"}
-                    title="Large tiles"
+                    title={t("files.accessibility.largeTiles")}
                     className={`p-1.5 ${tileSize === "large" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
                   >
                     <ZoomIn size={16} />
@@ -1304,18 +1763,18 @@ export function FileBrowserPage() {
           <div className="flex rounded-lg border" style={{ borderColor: "var(--color-border)" }}>
             <button
               onClick={() => setViewMode("table")}
-              aria-label="List view"
+              aria-label={t("files.accessibility.listView")}
               aria-pressed={viewMode === "table"}
-              title="List view"
+              title={t("files.accessibility.listView")}
               className={`p-1.5 ${viewMode === "table" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
             >
               <LayoutList size={16} />
             </button>
             <button
               onClick={() => setViewMode("card")}
-              aria-label="Grid view"
+              aria-label={t("files.accessibility.gridView")}
               aria-pressed={viewMode === "card"}
-              title="Grid view"
+              title={t("files.accessibility.gridView")}
               className={`p-1.5 ${viewMode === "card" ? "bg-[var(--color-bg-tertiary)]" : ""}`}
             >
               <LayoutGrid size={16} />
@@ -1331,15 +1790,15 @@ export function FileBrowserPage() {
                 onClick={() => setColumnPickerOpen((v) => !v)}
                 className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-sm ${columnPickerOpen ? "bg-[var(--color-bg-tertiary)]" : ""}`}
                 style={{ borderColor: "var(--color-border)" }}
-                title="Table columns"
+                title={t("files.tooltip.tableColumns")}
               >
-                <SlidersHorizontal size={14} /> Columns
+                <SlidersHorizontal size={14} /> {t("files.action.columns")}
               </button>
               {columnPickerOpen && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setColumnPickerOpen(false)} />
                   <div
-                    className="absolute right-0 z-50 mt-1 w-44 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
+                    className="absolute inset-e-0 z-50 mt-1 w-44 rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
                     style={{ borderColor: "var(--color-border)" }}
                   >
                     {pickerColumns.map((col) => {
@@ -1370,17 +1829,8 @@ export function FileBrowserPage() {
             </div>
           )}
 
-          {/* New Folder */}
-          {!showDeleted && !isLibraryView && (
-            <button
-              onClick={() => setShowCreateFolder(true)}
-              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium"
-              style={{ borderColor: "var(--color-border)" }}
-            >
-              <Plus size={14} />
-              New folder
-            </button>
-          )}
+          {/* New: folder or a blank file */}
+          <NewMenuButton choices={newChoices} onPick={pickNew} />
 
           {/* Upload */}
           {!showDeleted && (
@@ -1390,7 +1840,7 @@ export function FileBrowserPage() {
               style={{ background: "var(--color-primary)" }}
             >
               <Upload size={14} />
-              Upload
+              {t("common.action.upload")}
             </button>
           )}
         </div>
@@ -1407,21 +1857,21 @@ export function FileBrowserPage() {
           className="mb-3 rounded-lg px-4 py-2 text-xs"
           style={{ background: "var(--color-bg-tertiary)", color: "var(--color-text-secondary)" }}
         >
-          Items in the trash still count against your storage. Delete them permanently to free up space.
+          {t("files.description.itemsInTheTrashStillCountAgainstYourStorage")}
         </div>
       )}
 
       {/* Bulk Actions */}
       {totalSelected > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg bg-[var(--color-bg-tertiary)] px-4 py-2 text-sm">
-          <span className="font-medium">{totalSelected} selected</span>
+          <span className="font-medium">{t("files.label.totalselectedSelected", { totalSelected: String(totalSelected) })}</span>
           {showDeleted ? (
             <>
               <button
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
                 onClick={bulkRestore}
               >
-                <RotateCcw size={14} /> Restore
+                <RotateCcw size={14} /> {t("files.action.restore")}
               </button>
               <button
                 className="flex items-center gap-1 text-[var(--color-danger)] hover:text-[var(--color-danger-hover)]"
@@ -1439,7 +1889,7 @@ export function FileBrowserPage() {
                   setDeleteConfirm({ ids: fileIds, folderIds, names, kinds: fileIds.map(() => "file" as const), bulk: true, permanent: true });
                 }}
               >
-                <Trash2 size={14} /> Delete permanently
+                <Trash2 size={14} /> {t("files.action.deletePermanently")}
               </button>
             </>
           ) : (
@@ -1449,14 +1899,14 @@ export function FileBrowserPage() {
                 onClick={async () => {
                   try {
                     const r = await window.electronAPI.downloadArchive(Array.from(selected), Array.from(selectedFolders));
-                    if (r.ok) toast.success("Downloaded", { description: `Saved to ${r.path ?? "disk"}` });
-                    else if (!r.canceled) toast.error("Download failed");
+                    if (r.ok) toast.success(t("common.status.downloaded"), { description: r.path ? t("common.description.savedToPath", { path: r.path }) : t("common.description.savedToDisk") });
+                    else if (!r.canceled) toast.error(t("common.error.downloadFailed"));
                   } catch (e: any) {
-                    toast.error(e instanceof ApiError ? e.message : "Failed");
+                    toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed"));
                   }
                 }}
               >
-                <FileArchive size={14} /> Download ZIP
+                <FileArchive size={14} /> {t("files.action.downloadZIP")}
               </button>}
               {can("create_share_links") && <button
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)] disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[var(--color-text-secondary)]"
@@ -1467,27 +1917,27 @@ export function FileBrowserPage() {
                 // a folders-only selection would otherwise stay enabled and post
                 // file_ids: [], which the API rejects.
                 disabled={selectedFolders.size > 0}
-                title={selectedFolders.size > 0 ? "A link covers one folder, or a set of files - not both." : undefined}
+                title={selectedFolders.size > 0 ? t("files.tooltip.aLinkCoversOneFolderOrASetOf") : undefined}
                 onClick={async () => {
                   try {
                     const ids = Array.from(selected);
                     const res = await api.post<{ ok: boolean; url: string; token: string }>("/api/files/share-bundle", { file_ids: ids, workspace_id: active!.id });
                     if (res.url) {
                       navigator.clipboard.writeText(res.url);
-                      toast.success("Share bundle link copied!");
+                      toast.success(t("files.status.shareBundleLinkCopied"));
                     }
                   } catch (e: any) {
-                    toast.error(e instanceof ApiError ? e.message : "Failed");
+                    toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.failed"));
                   }
                 }}
               >
-                <Link2 size={14} /> Share bundle
+                <Link2 size={14} /> {t("files.action.shareBundle")}
               </button>}
               {(can("upload_files") || can("rename_folders")) && <button
                 className="flex items-center gap-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
                 onClick={() => { setBulkMoveIds(Array.from(selected)); setBulkMoveFolderIds(Array.from(selectedFolders)); setPickerFolder(null); }}
               >
-                <Move size={14} /> Move
+                <Move size={14} /> {t("files.action.move")}
               </button>}
               {(can("delete_any_file") || can("delete_own_files")) && <button
                 className="flex items-center gap-1 text-[var(--color-danger)] hover:text-[var(--color-danger-hover)]"
@@ -1501,16 +1951,16 @@ export function FileBrowserPage() {
                   setDeleteConfirm({ ids: fileIds, folderIds, names, kinds: fileIds.map(() => "file" as const), bulk: true });
                 }}
               >
-                <Trash2 size={14} /> Delete
+                <Trash2 size={14} /> {t("common.delete")}
               </button>}
             </>
           )}
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ms-auto flex items-center gap-3">
             <button className="text-xs text-[var(--color-text-muted)]" onClick={selectAll}>
-              Select all
+              {t("common.action.selectAll")}
             </button>
             <button className="text-xs text-[var(--color-text-muted)]" onClick={clearSelection}>
-              Clear
+              {t("common.action.clear")}
             </button>
           </div>
         </div>
@@ -1561,9 +2011,9 @@ export function FileBrowserPage() {
           ))}
         </div>
       ) : viewMode === "table" ? (
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto" onContextMenu={openBlankMenu}>
           <table
-            className="w-full table-fixed text-left text-sm"
+            className="w-full table-fixed text-start text-sm"
             style={{ minWidth: tableMinWidth }}
           >
             {/* Explicit widths, so `table-fixed` honours them and Name absorbs
@@ -1579,10 +2029,10 @@ export function FileBrowserPage() {
             </colgroup>
             <thead>
               <tr className="border-b text-xs text-[var(--color-text-muted)]" style={{ borderColor: "var(--color-border)" }}>
-                <th className="w-8 py-2 pl-3">
+                <th className="w-8 py-2 ps-3 text-start">
                   <input
                     type="checkbox"
-                    aria-label="Select all"
+                    aria-label={t("common.action.selectAll")}
                     checked={totalSelected > 0 && selected.size >= selectableFiles.length && selectedFolders.size >= folders.length && (selectableFiles.length + folders.length) > 0}
                     onChange={(e) => {
                       if (e.target.checked) selectAll();
@@ -1590,28 +2040,57 @@ export function FileBrowserPage() {
                     }}
                   />
                 </th>
-                {visibleCols.map((col) => (
-                  <th key={col.key} className="truncate py-2 pr-3 font-medium">{col.label}</th>
-                ))}
-                <th className="w-10 py-2"></th>
+                {visibleCols.map((col) => {
+                  // Click a column name to sort by it, click again to flip
+                  // (same as the web table). The trash cannot order by
+                  // uploader server-side, so that header stays plain there.
+                  const sortable = isSortKey(col.key) && !(showDeleted && col.key === "uploader");
+                  const active = sortable && sortSpec.key === col.key;
+                  return (
+                    <th
+                      key={col.key}
+                      className="py-2 pe-3 text-start font-medium"
+                      aria-sort={active ? (sortSpec.dir === "asc" ? "ascending" : "descending") : undefined}
+                    >
+                      {sortable ? (
+                        <button
+                          type="button"
+                          onClick={() => setSort(serializeSort(toggleSort(sortSpec, col.key as SortKey)))}
+                          title={t("common.action.sortByLabeltolowercase", { labelToLowerCase: col.label.toLocaleLowerCase(locale) })}
+                          className={`flex max-w-full items-center gap-1 rounded text-start transition-colors hover:text-[var(--color-text)] ${active ? "text-[var(--color-text)]" : ""}`}
+                        >
+                          <span className="truncate">{col.label}</span>
+                          {active && (sortSpec.dir === "asc"
+                            ? <ArrowUp size={11} className="shrink-0" aria-hidden />
+                            : <ArrowDown size={11} className="shrink-0" aria-hidden />)}
+                        </button>
+                      ) : (
+                        <span className="block truncate">{col.label}</span>
+                      )}
+                    </th>
+                  );
+                })}
+                <th className="w-10 py-2 text-start"></th>
               </tr>
             </thead>
             <tbody>
               {folders.map((folder) => (
                 <tr
                   key={folder.id}
-                  className="cursor-pointer border-b transition-colors hover:bg-[var(--color-bg-secondary)]"
+                  className={`cursor-pointer border-b transition-colors ${dropTarget === folder.id ? ROW_DROP_ACTIVE : "hover:bg-[var(--color-bg-secondary)]"}`}
                   style={{ borderColor: "var(--color-border)" }}
+                  {...dragSourceProps({ id: folder.id, name: folder.name, kind: "folder" })}
+                  {...dropTargetProps(folder.id, folder.name)}
                   onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelectFolder(folder.id); else navigateToFolder(folder.id); }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setContextMenu({ x: e.clientX, y: e.clientY, item: { id: folder.id, name: folder.name, kind: "folder" } });
                   }}
                 >
-                  <td className="py-2 pl-3" onClick={(e) => e.stopPropagation()}>
+                  <td className="py-2 ps-3" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
-                      aria-label={`Select ${folder.name}`}
+                      aria-label={t("files.accessibility.selectName", { name: folder.name })}
                       checked={selectedFolders.has(folder.id)}
                       onChange={() => toggleSelectFolder(folder.id)}
                     />
@@ -1619,16 +2098,16 @@ export function FileBrowserPage() {
                   {visibleCols.map((col) => {
                     if (col.key === "name") {
                       return (
-                        <td key="name" className="py-2 pr-3">
+                        <td key="name" className="py-2 pe-3">
                           <div className="flex min-w-0 items-center gap-2.5">
                             <span className="relative shrink-0">
                               <FolderIcon fileCount={folder.file_count} size={18} synced={!!(syncedFolderIds.has(folder.id) || folder.is_synced)} />
                               <OriginBadge origin={folder.origin} />
                             </span>
-                            <span className="truncate font-medium" title={folder.name}>{folder.name}</span>
-                            <span className="shrink-0 text-xs text-[var(--color-text-muted)]">{folder.file_count} files</span>
+                            <span dir={ownDir} className="truncate font-medium" title={folder.name}>{folder.name}</span>
+                            <span className="shrink-0 text-xs text-[var(--color-text-muted)]">{t("common.label.filecountFiles", { fileCount: String(folder.file_count) })}</span>
                             {!!folder.lock_mode && folder.lock_mode !== "none" && (
-                              <span title="Locked" className="inline-flex shrink-0"><Lock size={12} className="text-[var(--color-text-muted)]" /></span>
+                              <span title={t("files.status.locked")} className="inline-flex shrink-0"><Lock size={12} className="text-[var(--color-text-muted)]" /></span>
                             )}
                             {!!folder.is_hidden && (
                               <span title={hiddenTitle(folder.hidden_mode)} className="inline-flex shrink-0"><EyeOff size={12} className="text-[var(--color-text-muted)]" /></span>
@@ -1638,7 +2117,7 @@ export function FileBrowserPage() {
                       );
                     }
                     return (
-                      <td key={col.key} className="truncate py-2 pr-3 text-xs text-[var(--color-text-muted)]">
+                      <td key={col.key} className="truncate py-2 pe-3 text-xs text-[var(--color-text-muted)]">
                         {col.renderFolder ? col.renderFolder(folder) : "-"}
                       </td>
                     );
@@ -1649,7 +2128,7 @@ export function FileBrowserPage() {
                         e.stopPropagation();
                         setContextMenu({ x: e.clientX, y: e.clientY, item: { id: folder.id, name: folder.name, kind: "folder" } });
                       }}
-                      aria-label={`Actions for ${folder.name}`}
+                      aria-label={t("files.accessibility.actionsForName", { name: folder.name })}
                       className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]"
                     >
                       <MoreHorizontal size={14} />
@@ -1666,6 +2145,7 @@ export function FileBrowserPage() {
                     id={`file-${file.id}`}
                     className={`cursor-pointer border-b transition-colors ${isActive ? "bg-green-50" : isSel ? "bg-[var(--color-primary)]/5" : "hover:bg-[var(--color-bg-secondary)]"}`}
                     style={{ borderColor: "var(--color-border)" }}
+                    {...dragSourceProps({ id: file.id, name: file.name, kind: "file" })}
                     onClick={(e) => {
                       if (e.ctrlKey || e.metaKey) toggleSelect(file.id);
                       else openFileWithLockCheck(file, "detail");
@@ -1675,10 +2155,10 @@ export function FileBrowserPage() {
                       setContextMenu({ x: e.clientX, y: e.clientY, item: { id: file.id, name: file.name, kind: "file" } });
                     }}
                   >
-                    <td className="py-2 pl-3" onClick={(e) => e.stopPropagation()}>
+                    <td className="py-2 ps-3" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
-                        aria-label={`Select ${file.name}`}
+                        aria-label={t("files.accessibility.selectName", { name: file.name })}
                         checked={isSel}
                         onChange={() => toggleSelect(file.id)}
                       />
@@ -1686,24 +2166,25 @@ export function FileBrowserPage() {
                     {visibleCols.map((col) => {
                       if (col.key === "name") {
                         return (
-                          <td key="name" className="py-2 pr-3">
-                            <div className={`flex min-w-0 items-center gap-2.5 ${isLiveTwin(file) ? "pl-9" : ""}`}>
+                          <td key="name" className="py-2 pe-3">
+                            <div className={`flex min-w-0 items-center gap-2.5 ${isLiveTwin(file) ? "ps-9" : ""}`}>
                               <RowThumbnail fileId={file.id} fileName={file.name} />
                               <span
                                 title={file.name}
+                                dir={ownDir}
                                 className="truncate hover:text-[var(--color-primary)] hover:underline"
                                 onClick={(e) => { e.stopPropagation(); openFileWithLockCheck(file, "view"); }}
                               >
                                 {file.name}
                               </span>
                               {isLiveStill(file) && <LiveBadge size="pill" />}
-                              {isLiveTwin(file) && <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">Live Photo video</span>}
+                              {isLiveTwin(file) && <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">{t("files.label.livePhotoVideo")}</span>}
                               {favourites.has(file.id) && <Star size={12} className="shrink-0 fill-orange-400 text-orange-400" />}
                               {(file.current_version ?? 1) > 1 && (
-                                <span className="shrink-0 rounded bg-[var(--color-bg-tertiary)] px-1 text-[9px] font-medium">v{file.current_version}</span>
+                                <span className="shrink-0 rounded bg-[var(--color-bg-tertiary)] px-1 text-[9px] font-medium">{t("common.label.vVersion", { version: String(file.current_version) })}</span>
                               )}
                               {!!file.lock_mode && file.lock_mode !== "none" && (
-                                <span title="Locked" className="inline-flex shrink-0"><Lock size={12} className="text-[var(--color-text-muted)]" /></span>
+                                <span title={t("files.status.locked")} className="inline-flex shrink-0"><Lock size={12} className="text-[var(--color-text-muted)]" /></span>
                               )}
                               {!!file.is_hidden && (
                                 <span title={hiddenTitle(file.hidden_mode)} className="inline-flex shrink-0"><EyeOff size={12} className="text-[var(--color-text-muted)]" /></span>
@@ -1718,7 +2199,7 @@ export function FileBrowserPage() {
                       return (
                         <td
                           key={col.key}
-                          className="truncate py-2 pr-3 text-xs text-[var(--color-text-muted)]"
+                          className="truncate py-2 pe-3 text-xs text-[var(--color-text-muted)]"
                           // The full value is still reachable on hover, which is
                           // what makes the shortened Type column safe.
                           title={col.key === "type" ? file.mime_type : undefined}
@@ -1733,7 +2214,7 @@ export function FileBrowserPage() {
                           e.stopPropagation();
                           setContextMenu({ x: e.clientX, y: e.clientY, item: { id: file.id, name: file.name, kind: "file" } });
                         }}
-                        aria-label={`Actions for ${file.name}`}
+                        aria-label={t("files.accessibility.actionsForName", { name: file.name })}
                         className="rounded p-1 hover:bg-[var(--color-bg-tertiary)]"
                       >
                         <MoreHorizontal size={14} />
@@ -1745,10 +2226,10 @@ export function FileBrowserPage() {
               {folders.length === 0 && files.length === 0 && (
                 <tr>
                   <td colSpan={visibleCols.length + 2} className="py-16 text-center text-sm text-[var(--color-text-muted)]">
-                    {showDeleted ? "Trash is empty"
-                      : search ? "No files match your search"
-                      : activeFilter === "favourites" ? "No favourites yet - star a file to collect it here"
-                      : "This folder is empty"}
+                    {showDeleted ? t("files.empty.trashIsEmpty")
+                      : search ? t("files.label.noFilesMatchYourSearch")
+                      : activeFilter === "favourites" ? t("files.label.noFavouritesYetStarAFileToCollectIt")
+                      : t("files.empty.thisFolderIsEmpty")}
                   </td>
                 </tr>
               )}
@@ -1757,18 +2238,23 @@ export function FileBrowserPage() {
         </div>
       ) : (
         /* Card View */
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto" onContextMenu={openBlankMenu}>
           {folders.length > 0 && (
             <div className="mb-5">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Folders</p>
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">{t("common.label.folders")}</p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
                 {folders.map((folder) => {
                   const isFolderSel = selectedFolders.has(folder.id);
                   return (
                     <div
                       key={folder.id}
-                      className={`group relative cursor-pointer rounded-xl border p-4 transition-colors hover:bg-[var(--color-bg-secondary)] ${isFolderSel ? "ring-2 ring-[var(--color-primary)]" : ""}`}
-                      style={{ borderColor: "var(--color-border)" }}
+                      className={`group relative cursor-pointer rounded-xl border p-4 transition-colors ${
+                        dropTarget === folder.id ? "bg-[var(--color-primary)]/10 ring-2 ring-[var(--color-primary)]"
+                        : `hover:bg-[var(--color-bg-secondary)] ${isFolderSel ? "ring-2 ring-[var(--color-primary)]" : ""}`
+                      }`}
+                      style={{ borderColor: dropTarget === folder.id ? "var(--color-primary)" : "var(--color-border)" }}
+                      {...dragSourceProps({ id: folder.id, name: folder.name, kind: "folder" })}
+                      {...dropTargetProps(folder.id, folder.name)}
                       onClick={(e) => { if (e.ctrlKey || e.metaKey) toggleSelectFolder(folder.id); else navigateToFolder(folder.id); }}
                       onContextMenu={(e) => {
                         e.preventDefault();
@@ -1780,14 +2266,14 @@ export function FileBrowserPage() {
                         checked={isFolderSel}
                         onChange={() => toggleSelectFolder(folder.id)}
                         onClick={(e) => e.stopPropagation()}
-                        className={`absolute left-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-all ${isFolderSel || selectedFolders.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                        className={`absolute inset-s-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-all ${isFolderSel || selectedFolders.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
                       />
                       <span className="relative mb-3 inline-block">
                         <FolderIcon fileCount={folder.file_count} size={32} synced={!!(syncedFolderIds.has(folder.id) || folder.is_synced)} />
                         <OriginBadge origin={folder.origin} />
                       </span>
-                      <p className="truncate text-sm font-medium">{folder.name}</p>
-                      <p className="text-xs text-[var(--color-text-muted)]">{folder.file_count} items</p>
+                      <p dir={ownDir} className="truncate text-sm font-medium" title={folder.name}>{folder.name}</p>
+                      <p className="text-xs text-[var(--color-text-muted)]">{t("files.description.filecountItems", { fileCount: String(folder.file_count) })}</p>
                     </div>
                   );
                 })}
@@ -1796,7 +2282,7 @@ export function FileBrowserPage() {
           )}
           {files.length > 0 && (
             <div>
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Files</p>
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">{t("common.label.files")}</p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5">
                 {gridFiles.map((file) => (
                   <FileCard
@@ -1806,6 +2292,7 @@ export function FileBrowserPage() {
                     anySelected={selected.size > 0}
                     active={panel?.file.id === file.id}
                     isFavourite={favourites.has(file.id)}
+                    dnd={dragSourceProps({ id: file.id, name: file.name, kind: "file" })}
                     onClick={(e) => {
                       if (e.ctrlKey || e.metaKey) toggleSelect(file.id);
                       else openFileWithLockCheck(file, "detail");
@@ -1834,10 +2321,10 @@ export function FileBrowserPage() {
           )}
           {folders.length === 0 && files.length === 0 && (
             <div className="py-16 text-center text-sm text-[var(--color-text-muted)]">
-              {showDeleted ? "Trash is empty"
-                : search ? "No files match your search"
-                : activeFilter === "favourites" ? "No favourites yet - star a file to collect it here"
-                : "This folder is empty"}
+              {showDeleted ? t("files.empty.trashIsEmpty")
+                : search ? t("files.label.noFilesMatchYourSearch")
+                : activeFilter === "favourites" ? t("files.label.noFavouritesYetStarAFileToCollectIt")
+                : t("files.empty.thisFolderIsEmpty")}
             </div>
           )}
         </div>
@@ -1847,7 +2334,7 @@ export function FileBrowserPage() {
       {pagination && pagination.total_pages > 1 && (
         <div className="mt-4 flex items-center justify-between border-t pt-3" style={{ borderColor: "var(--color-border)" }}>
           <span className="text-xs text-[var(--color-text-muted)]">
-            Page {pagination.page} of {pagination.total_pages} ({pagination.total_files} files)
+            {t("files.label.pagePageOfTotalPagesTotalFilesFiles", { page: String(pagination.page), totalPages: String(pagination.total_pages), totalFiles: String(pagination.total_files) })}
           </span>
           <div className="flex gap-1">
             <button
@@ -1860,7 +2347,7 @@ export function FileBrowserPage() {
               className="rounded border px-3 py-1 text-sm disabled:opacity-30"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Prev
+              {t("files.action.prev")}
             </button>
             <button
               disabled={pagination.page >= pagination.total_pages}
@@ -1872,7 +2359,7 @@ export function FileBrowserPage() {
               className="rounded border px-3 py-1 text-sm disabled:opacity-30"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Next
+              {t("common.next")}
             </button>
           </div>
         </div>
@@ -1883,9 +2370,10 @@ export function FileBrowserPage() {
         <>
           <div className="fixed inset-0 z-40" onClick={() => setContextMenu(null)} />
           <div
-            className="fixed z-50 w-52 origin-top-left overflow-y-auto rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
+            // rtl-ok: mirrored, the menu grows from the corner at the cursor
+            className="fixed z-50 w-52 origin-top-left rtl:origin-top-right overflow-y-auto rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
             style={{
-              left: Math.min(contextMenu.x, window.innerWidth - 224),
+              ...atCursor(contextMenu.x, dir),
               top: Math.min(contextMenu.y, Math.max(8, window.innerHeight - 560)),
               maxHeight: window.innerHeight - 16,
               borderColor: "var(--color-border)",
@@ -1901,12 +2389,12 @@ export function FileBrowserPage() {
               // gets its own unmistakable copy via the shared confirm dialog
               // instead of the routine "Delete" wording below.
               <>
-                <CtxItem icon={<RotateCcw size={14} />} label="Restore" onClick={() => {
+                <CtxItem icon={<RotateCcw size={14} />} label={t("files.action.restore")} onClick={() => {
                   restoreItem(contextMenu.item.id, contextMenu.item.kind);
                   setContextMenu(null);
                 }} />
                 <Divider />
-                <CtxItem icon={<Trash2 size={14} />} label="Delete permanently" danger onClick={() => {
+                <CtxItem icon={<Trash2 size={14} />} label={t("files.action.deletePermanently")} danger onClick={() => {
                   setDeleteConfirm({
                     ids: [contextMenu.item.id],
                     names: [contextMenu.item.name],
@@ -1926,44 +2414,44 @@ export function FileBrowserPage() {
                     Hide use canLock/canHide from the listing payload - fields
                     this file has always DECLARED (can_lock, can_hide) and
                     never read. */}
-                <CtxItem icon={<FolderOpen size={14} />} label="Open" onClick={() => { navigateToFolder(contextMenu.item.id); setContextMenu(null); }} />
-                {can("create_share_links") && <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
+                <CtxItem icon={<FolderOpen size={14} />} label={t("files.open")} onClick={() => { navigateToFolder(contextMenu.item.id); setContextMenu(null); }} />
+                {can("create_share_links") && <CtxItem icon={<Share2 size={14} />} label={t("files.action.share")} onClick={() => {
                   setShareTarget({ target: { kind: "folder", folderId: contextMenu.item.id }, name: contextMenu.item.name });
                   setContextMenu(null);
                 }} />}
-                <CtxItem icon={<Info size={14} />} label="Get info" onClick={() => {
+                <CtxItem icon={<Info size={14} />} label={t("files.action.getInfo")} onClick={() => {
                   if (ctxFolder) setInfoTarget({ type: "folder", item: ctxFolder });
                   setContextMenu(null);
                 }} />
                 <Divider />
-                {can("rename_folders") && <CtxItem icon={<Pencil size={14} />} label="Rename" onClick={() => {
+                {can("rename_folders") && <CtxItem icon={<Pencil size={14} />} label={t("common.action.rename")} onClick={() => {
                   setRenameItem(contextMenu.item); setRenameName(contextMenu.item.name); setContextMenu(null);
                 }} />}
-                {can("rename_folders") && <CtxItem icon={<Move size={14} />} label="Move to..." onClick={() => {
+                {can("rename_folders") && <CtxItem icon={<Move size={14} />} label={t("files.label.moveTo")} onClick={() => {
                   setMoveTarget({ id: contextMenu.item.id, name: contextMenu.item.name, kind: "folder" });
                   setPickerFolder(null); setContextMenu(null);
                 }} />}
                 <Divider />
-                {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFolder && ctxFolder.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
+                {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFolder && ctxFolder.lock_mode !== "none" ? t("common.action.unlock") : t("common.action.lock")} onClick={() => {
                   setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "folder", file_count: ctxFolder?.file_count, total_size_bytes: ctxFolder?.total_size_bytes, lock_mode: ctxFolder?.lock_mode }); setContextMenu(null);
                 }} />}
-                {canHide && <CtxItem icon={ctxFolder?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFolder?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
+                {canHide && <CtxItem icon={ctxFolder?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFolder?.is_hidden ? t("files.action.unhide") : t("files.action.hide")} onClick={() => {
                   setHideTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "folder" }); setContextMenu(null);
                 }} />}
                 <Divider />
-                {(can("delete_any_file") || can("delete_own_files")) && <CtxItem icon={<Trash2 size={14} />} label="Delete" danger onClick={() => {
+                {(can("delete_any_file") || can("delete_own_files")) && <CtxItem icon={<Trash2 size={14} />} label={t("common.delete")} danger onClick={() => {
                   setDeleteConfirm({ ids: [contextMenu.item.id], names: [contextMenu.item.name], kinds: ["folder"] });
                   setContextMenu(null);
                 }} />}
               </>
             ) : (
               <>
-                <CtxItem icon={<Eye size={14} />} label="View" onClick={() => {
+                <CtxItem icon={<Eye size={14} />} label={t("files.view")} onClick={() => {
                   if (ctxFile) openFileWithLockCheck(ctxFile, "view");
                   setContextMenu(null);
                 }} />
                 {isOfficeFile(contextMenu.item.name) && (
-                  <CtxItem icon={<SquarePen size={14} />} label="Open in editor" onClick={() => {
+                  <CtxItem icon={<SquarePen size={14} />} label={t("files.label.openInEditor")} onClick={() => {
                     // In-app now. This used to window.open the web app, which
                     // threw the user out of the desktop app into a browser and a
                     // second login for a document they already had open here.
@@ -1971,55 +2459,66 @@ export function FileBrowserPage() {
                     setContextMenu(null);
                   }} />
                 )}
-                {can("download_files") && <CtxItem icon={<Download size={14} />} label="Download" onClick={() => {
+                {/* Markdown and plain text: the in-app text editor. Saving is
+                    an upload of a new version, hence upload_files. */}
+                {ctxFile && canEditText(ctxFile) && can("upload_files") && (
+                  <CtxItem icon={<SquarePen size={14} />} label={t("files.label.openInEditor")} onClick={() => {
+                    navigate(`/text-editor/${ctxFile.id}`, { state: { back: true } });
+                    setContextMenu(null);
+                  }} />
+                )}
+                {can("download_files") && <CtxItem icon={<Download size={14} />} label={t("common.action.download")} onClick={() => {
                   if (ctxFile) downloadViaDialog(ctxFile);
                   setContextMenu(null);
                 }} />}
-                {can("create_share_links") && <CtxItem icon={<Share2 size={14} />} label="Share" onClick={() => {
+                {can("create_share_links") && <CtxItem icon={<Share2 size={14} />} label={t("files.action.share")} onClick={() => {
                   setShareTarget({ target: { kind: "file", fileIds: [contextMenu.item.id] }, name: contextMenu.item.name }); setContextMenu(null);
                 }} />}
-                <CtxItem icon={<MessageCircle size={14} />} label="Comments" onClick={() => {
+                <CtxItem icon={<MessageCircle size={14} />} label={t("files.label.comments")} onClick={() => {
                   if (ctxFile) setPanel({ file: ctxFile, tab: "comments" });
                   setContextMenu(null);
                 }} />
-                <CtxItem icon={<Star size={14} />} label={favourites.has(contextMenu.item.id) ? "Remove favourite" : "Add to favourites"} onClick={() => {
+                <CtxItem icon={<Star size={14} />} label={favourites.has(contextMenu.item.id) ? t("files.label.removeFavourite") : t("files.label.addToFavourites")} onClick={() => {
                   toggleFavourite(contextMenu.item.id); setContextMenu(null);
                 }} />
-                <CtxItem icon={<Info size={14} />} label="Get info" onClick={() => {
+                <CtxItem icon={<Info size={14} />} label={t("files.action.getInfo")} onClick={() => {
                   if (ctxFile) setInfoTarget({ type: "file", item: ctxFile });
                   setContextMenu(null);
                 }} />
                 <Divider />
-                {can("rename_files") && <CtxItem icon={<Pencil size={14} />} label="Rename" onClick={() => {
+                {can("rename_files") && <CtxItem icon={<Pencil size={14} />} label={t("common.action.rename")} onClick={() => {
                   setRenameItem(contextMenu.item); setRenameName(contextMenu.item.name); setContextMenu(null);
                 }} />}
-                {can("upload_files") && <CtxItem icon={<Copy size={14} />} label="Copy to..." onClick={() => {
+                {can("upload_files") && <CtxItem icon={<Copy size={14} />} label={t("files.label.copyTo")} onClick={() => {
                   setCopyTarget({ id: contextMenu.item.id, name: contextMenu.item.name });
                   setPickerFolder(null); setContextMenu(null);
                 }} />}
-                {can("upload_files") && <CtxItem icon={<Move size={14} />} label="Move to..." onClick={() => {
+                {can("upload_files") && <CtxItem icon={<Move size={14} />} label={t("files.label.moveTo")} onClick={() => {
                   setMoveTarget({ id: contextMenu.item.id, name: contextMenu.item.name, kind: "file" });
                   setPickerFolder(null); setContextMenu(null);
                 }} />}
                 <Divider />
-                <CtxItem icon={<ExternalLink size={14} />} label="Open in system app" onClick={() => {
+                <CtxItem icon={<ExternalLink size={14} />} label={t("files.label.openInSystemApp")} onClick={() => {
                   openFileInSystemApp(contextMenu.item.id, contextMenu.item.name); setContextMenu(null);
                 }} />
-                {can("upload_files") && <CtxItem icon={<Upload size={14} />} label="Upload new version" onClick={() => {
+                {can("upload_files") && <CtxItem icon={<Upload size={14} />} label={t("files.label.uploadNewVersion")} onClick={() => {
                   setVersionUploadTarget(contextMenu.item.id); setContextMenu(null);
                 }} />}
-                <CtxItem icon={<History size={14} />} label="Version history" onClick={() => {
-                  if (ctxFile) openFileWithLockCheck(ctxFile, "view");
+                {/* Opens the detail panel, whose Info tab leads with the version
+                    list. The viewer showed no versions at all for a single-version
+                    file and only a collapsed toggle otherwise. */}
+                <CtxItem icon={<History size={14} />} label={t("files.label.versionHistory")} onClick={() => {
+                  if (ctxFile) openFileWithLockCheck(ctxFile, "versions");
                   setContextMenu(null);
                 }} />
-                {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFile && ctxFile.lock_mode !== "none" ? "Unlock" : "Lock"} onClick={() => {
+                {canLock && <CtxItem icon={<Lock size={14} />} label={ctxFile && ctxFile.lock_mode !== "none" ? t("common.action.unlock") : t("common.action.lock")} onClick={() => {
                   setLockTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "file", size_bytes: ctxFile?.size_bytes, extension: ctxFile?.extension, lock_mode: ctxFile?.lock_mode }); setContextMenu(null);
                 }} />}
-                {canHide && <CtxItem icon={ctxFile?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFile?.is_hidden ? "Unhide" : "Hide"} onClick={() => {
+                {canHide && <CtxItem icon={ctxFile?.is_hidden ? <Eye size={14} /> : <EyeOff size={14} />} label={ctxFile?.is_hidden ? t("files.action.unhide") : t("files.action.hide")} onClick={() => {
                   setHideTarget({ id: contextMenu.item.id, name: contextMenu.item.name, type: "file" }); setContextMenu(null);
                 }} />}
                 <Divider />
-                {canDeleteFile(ctxFile) && <CtxItem icon={<Trash2 size={14} />} label="Delete" danger onClick={() => {
+                {canDeleteFile(ctxFile) && <CtxItem icon={<Trash2 size={14} />} label={t("common.delete")} danger onClick={() => {
                   setDeleteConfirm(ctxFile ? fileDeleteConfirm(ctxFile) : { ids: [contextMenu.item.id], names: [contextMenu.item.name], kinds: ["file"] });
                   setContextMenu(null);
                 }} />}
@@ -2029,16 +2528,63 @@ export function FileBrowserPage() {
         </>
       )}
 
+      {/* Empty-space menu: New folder / file. Same surface as the row menu. */}
+      {blankMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setBlankMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setBlankMenu(null); }}
+          />
+          <div
+            role="menu"
+            aria-label={t("files.label.new")}
+            // rtl-ok: mirrored, the menu grows from the corner at the cursor
+            className="fixed z-50 w-52 origin-top-left rtl:origin-top-right overflow-y-auto rounded-lg border bg-[var(--color-bg)] py-1 shadow-lg"
+            style={{
+              ...atCursor(blankMenu.x, dir),
+              top: Math.min(blankMenu.y, Math.max(8, window.innerHeight - 200)),
+              maxHeight: window.innerHeight - 16,
+              borderColor: "var(--color-border)",
+            }}
+          >
+            <p className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+              {t("files.label.new")}
+            </p>
+            {newChoices.map(({ choice, label }, i) => (
+              <div key={choice}>
+                {i > 0 && newChoices[i - 1].choice === "folder" && <Divider />}
+                <CtxItem icon={<NewChoiceIcon choice={choice} />} label={label} onClick={() => pickNew(choice)} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* New file: name it */}
+      {newFileKind && (
+        <NewFileDialog
+          key={newFileKind}
+          kind={newFileKind}
+          onCancel={() => setNewFileKind(null)}
+          onCreate={async (name) => {
+            const result = await createBlankFile(newFileKind, name);
+            if (result === null) setNewFileKind(null);
+            return result;
+          }}
+        />
+      )}
+
       {/* Create Folder Modal */}
       {showCreateFolder && (
         <Modal onClose={() => setShowCreateFolder(false)}>
-          <h3 className="mb-4 text-lg font-semibold">Create folder</h3>
+          <h3 className="mb-4 text-lg font-semibold">{t("files.heading.createFolder")}</h3>
           <input
             type="text"
             value={newFolderName}
             onChange={(e) => setNewFolderName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && newFolderName && createFolderMut.mutate(newFolderName)}
-            placeholder="Folder name"
+            placeholder={t("common.placeholder.folderName")}
             autoFocus
             className="mb-4 w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
             style={{ borderColor: "var(--color-border)" }}
@@ -2049,7 +2595,7 @@ export function FileBrowserPage() {
               className="rounded-lg border px-4 py-2 text-sm"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               onClick={() => newFolderName && createFolderMut.mutate(newFolderName)}
@@ -2057,7 +2603,7 @@ export function FileBrowserPage() {
               className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
               style={{ background: "var(--color-primary)" }}
             >
-              Create
+              {t("common.action.create")}
             </button>
           </div>
         </Modal>
@@ -2066,7 +2612,7 @@ export function FileBrowserPage() {
       {/* Rename Modal */}
       {renameItem && (
         <Modal onClose={() => setRenameItem(null)}>
-          <h3 className="mb-4 text-lg font-semibold">Rename</h3>
+          <h3 className="mb-4 text-lg font-semibold">{t("files.heading.rename")}</h3>
           <input
             type="text"
             value={renameName}
@@ -2086,7 +2632,7 @@ export function FileBrowserPage() {
               className="rounded-lg border px-4 py-2 text-sm"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               onClick={() =>
@@ -2095,7 +2641,7 @@ export function FileBrowserPage() {
               className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)]"
               style={{ background: "var(--color-primary)" }}
             >
-              Rename
+              {t("common.action.rename")}
             </button>
           </div>
         </Modal>
@@ -2104,19 +2650,21 @@ export function FileBrowserPage() {
       {/* Unlock password modal (full_lock gate) */}
       {unlockPrompt && (
         <Modal onClose={() => setUnlockPrompt(null)} maxWidth={340}>
-          <h3 className="mb-1 flex items-center gap-2 text-lg font-semibold"><Lock size={16} /> File is locked</h3>
+          <h3 className="mb-1 flex items-center gap-2 text-lg font-semibold"><Lock size={16} /> {t("files.heading.fileIsLocked")}</h3>
           <p className="mb-3 text-xs text-[var(--color-text-muted)]">
-            Enter the password to access <span className="break-all font-semibold text-[var(--color-text)]">{unlockPrompt.file.name}</span>
+            {richText(t, "files.description.enterThePasswordToAccessFileName", {}, {
+              fileName: <span className="break-all font-semibold text-[var(--color-text)]">{unlockPrompt.file.name}</span>,
+            })}
           </p>
           {unlockError && (
-            <p className="mb-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-[var(--color-danger)]">{unlockError}</p>
+            <p dir={unlockErrorRaw ? ownDir : undefined} className="mb-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-[var(--color-danger)]">{unlockError}</p>
           )}
           <input
             type="password"
             value={unlockPassword}
             onChange={(e) => setUnlockPassword(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleUnlockSubmit()}
-            placeholder="Enter password"
+            placeholder={t("files.placeholder.enterPassword")}
             className="mb-4 w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)]"
             style={{ borderColor: "var(--color-border)" }}
             autoFocus
@@ -2127,7 +2675,7 @@ export function FileBrowserPage() {
               className="rounded-lg border px-4 py-2 text-sm"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               onClick={handleUnlockSubmit}
@@ -2136,7 +2684,7 @@ export function FileBrowserPage() {
               style={{ background: "var(--color-primary)" }}
             >
               {unlocking && <Loader2 size={14} className="animate-spin" />}
-              Unlock
+              {t("common.action.unlock")}
             </button>
           </div>
         </Modal>
@@ -2145,10 +2693,11 @@ export function FileBrowserPage() {
       {/* Detail Panel */}
       {panel && (
         <FileDetailPanel
-          key={`${panel.file.id}:${panel.tab}`}
+          key={`${panel.file.id}:${panel.tab}:${panel.versions ? "v" : ""}`}
           file={panel.file}
           workspaceId={active!.id}
           initialTab={panel.tab}
+          showVersions={panel.versions}
           onClose={() => setPanel(null)}
           onCopy={(id) => { setCopyTarget({ id, name: panel.file.name }); setPickerFolder(null); }}
           onDelete={() => setDeleteConfirm(fileDeleteConfirm(panel.file))}
@@ -2169,41 +2718,37 @@ export function FileBrowserPage() {
               <h3 className="text-lg font-semibold">
                 {deleteConfirm.permanent
                   ? deleteConfirm.bulk
-                    ? `Delete ${deleteConfirm.names.length} item${deleteConfirm.names.length === 1 ? "" : "s"} permanently?`
-                    : "Delete permanently?"
-                  : `Delete ${deleteConfirm.names.length === 1 ? "item" : `${deleteConfirm.names.length} items`}?`}
+                    ? t("files.heading.deleteItemPermanently", { nameCount: deleteConfirm.names.length })
+                    : t("files.heading.deletePermanently")
+                  : t("files.heading.deleteItemCount", { count: deleteConfirm.names.length })}
               </h3>
               <p className={`mt-1 text-sm ${deleteConfirm.permanent ? "text-[var(--color-danger)]" : "text-[var(--color-text-secondary)]"}`}>
                 {deleteConfirm.permanent ? (
-                  deleteConfirm.bulk ? (
-                    <>
-                      Permanently delete <strong>{deleteConfirm.names.length}</strong> item{deleteConfirm.names.length === 1 ? "" : "s"}?
-                      This cannot be undone.
-                    </>
-                  ) : (
-                    <>
-                      Permanently delete <strong>{deleteConfirm.names[0]}</strong>
-                      {deleteConfirm.kinds[0] === "folder" && !!deleteConfirm.fileCount &&
-                        ` and its ${deleteConfirm.fileCount} file${deleteConfirm.fileCount === 1 ? "" : "s"}`}
-                      ? This cannot be undone.
-                    </>
-                  )
+                  deleteConfirm.bulk
+                    ? t("files.description.permanentlyDeleteItemThisCannotBeUndone", { nameCount: deleteConfirm.names.length })
+                    : deleteConfirm.kinds[0] === "folder" && !!deleteConfirm.fileCount
+                      ? richText(t, "files.description.permanentlyDeleteNameAndItsFileThisCannotBe", { fileCount: deleteConfirm.fileCount }, {
+                        name: <strong>{deleteConfirm.names[0]}</strong>,
+                      })
+                      : richText(t, "files.description.permanentlyDeleteNameThisCannotBeUndone", {}, {
+                        name: <strong>{deleteConfirm.names[0]}</strong>,
+                      })
                 ) : deleteConfirm.names.length === 1 ? (
-                  <>Are you sure you want to delete <strong>{deleteConfirm.names[0]}</strong>?</>
+                  richText(t, "files.description.areYouSureYouWantToDeleteName", {}, { name: <strong>{deleteConfirm.names[0]}</strong> })
                 ) : (
-                  <>Are you sure you want to delete these {deleteConfirm.names.length} items?</>
+                  t("files.description.areYouSureYouWantToDeleteTheseNameCount", { nameCount: String(deleteConfirm.names.length) })
                 )}
               </p>
               {(!deleteConfirm.permanent || deleteConfirm.bulk) && deleteConfirm.names.length > 1 && deleteConfirm.names.length <= 5 && (
                 <ul className="mt-2 space-y-0.5 text-xs text-[var(--color-text-muted)]">
                   {deleteConfirm.names.map((n, i) => (
-                    <li key={i} className="truncate">· {n}</li>
+                    <li key={i} className="truncate">· <Bdi>{n}</Bdi></li>
                   ))}
                 </ul>
               )}
               {!deleteConfirm.permanent && (
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                  This action can be undone from the Deleted filter. It keeps using storage until permanently deleted.
+                  {t("files.description.thisActionCanBeUndoneFromTheDeletedFilter")}
                 </p>
               )}
               {deleteConfirm.twin && (
@@ -2213,12 +2758,12 @@ export function FileBrowserPage() {
                     checked={deleteConfirm.withTwin !== false}
                     onChange={(e) => setDeleteConfirm({ ...deleteConfirm, withTwin: e.target.checked })}
                   />
-                  Also delete {deleteConfirm.twin.name}
+                  {t("files.label.alsoDeleteTwinName", { twinName: deleteConfirm.twin.name })}
                 </label>
               )}
               {deleteConfirm.bulk && !deleteConfirm.permanent && confirmTwinIds.length > 0 && (
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                  Includes {confirmTwinIds.length} Live Photo video{confirmTwinIds.length === 1 ? "" : "s"}.
+                  {t("files.description.includesLivePhotoVideo", { confirmTwinIdCount: confirmTwinIds.length })}
                 </p>
               )}
             </div>
@@ -2229,7 +2774,7 @@ export function FileBrowserPage() {
               className="rounded-lg border px-4 py-2 text-sm"
               style={{ borderColor: "var(--color-border)" }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
             <button
               onClick={async () => {
@@ -2249,11 +2794,11 @@ export function FileBrowserPage() {
                       folder_ids: deleteConfirm.folderIds ?? [],
                     });
                     const count = deleteConfirm.ids.length + (deleteConfirm.folderIds?.length ?? 0);
-                    toast.success("Deleted", { description: `${count} item${count === 1 ? "" : "s"} deleted` });
+                    toast.success(t("files.heading.deleted"), { description: t("files.description.deletedItemCount", { count }) });
                     refresh();
                     clearSelection();
                   } catch (e: any) {
-                    toast.error(e instanceof ApiError ? e.message : "Delete failed");
+                    toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.deleteFailed"));
                   }
                 } else if (deleteConfirm.permanent) {
                   // Same bounded purge as the bulk path: a folder is asked
@@ -2270,13 +2815,13 @@ export function FileBrowserPage() {
                       }
                       const outcome = await purgeTrashedFolder(() => api.delete<PurgeResponse>(`/api/folders/${id}`));
                       if (!outcome.complete) {
-                        stillEmptying = purgeSummary(outcome, deleteConfirm.names[i] ?? "That folder");
+                        stillEmptying = purgeSummary(outcome, deleteConfirm.names[i] ?? t("files.label.thatFolder"));
                       }
                     }
                     if (stillEmptying) showPurgeMessage(stillEmptying);
-                    else toast.success("Permanently deleted");
+                    else toast.success(t("files.status.permanentlyDeleted"));
                   } catch (e) {
-                    toast.error(e instanceof ApiError ? e.message : "Delete failed");
+                    toast.error(e instanceof ApiError ? autoDir(e.message) : t("common.error.deleteFailed"));
                   }
                   refresh();
                   clearSelection();
@@ -2292,11 +2837,11 @@ export function FileBrowserPage() {
                   // either way so the list stops showing the deleted still.
                   if (twinEp) deleteMut.mutate({ id: deleteConfirm.twin!.id, kind: "file" }, {
                     onError: () => {
-                      toast.warning("Photo deleted, but its video could not be deleted");
+                      toast.warning(t("files.error.photoDeletedButVideoCouldNotBeDeleted"));
                       refresh();
                     },
                   });
-                  toast.success("Deleted");
+                  toast.success(t("files.heading.deleted"));
                   clearSelection();
                 }
                 setPanel((p) => (p && deleteConfirm.ids.includes(p.file.id) ? null : p));
@@ -2304,21 +2849,34 @@ export function FileBrowserPage() {
               }}
               className="rounded-lg bg-[var(--color-danger)] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
             >
-              {deleteConfirm.permanent ? "Delete permanently" : "Delete"}
+              {deleteConfirm.permanent ? t("files.action.deletePermanently") : t("common.delete")}
             </button>
           </div>
         </Modal>
+      )}
+
+      {/* Drag-to-move confirmation: nothing moves until Move. */}
+      {moveConfirm && (
+        <MoveConfirmModal
+          names={moveConfirmNames}
+          fileCount={moveConfirm.payload.fileIds.length}
+          folderCount={moveConfirm.payload.folderIds.length}
+          folderName={moveConfirm.folderName}
+          pending={moveConfirmPending}
+          onConfirm={() => { void confirmDragMove(); }}
+          onCancel={() => { if (!moveConfirmPending) setMoveConfirm(null); }}
+        />
       )}
 
       {/* Move / Copy / Bulk-move Folder Picker Modal */}
       {(moveTarget || copyTarget || bulkMoveIds || bulkMoveFolderIds) && (
         <FolderPickerModal
           title={
-            moveTarget ? `Move "${moveTarget.name}"`
-            : copyTarget ? `Copy "${copyTarget.name}"`
-            : `Move ${(bulkMoveIds?.length ?? 0) + (bulkMoveFolderIds?.length ?? 0)} items`
+            moveTarget ? t("files.tooltip.moveMoveTargetName", { moveTargetName: moveTarget.name })
+            : copyTarget ? t("files.tooltip.copyCopyTargetName", { copyTargetName: copyTarget.name })
+            : t("files.tooltip.moveCountItems", { count: String((bulkMoveIds?.length ?? 0) + (bulkMoveFolderIds?.length ?? 0)) })
           }
-          actionLabel={copyTarget ? "Copy here" : "Move here"}
+          actionLabel={copyTarget ? t("files.action.copyHere") : t("files.action.moveHere")}
           folders={folderTreeData?.folders ?? []}
           selectedId={pickerFolder}
           excludeId={moveTarget?.kind === "folder" ? moveTarget.id : undefined}
@@ -2326,17 +2884,15 @@ export function FileBrowserPage() {
           onSelect={setPickerFolder}
           onConfirm={async () => {
             if (moveTarget) {
-              await moveMut.mutateAsync({ id: moveTarget.id, kind: moveTarget.kind, targetId: pickerFolder });
-              // A Live Photo still takes its twin video along - the twin's
-              // own row may not be on screen (paged, filtered, collapsed
-              // under the still), so this looks it up from `allFiles`.
-              if (moveTarget.kind === "file") {
-                const still = allFiles.find((f) => f.id === moveTarget.id);
-                if (still && isLiveStill(still)) {
-                  await moveMut.mutateAsync({ id: still.live_video_id!, kind: "file", targetId: pickerFolder });
-                }
-              }
-              toast.success("Moved successfully");
+              // A refusal was already toasted by moveMut; the picker stays
+              // open so another folder can be chosen.
+              const moved = await runMove({
+                fileIds: moveTarget.kind === "file" ? [moveTarget.id] : [],
+                folderIds: moveTarget.kind === "folder" ? [moveTarget.id] : [],
+                targetId: pickerFolder,
+                bulk: false,
+              });
+              if (!moved) return;
             } else if (copyTarget) {
               // A Live Photo copies as a pair, the same rule move follows: the
               // copy of the still would otherwise land beside a video it no
@@ -2348,27 +2904,16 @@ export function FileBrowserPage() {
               copyMut.mutate({ id: copyTarget.id, targetId: pickerFolder }, twinId ? {
                 onSuccess: () => {
                   void api.post(`/api/files/${twinId}/copy`, { folder_id: pickerFolder })
-                    .catch(() => toast.warning("The photo was copied, but its video could not be"))
+                    .catch(() => toast.warning(t("files.error.photoCopiedButVideoCouldNotBeCopied")))
                     .finally(() => refresh());
                 },
               } : undefined);
               return;
             } else if (bulkMoveIds) {
               // The twins of the selected stills go with them, by the same rule
-              // the single move and the bulk delete follow. They are appended
-              // rather than counted: the toast reports the selection the user
-              // made, not the rows the request touched.
-              const twinIds = liveTwinIds(files, new Set(bulkMoveIds));
-              for (const id of [...bulkMoveIds, ...twinIds]) {
-                try { await moveMut.mutateAsync({ id, kind: "file", targetId: pickerFolder }); } catch {}
-              }
-              for (const id of bulkMoveFolderIds ?? []) {
-                try { await moveMut.mutateAsync({ id, kind: "folder", targetId: pickerFolder }); } catch {}
-              }
-              toast.success("Moved", { description: `${(bulkMoveIds?.length ?? 0) + (bulkMoveFolderIds?.length ?? 0)} items moved` });
-              clearSelection();
+              // the single move and the bulk delete follow (inside runMove).
+              await runMove({ fileIds: bulkMoveIds, folderIds: bulkMoveFolderIds ?? [], targetId: pickerFolder, bulk: true });
             }
-            refresh();
             setMoveTarget(null);
             setBulkMoveIds(null);
             setBulkMoveFolderIds(null);
@@ -2406,7 +2951,7 @@ export function FileBrowserPage() {
       />
       <FileInfoDialog
         target={infoTarget}
-        location={breadcrumbs.length ? breadcrumbs.map((b) => b.name).join(" / ") : "Home"}
+        location={breadcrumbs.length ? breadcrumbs.map((b) => b.name).join(" / ") : t("files.label.home")}
         onClose={() => setInfoTarget(null)}
       />
 
@@ -2434,6 +2979,7 @@ export function FileBrowserPage() {
           onClose={() => setViewerFile(null)}
           onNavigate={(f) => setViewerFile(f as FileRow)}
           workspaceId={active?.id}
+          onEdit={can("upload_files") ? (f) => navigate(`/text-editor/${f.id}`, { state: { back: true } }) : undefined}
         />
       )}
     </div>
@@ -2485,10 +3031,12 @@ function RowThumbnail({ fileId, fileName }: { fileId: string; fileName: string }
 // ── Web-style file card (grid view) ────────────────────────
 
 function FileCard({
-  file, selected, anySelected, active, isFavourite,
+  file, selected, anySelected, active, isFavourite, dnd,
   onClick, onSelect, onNameClick, onContextMenu, onFavourite, onComments, onShare, onMore,
 }: {
   file: FileRow;
+  /** Drag-to-move source props (draggable + handlers), or `{ draggable: false }`. */
+  dnd?: Pick<React.HTMLAttributes<HTMLDivElement>, "draggable" | "onDragStart" | "onDragEnd">;
   selected: boolean;
   anySelected: boolean;
   active: boolean;
@@ -2502,13 +3050,17 @@ function FileCard({
   onShare: () => void;
   onMore: (e: React.MouseEvent) => void;
 }) {
-  const ext = extOf(file.name).toUpperCase() || "FILE";
+  const ownDir = useAutoDir();
+  const t = useT();
+  const ext = extOf(file.name).toUpperCase() || t("common.label.fileUppercase");
 
   return (
     <div
       className={`group relative aspect-[3/2] cursor-pointer overflow-hidden rounded-xl transition-all hover:-translate-y-px hover:shadow-lg ${
         active ? "ring-2 ring-green-500" : selected ? "ring-2 ring-[var(--color-primary)]" : "ring-1 ring-black/10"
       }`}
+      id={`file-${file.id}`}
+      {...dnd}
       onClick={onClick}
       onContextMenu={onContextMenu}
     >
@@ -2535,7 +3087,7 @@ function FileCard({
       {/* Legibility scrims */}
       <div className="pointer-events-none absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-black/55 to-transparent" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-3/5 bg-gradient-to-t from-black/85 via-black/40 to-transparent" />
-      {isLiveStill(file) && <LiveBadge size="tile" className="absolute left-9 top-2 z-10" />}
+      {isLiveStill(file) && <LiveBadge size="tile" className="absolute inset-s-9 top-2 z-10" />}
 
       {/* Top-left: multi-select checkbox (hidden for fully-locked files) */}
       {file.lock_mode !== "full_lock" && (
@@ -2544,12 +3096,12 @@ function FileCard({
           checked={selected}
           onChange={onSelect}
           onClick={(e) => e.stopPropagation()}
-          className={`absolute left-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-all ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+          className={`absolute inset-s-2 top-2 z-20 h-4 w-4 accent-[var(--color-primary)] transition-all ${selected || anySelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         />
       )}
 
       {/* Top-right: lock (if any) + hidden (if any) + file-format pill */}
-      <div className="absolute right-2 top-2 z-10 flex items-center gap-1">
+      <div className="absolute inset-e-2 top-2 z-10 flex items-center gap-1">
         {file.lock_mode !== "none" && (
           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-black/45 backdrop-blur-sm">
             <Lock size={12} className="text-white" />
@@ -2564,10 +3116,10 @@ function FileCard({
       </div>
 
       {/* Right vertical action rail */}
-      <div className="absolute bottom-2 right-2 z-20 flex flex-col gap-2 opacity-90 transition-opacity group-hover:opacity-100">
+      <div className="absolute bottom-2 inset-e-2 z-20 flex flex-col gap-2 opacity-90 transition-opacity group-hover:opacity-100">
         <button
           className="flex h-8 w-8 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-colors hover:bg-black/55"
-          title={isFavourite ? "Remove from favourites" : "Add to favourites"}
+          title={isFavourite ? t("files.accessibility.removeFromFavourites") : t("files.label.addToFavourites")}
           onClick={(e) => { e.stopPropagation(); onFavourite(); }}
         >
           <Star size={16} className={isFavourite ? "fill-orange-400 text-orange-400" : "text-white"} />
@@ -2575,23 +3127,23 @@ function FileCard({
         {file.comment_count > 0 && (
           <button
             className="relative flex h-8 w-8 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-colors hover:bg-black/55"
-            title={`${file.comment_count} comment${file.comment_count === 1 ? "" : "s"} - open`}
+            title={t("files.tooltip.commentOpen", { commentCount: file.comment_count })}
             onClick={(e) => { e.stopPropagation(); onComments(); }}
           >
             <MessageCircle size={16} className="text-white" />
-            <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 font-mono text-[9px] text-white">{file.comment_count}</span>
+            <span className="absolute -inset-e-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 font-mono text-[9px] text-white">{file.comment_count}</span>
           </button>
         )}
         <button
           className="flex h-8 w-8 items-center justify-center rounded-full bg-black/35 backdrop-blur-sm transition-colors hover:bg-black/55"
-          title={file.share_count > 0 ? `Shared (${file.share_count}) - manage` : "Share"}
+          title={file.share_count > 0 ? t("files.tooltip.sharedShareCountManage", { shareCount: String(file.share_count) }) : t("files.action.share")}
           onClick={(e) => { e.stopPropagation(); onShare(); }}
         >
           <Share2 size={16} className={file.share_count > 0 ? "text-green-400" : "text-white"} />
         </button>
         <button
           className="flex h-7 w-7 items-center justify-center self-center rounded-full bg-white/10 backdrop-blur-sm transition-colors hover:bg-white/25"
-          title="More"
+          title={t("files.tooltip.more")}
           onClick={onMore}
         >
           <MoreHorizontal size={16} className="text-white" />
@@ -2599,21 +3151,22 @@ function FileCard({
       </div>
 
       {/* Bottom-left: filename + meta line (padded so it clears the rail) */}
-      <div className="absolute inset-x-0 bottom-0 z-10 p-2.5 pr-12">
+      <div className="absolute inset-x-0 bottom-0 z-10 p-2.5 pe-12">
         <div className="flex min-w-0 items-center gap-1.5">
           <button
-            className="min-w-0 truncate text-left font-mono text-sm font-semibold text-white drop-shadow hover:underline"
+            className="min-w-0 truncate text-start font-mono text-sm font-semibold text-white drop-shadow hover:underline"
             title={file.name}
+            dir={ownDir}
             onClick={(e) => { e.stopPropagation(); onNameClick(); }}
           >
             {file.name}
           </button>
           {(file.current_version ?? 1) > 1 && (
-            <span className="shrink-0 rounded border border-white/30 px-1 font-mono text-[9px] text-white/80">v{file.current_version}</span>
+            <span className="shrink-0 rounded border border-white/30 px-1 font-mono text-[9px] text-white/80">{t("common.label.vVersion", { version: String(file.current_version) })}</span>
           )}
         </div>
         <p className="truncate font-mono text-[11px] text-white/70 drop-shadow">
-          {formatBytes(file.size_bytes)} · {formatDate(file.updated_at)}
+          <Part>{formatBytes(file.size_bytes)}</Part> · <Part>{formatDate(file.updated_at)}</Part>
         </p>
       </div>
     </div>

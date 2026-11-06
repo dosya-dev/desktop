@@ -12,6 +12,7 @@ import {
   grantAccess as engineGrantAccess,
   revokeAccess as engineRevokeAccess,
   listMembers as engineListMembers,
+  createHighWaterPersistence,
   type ApiClient,
   type Session,
   type Workspace,
@@ -19,6 +20,15 @@ import {
 } from "@dosya-dev/e2ee-client";
 import { api } from "@/lib/api-client";
 import { buildE2eeClient, normalizeRecoveryKey } from "./client";
+
+/**
+ * The facade's own refusals. The text is an identifier as much as a message:
+ * the store matches on it (`ENGINE_ERRORS` there turns each into a sentence
+ * in the chosen language), so it stays English and never changes.
+ */
+export const ENGINE_LOCKED = "e2ee: locked";
+export const ENGINE_NO_ACTIVE_WORKSPACE = "e2ee: no active workspace";
+export const ENGINE_RECOVERY_UNAVAILABLE = "e2ee: recovery unlock unavailable in this build";
 
 export type EncryptedEntry = { id: string; name: string; kind: "file" | "folder" };
 export type WorkspaceMember = { userId: string; email: string; ed25519Pub: string; x25519Pub: string };
@@ -29,6 +39,13 @@ export type WorkspaceMember = { userId: string; email: string; ed25519Pub: strin
  * below - never a raw KEK, private key, recovery key, or Session/Workspace
  * value.
  */
+/**
+ * What confirms a Vault destroy: the account password (a string), or the code
+ * mailed by POST /api/e2ee/destroy-request. The code is the only proof an
+ * Apple or Google sign-in account has - it was never given a password.
+ */
+export type DestroyProof = string | { code: string };
+
 export interface E2eeEngine {
   hasIdentity(): Promise<boolean>;
   /** first-time setup; returns the recovery key as hex to show ONCE. */
@@ -47,8 +64,15 @@ export interface E2eeEngine {
    * that with the user first. `totpCode` is required when the account has
    * 2FA (the server answers 400 `2fa_required` otherwise).
    */
-  destroyIdentity(password: string, totpCode?: string): Promise<void>;
+  destroyIdentity(proof: DestroyProof, totpCode?: string): Promise<void>;
   lock(): void;
+  /**
+   * The unlocked identity's X25519 keys (copies), for on-device Personas to
+   * open or seal the user's personas key (lib/personas-device/engine-host.ts
+   * unlockPersonas). Null while locked. Optional so test engines need not
+   * implement it.
+   */
+  personasIdentity?(): { x25519Pub: Uint8Array; x25519Priv: Uint8Array } | null;
   /**
    * `name` is sealed INTO the Space (its root index), not merely kept on this
    * machine, so every other device reads the same label.
@@ -151,6 +175,27 @@ function toHex(bytes: Uint8Array): string {
 }
 
 /**
+ * Where each Space's rollback high-water mark lives between sessions. Not a
+ * secret (a version number and a public root hash), so the renderer's
+ * localStorage is fine; what matters is that it outlives the in-memory
+ * `Workspace`, so a relaunch or a Space switch cannot be served a
+ * pre-revocation head unnoticed. Storage that throws degrades to
+ * trust-on-first-use, as before.
+ */
+const highWaterStore = {
+  get(key: string): string | null {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key: string, value: string): void {
+    localStorage.setItem(key, value);
+  },
+};
+
+/**
  * The real engine: wraps `buildE2eeClient()` and holds the in-memory
  * `Session`/`Workspace` in closure - neither is ever exposed to callers.
  */
@@ -158,10 +203,16 @@ export function defaultEngine(): E2eeEngine {
   const { api: e2ee, transport } = buildE2eeClient();
   let session: Session | null = null;
   let ws: Workspace | null = null;
+  const highWater = createHighWaterPersistence(highWaterStore);
+
+  /** The persisted mark to check `id`'s head against, and the hook that keeps it current. */
+  async function markOpts(s: Session, id: string) {
+    return { highWater: await highWater.load(s, id), onAdvance: highWater.onAdvance(s, id) };
+  }
 
   /** Builds a fresh `FileDeps` for a single call, after asserting we're unlocked with an open workspace. */
   function fileDeps(): FileDeps {
-    if (!session || !ws) throw new Error("e2ee: no active workspace");
+    if (!session || !ws) throw new Error(ENGINE_NO_ACTIVE_WORKSPACE);
     return { api: e2ee, transport, session, ws };
   }
 
@@ -182,15 +233,16 @@ export function defaultEngine(): E2eeEngine {
 
     async unlockWithRecoveryKey(recoveryKey) {
       const recover = vendoredRecoveryUnlock();
-      if (!recover) throw new Error("e2ee: recovery unlock unavailable in this build");
+      if (!recover) throw new Error(ENGINE_RECOVERY_UNAVAILABLE);
       // Normalised here as well as in the store action: this is the last point
       // before the key reaches the crypto library, and a future caller of the
       // engine should not have to know the rule.
       session = await recover(e2ee, normalizeRecoveryKey(recoveryKey));
     },
 
-    async destroyIdentity(password, totpCode) {
-      const body: { password: string; totp_code?: string } = { password };
+    async destroyIdentity(proof, totpCode) {
+      const body: { password?: string; code?: string; totp_code?: string } =
+        typeof proof === "string" ? { password: proof } : { code: proof.code };
       if (totpCode) body.totp_code = totpCode;
       // `api` is the cookie-authed desktop REST client; the e2ee ApiClient
       // has no method for this route.
@@ -207,28 +259,37 @@ export function defaultEngine(): E2eeEngine {
       ws = null;
     },
 
+    personasIdentity() {
+      if (!session) return null;
+      const { publicKey, privateKey } = session.identity.x25519;
+      return { x25519Pub: publicKey.slice(), x25519Priv: privateKey.slice() };
+    },
+
     async createWorkspace(id, name) {
-      if (!session) throw new Error("e2ee: locked");
-      ws = await engineCreateWorkspace(e2ee, session, id, name === undefined ? undefined : { name });
+      if (!session) throw new Error(ENGINE_LOCKED);
+      ws = await engineCreateWorkspace(e2ee, session, id, {
+        ...(name === undefined ? {} : { name }),
+        onAdvance: highWater.onAdvance(session, id),
+      });
     },
 
     async readWorkspaceName() {
-      if (!session || !ws) throw new Error("e2ee: no active workspace");
+      if (!session || !ws) throw new Error(ENGINE_NO_ACTIVE_WORKSPACE);
       return engineReadWorkspaceName(e2ee, session, ws);
     },
 
     async readWorkspaceNameById(id) {
-      if (!session) throw new Error("e2ee: locked");
+      if (!session) throw new Error(ENGINE_LOCKED);
       // A SEPARATE handle, deliberately never assigned to `ws`: reading a
       // label must not close the Space the person is looking at. selfFounded
       // stays false (TOFU), as openWorkspace's contract requires for a Space
       // this client did not itself create.
-      const other = await engineOpenWorkspace(e2ee, session, id, { selfFounded: false });
+      const other = await engineOpenWorkspace(e2ee, session, id, { selfFounded: false, ...(await markOpts(session, id)) });
       return engineReadWorkspaceName(e2ee, session, other);
     },
 
     async renameWorkspace(name) {
-      if (!session || !ws) throw new Error("e2ee: no active workspace");
+      if (!session || !ws) throw new Error(ENGINE_NO_ACTIVE_WORKSPACE);
       await engineRenameWorkspace(e2ee, session, ws, name);
     },
 
@@ -237,18 +298,20 @@ export function defaultEngine(): E2eeEngine {
     },
 
     async openWorkspace(id, selfFounded) {
-      if (!session) throw new Error("e2ee: locked");
+      if (!session) throw new Error(ENGINE_LOCKED);
       // e2ee-core (P2b-log Task 2 fix): `selfFounded` must come from OUR OWN
       // persisted state, never from anything the server returns while
       // opening - see workspace.ts's `openWorkspace` doc comment for why a
       // server-derived value is a forge vector. The store (never this
       // facade) decides the value: true for a workspace this account
       // created, false for one merely discovered/shared (TOFU).
-      ws = await engineOpenWorkspace(e2ee, session, id, { selfFounded });
+      // The persisted high-water mark is what makes rollback detection
+      // survive this fresh handle - see `Workspace.floor` in workspace.ts.
+      ws = await engineOpenWorkspace(e2ee, session, id, { selfFounded, ...(await markOpts(session, id)) });
     },
 
     async listFolder(folderId) {
-      if (!session || !ws) throw new Error("e2ee: no active workspace");
+      if (!session || !ws) throw new Error(ENGINE_NO_ACTIVE_WORKSPACE);
       const state = await engineListFolder(e2ee, session, ws, folderId);
       return [...state.values()].map((e) => ({ id: e.id, name: e.name, kind: e.kind }));
     },
@@ -262,17 +325,17 @@ export function defaultEngine(): E2eeEngine {
     },
 
     async listMembers() {
-      if (!ws) throw new Error("e2ee: no active workspace");
+      if (!ws) throw new Error(ENGINE_NO_ACTIVE_WORKSPACE);
       return await engineListMembers(e2ee, ws);
     },
 
     async inviteMember(email) {
-      if (!session || !ws) throw new Error("e2ee: no active workspace");
+      if (!session || !ws) throw new Error(ENGINE_NO_ACTIVE_WORKSPACE);
       await engineGrantAccess(e2ee, session, ws, email);
     },
 
     async revokeMember(userId, ed25519Pub) {
-      if (!session || !ws) throw new Error("e2ee: no active workspace");
+      if (!session || !ws) throw new Error(ENGINE_NO_ACTIVE_WORKSPACE);
       // P2d Task 3: revokeAccess now ROTATES the workspace key (WK_v1->v2)
       // instead of just appending a remove-entry -- it mutates `ws` IN PLACE
       // (wk/wkVersion/lastSeen) on success, so this facade's closed-over `ws`

@@ -3,6 +3,11 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    // src/i18n is shared by the main process, the renderer and Node's test
+    // runner, which only resolves a relative import with its .ts extension.
+    "allowImportingTsExtensions": true,
+    // The renderer bundles src/i18n/messages/en.json and loads the others as chunks.
+    "resolveJsonModule": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -15,21 +20,36 @@
     "paths": {
       "@/*": ["./src/renderer/*"],
       "@dosya-dev/shared": ["../../packages/shared/src"],
+      "@dosya-dev/shared/files/ical": ["../../packages/shared/src/files/ical.ts"],
       "@dosya-dev/audio-player": ["./vendor/audio-player/index.ts"],
+      "@dosya-dev/video-player": ["./vendor/video-player/index.ts"],
+      "@dosya-dev/video-player/react": ["./vendor/video-player/react.tsx"],
+      "@dosya-dev/video-player/skin.css": ["./vendor/video-player/skin.css"],
       "@dosya-dev/e2ee-core": ["./vendor/e2ee-core/index.d.ts"],
-      "@dosya-dev/e2ee-client": ["./vendor/e2ee-client/index.d.ts"]
+      "@dosya-dev/e2ee-client": ["./vendor/e2ee-client/index.d.ts"],
+      "@dosya-dev/personas-engine": ["./vendor/personas-engine/index.d.ts"],
+      "@dosya-dev/face-reader": ["./vendor/face-reader/face_reader.d.ts"],
+      "@dosya-dev/onnxruntime-web": ["./vendor/onnxruntime-web/index.d.ts"]
     }
   },
   "include": [
     "src/renderer/**/*.ts",
     "src/renderer/**/*.tsx",
+    "src/i18n/**/*.ts",
+    "src/i18n/messages/*.json",
     "src/main/telemetry-config.ts",
     "src/main/sync/types.ts",
+    "src/main/sync-pair-label.ts",
     "src/main/menu-template.ts",
     "../../packages/shared/src/**/*.ts",
     "vendor/audio-player/**/*.ts",
+    "vendor/video-player/**/*.ts",
+    "vendor/video-player/**/*.tsx",
     "vendor/e2ee-core/**/*.d.ts",
-    "vendor/e2ee-client/**/*.d.ts"
+    "vendor/e2ee-client/**/*.d.ts",
+    "vendor/personas-engine/**/*.d.ts",
+    "vendor/face-reader/**/*.d.ts",
+    "vendor/onnxruntime-web/**/*.d.ts"
   ],
   // Same reason as tsconfig.node.json's exclude, now that renderer logic has
   // unit tests too: Node's test runner needs the .ts extension in an import

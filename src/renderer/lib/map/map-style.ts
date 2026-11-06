@@ -1,4 +1,5 @@
 import { apiBase } from "@/lib/api-client";
+import { t } from "@/lib/i18n";
 import type { StyleSpecification } from 'maplibre-gl';
 
 // The vector basemap streams from R2 via our own API (range requests) - see
@@ -67,7 +68,7 @@ export function buildMapStyle(dark: boolean, hasBasemap = false): StyleSpecifica
     version: 8,
     glyphs: GLYPHS_URL,
     sources: {
-      protomaps: { type: 'vector', url: basemapUrl(), attribution: '© OpenStreetMap' },
+      protomaps: { type: 'vector', url: basemapUrl(), attribution: t('map.label.openstreetmap') },
     },
     layers: [
       { id: 'background', type: 'background', paint: { 'background-color': c.water } },

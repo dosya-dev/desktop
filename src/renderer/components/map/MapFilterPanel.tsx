@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { MapFilters } from "@/lib/map/map-pins";
+import { useT } from "@/lib/i18n";
 
 interface TreeFolder {
   id: string;
@@ -36,6 +37,7 @@ export function MapFilterPanel({ value, onChange, workspaceId }: {
   onChange: (next: MapFilters) => void;
   workspaceId: string;
 }) {
+  const t = useT();
   const { data } = useQuery({
     queryKey: ["folders-tree", workspaceId],
     queryFn: () => api.get<{ ok: boolean; folders: TreeFolder[] }>(`/api/folders/tree?workspace_id=${workspaceId}`),
@@ -66,14 +68,14 @@ export function MapFilterPanel({ value, onChange, workspaceId }: {
         className={field}
         style={{ borderColor: "var(--color-border)" }}
       >
-        <option value="">Everywhere</option>
+        <option value="">{t("map.option.everywhere")}</option>
         {folders.map((f) => (
           <option key={f.id} value={f.id}>{f.name}</option>
         ))}
       </select>
 
       <label className="flex items-center gap-1 text-xs text-[var(--color-text-muted)]">
-        From
+        {t("map.label.from")}
         <input
           data-testid="map-filter-from"
           type="date"
@@ -85,7 +87,7 @@ export function MapFilterPanel({ value, onChange, workspaceId }: {
       </label>
 
       <label className="flex items-center gap-1 text-xs text-[var(--color-text-muted)]">
-        To
+        {t("map.label.to")}
         <input
           data-testid="map-filter-to"
           type="date"
@@ -106,7 +108,7 @@ export function MapFilterPanel({ value, onChange, workspaceId }: {
           className="rounded-lg border px-2 py-1 text-xs"
           style={{ borderColor: "var(--color-border)" }}
         >
-          Clear
+          {t("common.action.clear")}
         </button>
       )}
     </div>

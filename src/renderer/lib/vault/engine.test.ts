@@ -27,7 +27,8 @@ vi.mock("@dosya-dev/e2ee-client", async (importOriginal) => {
 
 const { defaultEngine, recoveryUnlockFrom } = await import("./engine");
 
-const SESSION = { kek: new Uint8Array(1), identity: {} } as never;
+// `identity.ed25519.publicKey` keys the persisted rollback high-water marks.
+const SESSION = { kek: new Uint8Array(1), identity: { ed25519: { publicKey: new Uint8Array(32) } } } as never;
 
 beforeEach(() => {
   deleteMock.mockReset();
@@ -95,5 +96,25 @@ describe("defaultEngine.destroyIdentity", () => {
     deleteMock.mockResolvedValueOnce(undefined);
     await engine.destroyIdentity("hunter22");
     await expect(engine.createWorkspace("ws_1")).rejects.toThrow(/locked/);
+  });
+});
+
+// On-device Personas opens or seals the user's personas key with the unlocked
+// identity's X25519 keys (lib/personas-device/engine-host.ts unlockPersonas).
+describe("defaultEngine.personasIdentity", () => {
+  it("is null while locked and hands out copies of the X25519 keys once unlocked", async () => {
+    const pub = new Uint8Array(32).fill(1);
+    const priv = new Uint8Array(32).fill(2);
+    passphraseUnlock.mockResolvedValue({ kek: new Uint8Array(1), identity: { ed25519: { publicKey: new Uint8Array(32) }, x25519: { publicKey: pub, privateKey: priv } } });
+    const engine = defaultEngine();
+    expect(engine.personasIdentity?.()).toBeNull();
+    await engine.unlock("passphrase");
+    const id = engine.personasIdentity?.();
+    expect(Array.from(id!.x25519Pub)).toEqual(Array.from(pub));
+    expect(Array.from(id!.x25519Priv)).toEqual(Array.from(priv));
+    id!.x25519Priv.fill(0);
+    expect(priv[0]).toBe(2);
+    engine.lock();
+    expect(engine.personasIdentity?.()).toBeNull();
   });
 });

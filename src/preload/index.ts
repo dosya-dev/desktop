@@ -3,6 +3,7 @@
 // and so cannot inject its own preload script; sandbox-safe by design.
 import "@sentry/electron/preload";
 import { contextBridge, ipcRenderer } from "electron";
+import type { Locale } from "../i18n/locales";
 import type { MenuAction, MenuState } from "../main/menu-template";
 
 /** Typed API exposed to the renderer via window.electronAPI */
@@ -10,6 +11,8 @@ const electronAPI = {
   // Platform
   getPlatform: (): Promise<NodeJS.Platform> =>
     ipcRenderer.invoke("app:get-platform"),
+  // "rtl" when the OS UI is right to left (the window buttons on the right on macOS).
+  getOsDir: (): Promise<"ltr" | "rtl"> => ipcRenderer.invoke("app:get-os-dir"),
 
   // Desktop preferences
   getLaunchAtLogin: (): Promise<boolean> => ipcRenderer.invoke("app:get-launch-at-login"),
@@ -32,6 +35,27 @@ const electronAPI = {
     ipcRenderer.on("window:shown", handler);
     return () => ipcRenderer.removeListener("window:shown", handler);
   },
+
+  // Main emits this when the window's close button hides it to the tray
+  // (never for minimize). The auth screens clear the password field and any
+  // stale error on it, so reopening the app does not show them again.
+  onWindowClosedToTray: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("window:closed-to-tray", handler);
+    return () => ipcRenderer.removeListener("window:closed-to-tray", handler);
+  },
+
+  // Text editor vs. quitting. The editor reports whether it has unsaved
+  // changes; a quit while it does is held by main (src/main/quit-guard.ts),
+  // which shows the window and asks the editor to confirm. The answer is
+  // "shown" as soon as the dialog is up, then "quit" or "cancel".
+  setEditorDirty: (dirty: boolean): void => ipcRenderer.send("editor:dirty", dirty === true),
+  onQuitConfirmRequested: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("editor:confirm-quit", handler);
+    return () => ipcRenderer.removeListener("editor:confirm-quit", handler);
+  },
+  answerQuitConfirm: (answer: "shown" | "quit" | "cancel"): void => ipcRenderer.send("editor:quit-answer", answer),
 
   // Troubleshooting (Settings)
   clearAppCache: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("app:clear-cache"),
@@ -131,6 +155,14 @@ const electronAPI = {
   // Notifications
   showNotification: (opts: { title: string; body: string }): void =>
     ipcRenderer.send("notification:show", opts),
+  // Live chat: a reply notification whose click opens the chat (support-chat:open).
+  showSupportChatNotification: (opts: { title: string; body: string }): void =>
+    ipcRenderer.send("support-chat:notify", opts),
+  onSupportChatOpen: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("support-chat:open", handler);
+    return () => ipcRenderer.removeListener("support-chat:open", handler);
+  },
 
   // Updater
   getAppVersion: (): Promise<string> => ipcRenderer.invoke("app:get-version"),
@@ -171,6 +203,12 @@ const electronAPI = {
     ipcRenderer.on("menu:action", handler);
     return () => ipcRenderer.removeListener("menu:action", handler);
   },
+  getLocale: (): Promise<Locale> => ipcRenderer.invoke("i18n:get-locale"),
+  setLocale: (locale: Locale): Promise<void> => ipcRenderer.invoke("i18n:set-locale", locale),
+  /** The interface zoom factor of this window (1 = 100%). */
+  getZoom: (): Promise<number> => ipcRenderer.invoke("app:get-zoom"),
+  /** Sets this window's zoom; resolves with the factor applied after clamping. */
+  setZoom: (factor: number): Promise<number> => ipcRenderer.invoke("app:set-zoom", factor),
   // What the menu needs to know to enable and check its items.
   reportMenuState: (state: MenuState): void => ipcRenderer.send("menu:state", state),
   // Windows and Linux: the ☰ title-bar button pops the application menu, since

@@ -1,9 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
-  collectDesktopDiagnostics, composeBody, diagnosticsRows, summariseSync, redactPaths,
+  collectDesktopDiagnostics, composeBody, describeSync, diagnosticsRows, summariseSync, redactPaths,
   BODY_MAX, DIAGNOSTICS_STRING_MAX,
 } from "./bug-report.ts";
+import { setTranslator } from "./locale-state.ts";
+import { makeT } from "../../i18n/translator.ts";
+
+// The card's labels translate at call time; these assertions read the English.
+const readMessages = (lang: string) =>
+  JSON.parse(readFileSync(new URL(`../../i18n/messages/${lang}.json`, import.meta.url), "utf8"));
+const enMessages = readMessages("en");
+setTranslator(makeT("en", enMessages, enMessages));
 
 const INFO = { version: "3.0.11", distribution: "direct", arch: "arm64", platform: "macOS 24.6.0", locale: "en-GB" };
 
@@ -147,4 +156,29 @@ test("collectDesktopDiagnostics clamps every string field to DIAGNOSTICS_STRING_
   });
   assert.equal(d.error_message?.length, DIAGNOSTICS_STRING_MAX);
   assert.equal(DIAGNOSTICS_STRING_MAX, 300);
+});
+
+test("the card reads in the chosen language while the payload stays English", () => {
+  const status = { pairs: [{ status: "idle", fileErrorCount: 0 }, { status: "error", fileErrorCount: 3 }], globalPaused: true };
+  // English: the translated line equals the sent one.
+  assert.equal(describeSync(status), summariseSync(status));
+  assert.equal(describeSync({ pairs: [], globalPaused: false }), "no folders");
+  assert.equal(describeSync(null), null);
+
+  setTranslator(makeT("tr", readMessages("tr"), enMessages));
+  try {
+    const d = collectDesktopDiagnostics({ info: null, sync: summariseSync(status), workspaceId: null, page: "/files", errorRef: null, errorMessage: null, now: 1 });
+    assert.equal(d.app_version, "unknown");
+    assert.equal(d.extra.Sync, "2 folders · 1 in error · 3 files failed · paused");
+    const rows = diagnosticsRows(d, { sync: describeSync(status) });
+    assert.deepEqual(rows, [
+      { label: "Uygulama", value: "Bilinmiyor" },
+      { label: "Sistem", value: "Bilinmiyor" },
+      { label: "Sayfa", value: "/files" },
+      { label: "Senkronizasyon", value: "2 klasör · 1 klasörde hata · 3 dosyada hata · duraklatıldı" },
+    ]);
+    assert.ok(composeBody("hi", "log", 200).includes("--- Recent log (last 200 lines) ---"));
+  } finally {
+    setTranslator(makeT("en", enMessages, enMessages));
+  }
 });

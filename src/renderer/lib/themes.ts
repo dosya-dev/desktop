@@ -2,23 +2,27 @@
 // API allow-list in apps/api/src/lib/appearance.ts. Ported to the desktop app so
 // the same theme options offered on the web are available here too.
 
+import type { MessageKey } from "../../i18n/keys";
+
 export type Mode = "light" | "dark" | "system";
 
 export interface ThemeMeta {
   id: string;
   label: string;
+  /** The label's catalog key: what the UI shows, in the chosen language. */
+  labelKey: MessageKey;
   swatch: { bg: string; primary: string; accent: string };
 }
 
 export const THEMES: ThemeMeta[] = [
-  { id: "default",    label: "Default",       swatch: { bg: "#eef7f1", primary: "#2fa563", accent: "#63c98d" } },
-  { id: "mono",       label: "Mono",          swatch: { bg: "#ffffff", primary: "#242424", accent: "#d4d4d4" } },
-  { id: "claude",     label: "Claude",        swatch: { bg: "#f7f3ec", primary: "#b8623f", accent: "#e5c9b3" } },
-  { id: "amber",      label: "Amber",         swatch: { bg: "#fdfbf5", primary: "#e0a020", accent: "#f2d488" } },
-  { id: "ocean",      label: "Ocean",         swatch: { bg: "#f2f7fc", primary: "#2f6fd0", accent: "#9cc0ec" } },
-  { id: "bubblegum",  label: "Bubblegum",     swatch: { bg: "#fdf2f8", primary: "#db4d94", accent: "#f4a9cf" } },
-  { id: "vercel",     label: "Vercel",        swatch: { bg: "#ffffff", primary: "#111111", accent: "#e5e5e5" } },
-  { id: "neo-brutal", label: "Neo-Brutalism", swatch: { bg: "#f4f4f0", primary: "#ff5a4d", accent: "#3fca6b" } },
+  { id: "default",    label: "Default",       labelKey: "appearance.label.default", swatch: { bg: "#eef7f1", primary: "#2fa563", accent: "#63c98d" } },
+  { id: "mono",       label: "Mono",          labelKey: "appearance.label.mono", swatch: { bg: "#ffffff", primary: "#242424", accent: "#d4d4d4" } },
+  { id: "claude",     label: "Claude",        labelKey: "appearance.label.claude", swatch: { bg: "#f7f3ec", primary: "#b8623f", accent: "#e5c9b3" } },
+  { id: "amber",      label: "Amber",         labelKey: "appearance.label.amber", swatch: { bg: "#fdfbf5", primary: "#e0a020", accent: "#f2d488" } },
+  { id: "ocean",      label: "Ocean",         labelKey: "appearance.label.ocean", swatch: { bg: "#f2f7fc", primary: "#2f6fd0", accent: "#9cc0ec" } },
+  { id: "bubblegum",  label: "Bubblegum",     labelKey: "appearance.label.bubblegum", swatch: { bg: "#fdf2f8", primary: "#db4d94", accent: "#f4a9cf" } },
+  { id: "vercel",     label: "Vercel",        labelKey: "appearance.label.vercel", swatch: { bg: "#ffffff", primary: "#111111", accent: "#e5e5e5" } },
+  { id: "neo-brutal", label: "Neo-Brutalism", labelKey: "appearance.label.neoBrutalism", swatch: { bg: "#f4f4f0", primary: "#ff5a4d", accent: "#3fca6b" } },
 ];
 
 export const THEME_IDS = THEMES.map((t) => t.id);

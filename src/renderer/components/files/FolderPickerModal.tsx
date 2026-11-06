@@ -6,6 +6,8 @@
 import { useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { FolderIcon } from "@/components/files/FileIcon";
+import { useT } from "@/lib/i18n";
+import { useAutoDir } from "@/lib/bidi-ui";
 
 export type PickerFolder = { id: string; name: string; parent_id: string | null; file_count: number };
 
@@ -30,6 +32,8 @@ export function FolderPickerModal({
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const ownDir = useAutoDir();
+  const t = useT();
   type Folder = { id: string; name: string; parent_id: string | null; file_count: number };
 
   // Flatten the (always-expanded) tree into a single ordered list ONCE, in
@@ -67,12 +71,17 @@ export function FolderPickerModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div
-        className="w-full max-w-sm rounded-xl bg-[var(--color-bg)] shadow-xl"
+        className="mx-4 w-full min-w-0 max-w-sm rounded-xl bg-[var(--color-bg)] shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="border-b px-5 py-4" style={{ borderColor: "var(--color-border)" }}>
-          <h3 className="text-lg font-semibold">{title}</h3>
-          <p className="text-xs text-[var(--color-text-muted)]">Select destination folder</p>
+          {/* The title quotes the item's name ("Move "<name>""), and a long
+              name with no spaces is one unbreakable word that ran past the
+              dialog's border. Break it anywhere, cap it at three lines, and
+              keep the whole title in the tooltip. Truncating instead would
+              cut the verb off in languages that put it after the name. */}
+          <h3 className="line-clamp-3 text-lg font-semibold [overflow-wrap:anywhere]" title={title}>{title}</h3>
+          <p className="text-xs text-[var(--color-text-muted)]">{t("common.label.selectDestinationFolder")}</p>
         </div>
 
         <div ref={scrollRef} className="max-h-72 overflow-y-auto p-2">
@@ -86,7 +95,7 @@ export function FolderPickerModal({
                 <button
                   key={vi.key}
                   onClick={() => onSelect(id)}
-                  className={`absolute left-0 flex w-full items-center gap-2.5 rounded-lg pr-3 text-sm transition-colors ${
+                  className={`absolute inset-s-0 flex w-full items-center gap-2.5 rounded-lg pe-3 text-sm transition-colors ${
                     selected
                       ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
                       : "hover:bg-[var(--color-bg-secondary)]"
@@ -95,11 +104,11 @@ export function FolderPickerModal({
                     top: 0,
                     height: ROW_H,
                     transform: `translateY(${vi.start}px)`,
-                    paddingLeft: `${12 + (isRoot ? 0 : row.depth * 20)}px`,
+                    paddingInlineStart: `${12 + (isRoot ? 0 : row.depth * 20)}px`,
                   }}
                 >
-                  <FolderIcon fileCount={isRoot ? 1 : row.folder!.file_count} size={16} />
-                  <span className="truncate">{isRoot ? "Root (top level)" : row.folder!.name}</span>
+                  <FolderIcon fileCount={isRoot ? 1 : row.folder!.file_count} size={16} className="shrink-0" />
+                  <span dir={isRoot ? undefined : ownDir} className="min-w-0 truncate" title={isRoot ? undefined : row.folder!.name}>{isRoot ? t("common.label.rootTopLevel") : row.folder!.name}</span>
                 </button>
               );
             })}
@@ -107,7 +116,7 @@ export function FolderPickerModal({
 
           {folders.length === 0 && (
             <p className="py-4 text-center text-sm text-[var(--color-text-muted)]">
-              No folders yet
+              {t("common.empty.noFoldersYet")}
             </p>
           )}
         </div>
@@ -118,7 +127,7 @@ export function FolderPickerModal({
             className="rounded-lg border px-4 py-2 text-sm"
             style={{ borderColor: "var(--color-border)" }}
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             onClick={onConfirm}
@@ -126,7 +135,7 @@ export function FolderPickerModal({
             className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--color-primary-fg)] disabled:opacity-50"
             style={{ background: "var(--color-primary)" }}
           >
-            {isPending ? "Working..." : actionLabel}
+            {isPending ? t("common.status.working") : actionLabel}
           </button>
         </div>
       </div>

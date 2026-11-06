@@ -93,7 +93,7 @@ function createFetchApiClient(opts) {
       });
       if (!res.ok) throw new Error(`e2ee: list-members request failed (${res.status})`);
       const body = await res.json();
-      return body.members;
+      return body.members.map((m) => ({ ...m, grant: m.grant ?? null }));
     },
     async getMembershipLog(workspaceId) {
       const res = await fetchFn(`${baseUrl}/api/e2ee/membership-log/${encodeURIComponent(workspaceId)}`, {
@@ -293,6 +293,8 @@ import {
   fromB64 as fromB645,
   sealGrant,
   openGrant,
+  adGrant,
+  verify,
   genesisEntry,
   appendEntry,
   replayLog,
@@ -354,6 +356,23 @@ var MIN_CLIENT_VERSION = 1;
 var ROOT_FOLDER_ID = "root";
 var GENESIS_PREV_ROOT_HASH = new Uint8Array(32);
 var MAX_REBASE_ATTEMPTS = 10;
+function recordSeen(ws, version, hash) {
+  ws.lastSeen = { version, hash };
+  try {
+    ws.onAdvance?.({ version, hash, wkVersion: ws.wkVersion });
+  } catch {
+  }
+}
+function checkFloor(floor, version, hash) {
+  if (!floor) return;
+  if (version < floor.version) throw new Error("e2ee: workspace rollback detected");
+  if (version === floor.version && toHex2(hash) !== toHex2(floor.hash)) {
+    throw new Error("e2ee: workspace fork detected");
+  }
+}
+function checkWkFloor(floor, wkVersion) {
+  if (floor && wkVersion < floor.wkVersion) throw new Error("e2ee: workspace key rollback detected");
+}
 async function personalMembershipHeadHash(session) {
   return sha256(utf82(`personal:${toHex2(session.identity.ed25519.publicKey)}`));
 }
@@ -420,25 +439,79 @@ async function folderMerkleRootOf(folderIndexes) {
   const leaves = await Promise.all(sorted.map((f) => sha256(f.ciphertext)));
   return merkleRoot(leaves);
 }
+function granterIn(granterEd25519Pub, granteeEd25519Pub, trusted, message) {
+  const granter = granterEd25519Pub ? fromHex2(granterEd25519Pub) : granteeEd25519Pub;
+  const granterHex = toHex2(granter);
+  for (const pubHex of trusted.values()) {
+    if (pubHex === granterHex) return granter;
+  }
+  throw new Error(message);
+}
+var OWN_GRANT_FORGED = "e2ee: workspace grant was not sealed by a member";
+var PIN_GRANT_UNTRUSTED = "e2ee: member grant was not sealed by a remaining member";
+async function verifyMemberKeyPin(ws, member, trustedGranters) {
+  if (!member.grant) {
+    throw new Error(`e2ee: no signed grant for member "${member.userId}" to pin their encryption key against`);
+  }
+  const granteePubkey = fromHex2(member.ed25519Pub);
+  const granter = granterIn(member.grant.granterEd25519Pub, granteePubkey, trustedGranters, PIN_GRANT_UNTRUSTED);
+  const ad = adGrant({
+    fmt: FMT2,
+    workspaceId: ws.workspaceId,
+    wkVersion: member.grant.wkVersion,
+    granteeId: member.ed25519Pub,
+    granteePubkey: fromHex2(member.x25519Pub),
+    granterId: toHex2(granter)
+  });
+  const ok = await verify(deserializeGrant(member.grant.sealed).granterSig, ad, granter);
+  if (!ok) {
+    throw new Error(`e2ee: member encryption key does not match their signed grant (member "${member.userId}")`);
+  }
+}
+async function checkRootBindsLog(bound, entries, logHeadHash, signerPub) {
+  const boundHex = toHex2(bound);
+  if (boundHex === toHex2(logHeadHash)) return;
+  for (let i = 1; i < entries.length; i++) {
+    if (toHex2(entries[i].entry.prevHash) === boundHex) return;
+  }
+  const legacy = await sha256(utf82(`personal:${toHex2(signerPub)}`));
+  if (boundHex === toHex2(legacy)) return;
+  throw new Error("e2ee: root does not match the membership log");
+}
 async function getVerifiedHead(api, session, ws) {
   const head = await api.getHead(ws.workspaceId);
   if (!head) return null;
   const { fields, sig } = decodeSignedRoot(head.signedRoot);
+  if (fields.workspaceId !== ws.workspaceId) throw new Error("e2ee: root belongs to a different workspace");
+  if (fields.manifestVersion !== head.version) throw new Error("e2ee: head version does not match the signed root");
   const rawLog = await api.getMembershipLog(ws.workspaceId);
   const entries = rawLog.map((e) => deserializeSignedEntry(e.entryBlob));
   const selfPub = session.identity.ed25519.publicKey;
   const selfId = toHex2(selfPub);
   const anchor = ws.selfFounded ? { id: selfId, pubkey: selfPub } : void 0;
-  const { members } = await replayLog(entries, anchor);
-  let ok = false;
+  const { members, headHash: logHeadHash } = await replayLog(entries, anchor);
+  let signer = null;
   for (const pubHex of members.values()) {
-    if (await verifyRootManifest(fields, sig, fromHex2(pubHex))) {
-      ok = true;
+    const pub = fromHex2(pubHex);
+    if (await verifyRootManifest(fields, sig, pub)) {
+      signer = pub;
       break;
     }
   }
-  if (!ok) throw new Error("e2ee: root not signed by any current member");
+  if (!signer) throw new Error("e2ee: root not signed by any current member");
+  await checkRootBindsLog(fields.membershipHeadHash, entries, logHeadHash, signer);
+  const servedMerkleRoot = await folderMerkleRootOf(
+    head.folderIndexes.map((f) => ({ folderId: f.folderId, ciphertext: fromB645(f.ciphertext) }))
+  );
+  if (toHex2(servedMerkleRoot) !== toHex2(fields.folderMerkleRoot)) {
+    throw new Error("e2ee: folder indexes do not match the signed root");
+  }
+  const everMembers = /* @__PURE__ */ new Map();
+  for (const { entry } of entries) {
+    if (entry.op === "genesis" || entry.op === "add") everMembers.set(entry.subjectId, toHex2(entry.subjectPubkey));
+  }
   const hash = await rootManifestHash(fields);
+  checkFloor(ws.floor, head.version, hash);
   const freshness = checkFreshness(ws.lastSeen ?? null, {
     version: head.version,
     hash,
@@ -446,8 +519,8 @@ async function getVerifiedHead(api, session, ws) {
   });
   if (freshness === "rollback") throw new Error("e2ee: workspace rollback detected");
   if (freshness === "fork") throw new Error("e2ee: workspace fork detected");
-  ws.lastSeen = { version: head.version, hash };
-  return { head, fields };
+  recordSeen(ws, head.version, hash);
+  return { head, fields, logHeadHash, members, everMembers };
 }
 async function folderIndexFromHead(verified, folderId, ws) {
   if (!verified) return { state: /* @__PURE__ */ new Map(), name: null };
@@ -522,14 +595,26 @@ async function createWorkspace(api, session, workspaceId, opts) {
     granterSignKey: session.identity.ed25519.privateKey
   });
   await api.putWorkspaceGrant(workspaceId, WK_VERSION, serializeGrant(grant), selfId);
-  return { workspaceId, wk, wkVersion: WK_VERSION, selfFounded: true, lastSeen: { version: 1, hash: rootHashBytes } };
+  const ws = { workspaceId, wk, wkVersion: WK_VERSION, selfFounded: true, onAdvance: opts?.onAdvance };
+  recordSeen(ws, 1, rootHashBytes);
+  return ws;
 }
 async function openWorkspace(api, session, workspaceId, opts) {
   const stored = await api.getWorkspaceGrant(workspaceId);
   if (!stored) throw new Error("e2ee: openWorkspace: no stored key for this workspace");
+  const floor = opts?.highWater;
+  checkWkFloor(floor, stored.wkVersion);
   const { wk, wkVersion } = await deriveWkFromStoredGrant(session, workspaceId, stored);
-  const ws = { workspaceId, wk, wkVersion, selfFounded: opts?.selfFounded ?? false };
-  await getVerifiedHead(api, session, ws);
+  const ws = {
+    workspaceId,
+    wk,
+    wkVersion,
+    selfFounded: opts?.selfFounded ?? false,
+    floor,
+    onAdvance: opts?.onAdvance
+  };
+  const verified = await getVerifiedHead(api, session, ws);
+  if (verified) granterIn(stored.granterEd25519Pub, session.identity.ed25519.publicKey, verified.everMembers, OWN_GRANT_FORGED);
   return ws;
 }
 async function deriveWkFromStoredGrant(session, workspaceId, stored) {
@@ -600,6 +685,10 @@ async function revokeAccess(api, session, ws, removed) {
     }
     const members = await listMembers(api, ws);
     if (!members.some((m) => m.userId === removed.userId)) {
+      const verified = await getVerifiedHead(api, session, ws);
+      if (verified && [...verified.members.values()].includes(removed.ed25519Pub)) {
+        throw new Error("e2ee: server member roster does not match the signed membership log");
+      }
       return;
     }
     const remaining = members.filter((m) => m.userId !== removed.userId);
@@ -616,10 +705,14 @@ async function revokeAccess(api, session, ws, removed) {
           `e2ee: revokeAccess: lost this identity's own grant for workspace "${ws.workspaceId}" while retrying a rotation (a concurrent rotation may have removed the caller itself) -- re-open the workspace`
         );
       }
+      checkWkFloor(ws.floor, stored.wkVersion);
       const { wk, wkVersion } = await deriveWkFromStoredGrant(session, ws.workspaceId, stored);
       ws.wk = wk;
       ws.wkVersion = wkVersion;
-      await getVerifiedHead(api, session, ws);
+      const reverified = await getVerifiedHead(api, session, ws);
+      if (reverified) {
+        granterIn(stored.granterEd25519Pub, session.identity.ed25519.publicKey, reverified.everMembers, OWN_GRANT_FORGED);
+      }
       continue;
     }
     const selfGrant = selfMember ? payload.grants.find((g) => g.memberUserId === selfMember.userId) : void 0;
@@ -641,7 +734,7 @@ async function revokeAccess(api, session, ws, removed) {
     });
     ws.wk = wk2;
     ws.wkVersion = payload.newWkVersion;
-    ws.lastSeen = { version: res.version, hash: fromHex2(payload.rootHash) };
+    recordSeen(ws, res.version, fromHex2(payload.rootHash));
     return;
   }
 }
@@ -657,6 +750,19 @@ async function computeRotation(api, session, ws, args) {
     throw new Error("e2ee: computeRotation: workspace has no head yet");
   }
   const { head } = verified;
+  const logMembers = new Set(verified.members.values());
+  if (!logMembers.has(args.removed.ed25519Pub)) {
+    throw new Error("e2ee: computeRotation: removed member is not in the signed membership log");
+  }
+  const expectedRemaining = new Set(logMembers);
+  expectedRemaining.delete(args.removed.ed25519Pub);
+  const offeredRemaining = new Set(args.remaining.map((m) => m.ed25519Pub));
+  const rosterMatches = offeredRemaining.size === args.remaining.length && offeredRemaining.size === expectedRemaining.size && [...offeredRemaining].every((pub) => expectedRemaining.has(pub));
+  if (!rosterMatches) {
+    throw new Error("e2ee: server member roster does not match the signed membership log");
+  }
+  const trustedGranters = new Map([...verified.members].filter(([, pub]) => pub !== args.removed.ed25519Pub));
+  for (const m of args.remaining) await verifyMemberKeyPin(ws, m, trustedGranters);
   const changedFolderIndexes = [];
   const fileManifests = [];
   const newFolderCiphertexts = [];
@@ -891,7 +997,7 @@ async function commitFolderOps(api, session, ws, folderId, localOps, fileExtras,
     );
     const otherFolders = priorFolderIndexes.filter((f) => f.folderId !== folderId).map((f) => ({ folderId: f.folderId, ciphertext: fromB645(f.ciphertext) }));
     const folderMerkleRoot = await folderMerkleRootOf([...otherFolders, { folderId, ciphertext }]);
-    const membershipHeadHash = await personalMembershipHeadHash(session);
+    const membershipHeadHash = priorHead?.logHeadHash ?? await personalMembershipHeadHash(session);
     const fields = {
       fmt: FMT2,
       workspaceId: ws.workspaceId,
@@ -923,7 +1029,7 @@ async function commitFolderOps(api, session, ws, folderId, localOps, fileExtras,
       removedChunkRefs
     });
     if (!("conflict" in result)) {
-      ws.lastSeen = { version: fields.manifestVersion, hash: rootHashBytes };
+      recordSeen(ws, fields.manifestVersion, rootHashBytes);
       return;
     }
     const stored = await api.getWorkspaceGrant(ws.workspaceId);
@@ -932,9 +1038,14 @@ async function commitFolderOps(api, session, ws, folderId, localOps, fileExtras,
         `e2ee: commitFolderOps: lost this identity's own grant for workspace "${ws.workspaceId}" while retrying a commit (a concurrent rotation may have removed the caller itself) -- re-open the workspace`
       );
     }
+    checkWkFloor(ws.floor, stored.wkVersion);
     const { wk, wkVersion } = await deriveWkFromStoredGrant(session, ws.workspaceId, stored);
     ws.wk = wk;
     ws.wkVersion = wkVersion;
+    const reverified = await getVerifiedHead(api, session, ws);
+    if (reverified) {
+      granterIn(stored.granterEd25519Pub, session.identity.ed25519.publicKey, reverified.everMembers, OWN_GRANT_FORGED);
+    }
     if (wkVersion !== startWkVersion) {
       const hasFileRecord = squashed.some(
         (op) => op.type === "put" && typeof op.entry.meta.record === "string"
@@ -1251,6 +1362,51 @@ async function deleteEntry(deps, folderId, entryId) {
     }
   }
 }
+
+// src/high-water.ts
+import { toHex as toHex4, fromHex as fromHex3 } from "@dosya-dev/e2ee-core";
+function keyFor(session, workspaceId) {
+  return `dosya_e2ee_hw.${toHex4(session.identity.ed25519.publicKey)}.${workspaceId.replace(/[^A-Za-z0-9._-]/g, "_")}`;
+}
+function encodeHighWater(mark) {
+  return JSON.stringify({ v: mark.version, h: toHex4(mark.hash), k: mark.wkVersion });
+}
+function decodeHighWater(raw) {
+  if (!raw) return void 0;
+  try {
+    const o = JSON.parse(raw);
+    if (typeof o.v !== "number" || !Number.isSafeInteger(o.v) || typeof o.k !== "number" || !Number.isSafeInteger(o.k) || typeof o.h !== "string" || !/^[0-9a-f]{64}$/.test(o.h)) {
+      return void 0;
+    }
+    return { version: o.v, hash: fromHex3(o.h), wkVersion: o.k };
+  } catch {
+    return void 0;
+  }
+}
+function createHighWaterPersistence(store) {
+  const queues = /* @__PURE__ */ new Map();
+  return {
+    async load(session, workspaceId) {
+      const key = keyFor(session, workspaceId);
+      await queues.get(key);
+      return decodeHighWater(await store.get(key));
+    },
+    onAdvance(session, workspaceId) {
+      const key = keyFor(session, workspaceId);
+      return (mark) => {
+        const next = (queues.get(key) ?? Promise.resolve()).then(async () => {
+          const saved = decodeHighWater(await store.get(key));
+          if (saved && (mark.version < saved.version || mark.version === saved.version && mark.wkVersion <= saved.wkVersion)) {
+            return;
+          }
+          await store.set(key, encodeHighWater(mark));
+        }).catch(() => {
+        });
+        queues.set(key, next);
+      };
+    }
+  };
+}
 export {
   MAX_SPACE_NAME_LENGTH,
   WorkspaceRekeyedError,
@@ -1258,14 +1414,17 @@ export {
   computeRotation,
   createFetchApiClient,
   createFetchChunkTransport,
+  createHighWaterPersistence,
   createInMemoryChunkTransport,
   createWorkspace,
+  decodeHighWater,
   decodeSignedRoot,
   deleteEntry,
   deserializeGrant,
   deserializeSignedEntry,
   downloadFile,
   downloadFileTo,
+  encodeHighWater,
   grantAccess,
   listFolder,
   listFolderAt,

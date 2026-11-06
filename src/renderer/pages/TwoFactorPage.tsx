@@ -1,12 +1,16 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { api, ApiError } from "@/lib/api-client";
+import { api } from "@/lib/api-client";
+import { authErrorMessage } from "@/lib/auth-error";
 import { useAuth } from "@/lib/auth-context";
 import { Shield, ArrowLeft, KeyRound, Mail } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { useAuthDirection } from "@/lib/auth-direction";
+import { useT } from "@/lib/i18n";
+import { richText } from "@/lib/rich-text";
 
 export function TwoFactorPage() {
+  const t = useT();
   const navigate = useNavigate();
   const location = useLocation();
   const { refreshUser } = useAuth();
@@ -25,7 +29,7 @@ export function TwoFactorPage() {
     setError("");
 
     if (!code.trim()) {
-      setError("Please enter a code");
+      setError(t("two-factor.error.enterTheCodeToContinue"));
       return;
     }
 
@@ -41,11 +45,7 @@ export function TwoFactorPage() {
       await refreshUser(true);
       navigate("/dashboard");
     } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message);
-      } else {
-        setError("Verification failed. Please try again.");
-      }
+      setError(authErrorMessage(err, t("two-factor.error.couldNotCheckTheCode")));
     } finally {
       setLoading(false);
     }
@@ -75,13 +75,15 @@ export function TwoFactorPage() {
               <Shield size={20} className="text-[var(--color-primary)]" />
             )}
           </div>
-          <h1 className="text-2xl font-semibold">Two-factor authentication</h1>
+          <h1 className="text-2xl font-semibold">{t("common.heading.twoFactorAuthentication")}</h1>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
             {isRecovery
-              ? "Enter one of your recovery codes"
+              ? t("two-factor.label.enterOneOfYourRecoveryCodes")
               : method === "email"
-                ? <>We sent a 6-digit code to <span className="font-medium text-[var(--color-text)]">{email}</span></>
-                : "Enter the code from your authenticator app"}
+                ? richText(t, "common.description.weSentA6DigitCodeToEmail", {}, {
+                    email: <span className="font-medium text-[var(--color-text)]">{email}</span>,
+                  })
+                : t("two-factor.description.enterTheCodeFromYourAuthenticatorApp")}
           </p>
         </div>
 
@@ -94,7 +96,7 @@ export function TwoFactorPage() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">
-              {isRecovery ? "Recovery code" : "Verification code"}
+              {isRecovery ? t("two-factor.label.recoveryCode") : t("common.label.verificationCode")}
             </label>
             {isRecovery ? (
               <input
@@ -102,7 +104,7 @@ export function TwoFactorPage() {
                 value={code}
                 onChange={(e) => setCode(e.target.value)}
                 autoFocus
-                placeholder="xxxx-xxxx-xxxx"
+                placeholder={t("two-factor.placeholder.recoveryCodeFormat")}
                 className="w-full rounded-lg border px-3 py-2 text-sm font-mono outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)]"
                 style={{ borderColor: "var(--color-border)" }}
               />
@@ -128,7 +130,7 @@ export function TwoFactorPage() {
               background: loading ? "var(--color-primary-hover)" : "var(--color-primary)",
             }}
           >
-            {loading ? "Verifying..." : "Verify"}
+            {loading ? t("common.status.verifying") : t("two-factor.action.verify")}
           </button>
         </form>
 
@@ -138,15 +140,15 @@ export function TwoFactorPage() {
               onClick={() => { setIsRecovery(true); setCode(""); setError(""); }}
               className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-primary)]"
             >
-              <KeyRound size={11} className="mr-1 inline" />
-              Use a recovery code instead
+              <KeyRound size={11} className="me-1 inline" />
+              {t("two-factor.label.useARecoveryCodeInstead")}
             </button>
           ) : (
             <button
               onClick={() => { setIsRecovery(false); setCode(""); setError(""); }}
               className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-primary)]"
             >
-              Back to {method === "email" ? "email" : "authenticator"} code
+              {method === "email" ? t("two-factor.label.backToEmailCode") : t("two-factor.label.backToAuthenticatorCode")}
             </button>
           )}
         </div>
@@ -155,8 +157,8 @@ export function TwoFactorPage() {
           onClick={() => navigate("/login")}
           className="mt-4 flex w-full items-center justify-center gap-1.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
         >
-          <ArrowLeft size={14} />
-          Back to sign in
+          <ArrowLeft size={14} className="rtl:-scale-x-100" />
+          {t("common.action.backToSignIn")}
         </button>
       </div>
     </div>

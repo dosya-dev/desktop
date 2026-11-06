@@ -1,11 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   LOCK_MODE_OPTIONS, MIN_LOCK_PASSWORD_LENGTH,
   canApplyLock, describeLockMode, describeLockStatus, describeLockTarget,
   lockActionLabel, passwordFieldLabel, passwordHint,
 } from "./lock-mode.ts";
+import { setTranslator } from "./locale-state.ts";
+import { makeT } from "../../i18n/translator.ts";
+
+// The module translates at call time; these assertions read the English.
+const enMessages = JSON.parse(readFileSync(new URL("../../i18n/messages/en.json", import.meta.url), "utf8"));
+setTranslator(makeT("en", enMessages, enMessages));
 
 test("offers the three modes in order, with the user-facing labels", () => {
   assert.deepEqual(LOCK_MODE_OPTIONS.map((o) => [o.value, o.label]), [
@@ -78,4 +85,20 @@ test("the target chip summarises folders by contents and files by type", () => {
   assert.equal(describeLockTarget({ kind: "file", extension: "", size: "2.4 MB" }), "File · 2.4 MB");
   assert.equal(describeLockTarget({ kind: "file", extension: "jpg" }), "JPG");
   assert.equal(describeLockTarget({ kind: "file" }), "File");
+});
+
+test("every line follows the language current at call time", () => {
+  const trMessages = JSON.parse(readFileSync(new URL("../../i18n/messages/tr.json", import.meta.url), "utf8"));
+  setTranslator(makeT("tr", trMessages, enMessages));
+  try {
+    assert.deepEqual(LOCK_MODE_OPTIONS.map((o) => o.label), ["Kilitsiz", "Salt görüntüleme", "Parola"]);
+    assert.equal(describeLockStatus({ lock_mode: "view_only", locked_by_name: "Firat Kaya", lockedWhen: "2 gün önce" }), "Salt görüntüleme · Ayarlayan: Firat Kaya, 2 gün önce");
+    assert.equal(describeLockStatus({ lock_mode: "full_lock", lockedWhen: "dün" }), "Parolalı kilit · Ayarlanma zamanı: dün");
+    assert.equal(lockActionLabel({ selected: "full_lock", current: "none" }), "Parolayla kilitle");
+    assert.equal(passwordHint("full_lock"), "En az 8 karakter. Mevcut parolanın yerini alır.");
+    assert.equal(describeLockTarget({ kind: "folder", file_count: 1 }), "Klasör · 1 dosya");
+  } finally {
+    setTranslator(makeT("en", enMessages, enMessages));
+  }
+  assert.equal(LOCK_MODE_OPTIONS[0].label, "Unlocked");
 });
