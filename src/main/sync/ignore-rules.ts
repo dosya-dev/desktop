@@ -50,6 +50,8 @@ export function ignoreReason(
   isDirectory: boolean,
   userPatterns?: string[],
   absPath?: string,
+  /** Compare names case-insensitively (macOS/Windows filesystems fold case). */
+  foldCase = false,
 ): string | null {
   // Our own temp/partial-download files. downloadToFile writes them as a
   // SUFFIX ("photo.jpg.dosya-sync-tmp"), so a prefix-only check misses them
@@ -72,7 +74,10 @@ export function ignoreReason(
   // User-configured patterns
   if (userPatterns && userPatterns.length > 0) {
     for (const pattern of userPatterns) {
-      if (matchesUserPattern(name, isDirectory, pattern, absPath)) {
+      if (matchesUserPattern(
+        foldCase ? name.toLowerCase() : name, isDirectory,
+        foldCase && !pattern.startsWith("/") ? pattern.toLowerCase() : pattern, absPath,
+      )) {
         return `excluded by pattern "${pattern}"`;
       }
     }
@@ -90,8 +95,36 @@ export function shouldIgnoreEntry(
   isDirectory: boolean,
   userPatterns?: string[],
   absPath?: string,
+  foldCase = false,
 ): boolean {
-  return ignoreReason(name, isDirectory, userPatterns, absPath) !== null;
+  return ignoreReason(name, isDirectory, userPatterns, absPath, foldCase) !== null;
+}
+
+/**
+ * Whether a REMOTE path, placed under the local root, lands on something the
+ * pair ignores. Every segment is judged, so a remote `.git/hooks/pre-commit`
+ * is caught by a `.git` exclude the same way the local walk never descends
+ * into `.git`. The local scan only ever filtered what it found on disk; the
+ * remote side was never asked, so a workspace member could create
+ * `.git/hooks/pre-commit` and sync wrote it into the excluded local `.git`
+ * (bounty 2026-11-07). `foldCase` must be on where the filesystem folds case,
+ * or `.GIT/...` walks into `.git` anyway.
+ */
+export function isRemotePathIgnored(
+  relPath: string,
+  isDirectory: boolean,
+  userPatterns: string[] | undefined,
+  localRoot: string,
+  foldCase: boolean,
+): boolean {
+  const segments = relPath.split("/").filter(Boolean);
+  let abs = localRoot.replace(/[\\/]+$/, "");
+  for (let i = 0; i < segments.length; i++) {
+    abs = `${abs}/${segments[i]}`;
+    const segIsDir = i < segments.length - 1 || isDirectory;
+    if (shouldIgnoreEntry(segments[i], segIsDir, userPatterns, abs, foldCase)) return true;
+  }
+  return false;
 }
 
 /** Forward slashes, no trailing slash - so "/proc/" and "\proc" both compare. */

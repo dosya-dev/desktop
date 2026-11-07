@@ -84,3 +84,23 @@ export async function prepareSafeSyncPath(
   }
   return current;
 }
+
+/**
+ * True when `to` exists and is not the same filesystem object as `from`.
+ * Lets a case-only rename (`a.txt` -> `A.txt` on a case-folding filesystem,
+ * one inode) through while refusing a rename that would replace another file.
+ */
+export async function occupiedByOtherFile(from: string, to: string): Promise<boolean> {
+  let target;
+  try {
+    target = await lstat(to, { bigint: true });
+  } catch {
+    return false;
+  }
+  try {
+    const source = await lstat(from, { bigint: true });
+    return !(source.dev === target.dev && source.ino === target.ino && source.ino !== 0n);
+  } catch {
+    return true;
+  }
+}

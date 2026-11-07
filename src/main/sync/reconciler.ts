@@ -2,6 +2,7 @@ import { findCaseCollisions, FOLDS_CASE } from "./case-collisions";
 import { join } from "path";
 import { readdir, stat } from "fs/promises";
 import { shouldIgnoreEntry } from "./local-watcher";
+import { isRemotePathIgnored } from "./ignore-rules";
 import { toRelPath, normalizeRel, longPath } from "./paths";
 import type {
   SyncFileRecord,
@@ -152,6 +153,31 @@ async function scanLocal(
 }
 
 /**
+ * Take remote paths the pair ignores out of both maps, so nothing is planned
+ * for them in either direction: no local folder is created and no file is
+ * downloaded or moved into an excluded path such as `.git`. Returns the file
+ * ids dropped, for callers that must tell "ignored" from "folder unknown".
+ */
+function dropIgnoredRemotePaths(
+  pair: SyncPair,
+  filePathMap: Map<string, string>,
+  folderPathMap: Map<string, string>,
+): Set<string> {
+  const ignoredFileIds = new Set<string>();
+  const patterns = pair.excludedPatterns;
+  for (const [id, relPath] of folderPathMap) {
+    if (isRemotePathIgnored(relPath, true, patterns, pair.localPath, FOLDS_CASE)) folderPathMap.delete(id);
+  }
+  for (const [id, relPath] of filePathMap) {
+    if (isRemotePathIgnored(relPath, false, patterns, pair.localPath, FOLDS_CASE)) {
+      filePathMap.delete(id);
+      ignoredFileIds.add(id);
+    }
+  }
+  return ignoredFileIds;
+}
+
+/**
  * Three-way diff: compare stored state, remote snapshot, and local filesystem.
  */
 export async function reconcile(
@@ -192,6 +218,7 @@ export async function reconcile(
     normalize: normalizeRel,
   });
   if (unresolved.length > 0) onUnknownParent?.(unresolved);
+  dropIgnoredRemotePaths(pair, filePathMap, folderPathMap);
 
   // Build reverse maps: relative path → remoteId
   const pathToRemoteFile = new Map<string, string>();
@@ -541,6 +568,7 @@ export async function reconcileRemoteOnly(
   });
   const unresolved: RemoteFileInfo[] = [];
   const unknownIds = new Set(unplaceable.map((f) => f.id));
+  const ignoredIds = dropIgnoredRemotePaths(pair, filePathMap, folderPathMap);
 
   // Reusing a tracked path with a new id is not a normal remote arrival.
   // Compare the actual local version through the full planner before a
@@ -574,7 +602,7 @@ export async function reconcileRemoteOnly(
 
   // Check each remote file against stored state
   for (const [remoteId, remoteFile] of remote.files) {
-    if (collidedIds.has(remoteId)) continue;
+    if (collidedIds.has(remoteId) || ignoredIds.has(remoteId)) continue;
     const stored = base.fileById(remoteId);
     const relPath = filePathMap.get(remoteId);
 

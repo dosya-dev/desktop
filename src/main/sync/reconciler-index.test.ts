@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SyncIndex } from "./index-db";
@@ -128,6 +128,70 @@ describe("reconciliation with persisted sync history", () => {
     expect(await reconcile(pair, snapshot(moved), base())).toEqual([]);
     await writeFile(join(root, "renamed.txt"), "a longer local revision");
     expect((await reconcile(pair, snapshot(moved), base())).map(action => action.type)).toEqual(["upload-update"]);
+  });
+
+  // Bounty 2026-11-07: excludes filtered only the local scan, so a remote
+  // `.git/hooks/pre-commit` was created inside the excluded local `.git`.
+  describe("remote paths under an excluded folder", () => {
+    const gitTree = (gitName: string) => ({
+      folders: new Map([
+        ["g", { id: "g", name: gitName, parent_id: "folder", file_count: 0 }],
+        ["h", { id: "h", name: "hooks", parent_id: "g", file_count: 1 }],
+      ]),
+      files: new Map([[file.id, file], ["hook", { ...file, id: "hook", name: "pre-commit", folder_id: "h", size_bytes: 20 }]]),
+    });
+    const touchesGit = (actions: { type: string }[]) =>
+      actions.filter((a: any) =>
+        (a.type === "create-local-folder" && /\.git/i.test(a.name)) ||
+        (a.type === "download-new" && a.remoteFile?.id === "hook"));
+
+    it("plans nothing for them on the full pass", async () => {
+      const excluded = { ...pair, excludedPatterns: [".git"] };
+      expect(touchesGit(await reconcile(excluded, gitTree(".git"), base()))).toEqual([]);
+    });
+
+    it("plans nothing for them on the remote-only pass", async () => {
+      const excluded = { ...pair, excludedPatterns: [".git"] };
+      expect(touchesGit(await reconcileRemoteOnly(excluded, gitTree(".git"), base()))).toEqual([]);
+    });
+
+    it.skipIf(process.platform !== "darwin" && process.platform !== "win32")(
+      "treats a case variant as the excluded folder where the filesystem folds case", async () => {
+        const excluded = { ...pair, excludedPatterns: [".git"] };
+        expect(touchesGit(await reconcile(excluded, gitTree(".GIT"), base()))).toEqual([]);
+        expect(touchesGit(await reconcileRemoteOnly(excluded, gitTree(".GIT"), base()))).toEqual([]);
+      });
+
+    it("still syncs the same tree when nothing excludes it", async () => {
+      expect(touchesGit(await reconcile(pair, gitTree(".git"), base())).length).toBeGreaterThan(0);
+    });
+  });
+
+  // Bounty 2026-11-07: a remote rename onto the name of an untracked local
+  // file renamed over it, even with keep-both.
+  it("a remote rename never replaces an unrelated local file", async () => {
+    const engine = new SyncEngine("https://example.test", {
+      ...NULL_ENV, userDataDir: join(directory, "appdata"),
+    }) as any;
+    Object.defineProperty(engine, "index", { value: index });
+    engine.started = true;
+    engine.emitStatus = () => {};
+    engine.log = () => {};
+    const rt = {
+      pair, state: EMPTY_PAIR_STATE(pair.id), status: "idle", notices: new Map(),
+      totalFilesInBatch: 0, completedFilesInBatch: 0,
+      totalBytesInBatch: 0, completedBytesInBatch: 0,
+    };
+    const moved = { ...file, name: "private.txt", updated_at: 200 };
+    // Planned before the local file appears (the paused/offline case), so the
+    // executor is the last line.
+    const actions = await reconcileRemoteOnly(pair, snapshot(moved), base());
+    expect(actions.map((a) => a.type)).toEqual(["move-local"]);
+    await writeFile(join(root, "private.txt"), "LOCAL-PRIVATE-BYTES");
+    await engine.executeActions(rt, actions);
+    expect(await readFile(join(root, "private.txt"), "utf8")).toBe("LOCAL-PRIVATE-BYTES");
+    expect(await readFile(join(root, "notes.txt"), "utf8")).toBe("original version");
+    expect(index.getFileById(pair.id, file.id)?.localPath).toBe("notes.txt");
   });
 
   it("leaves case-colliding remote files out of the plan and reports them", async () => {

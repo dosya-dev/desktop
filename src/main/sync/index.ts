@@ -3,7 +3,7 @@ import { access, readdir, stat, statfs, unlink, mkdir } from "fs/promises";
 import { join, resolve, sep, basename, dirname } from "path";
 import { toRelPath, normalizeRel, pathKey, absKey, longPath } from "./paths";
 import { baselineFor, baselineFromStat, localMatchesRecord, LocalChangedDuringDownloadError, updateMayReplace } from "./download-guard";
-import { prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
+import { occupiedByOtherFile, prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
 import { loadConfig, saveConfig, loadPairState, deletePairState, openSyncIndex, syncStateDir, setSyncDataDir } from "./config";
 import type { SyncIndex, PairMeta } from "./index-db";
 import { migrateJsonStateIfNeeded } from "./index-migrate";
@@ -1922,6 +1922,14 @@ export class SyncEngine extends EventEmitter {
               if (checkedOld !== oldPath || checkedNew !== newPath) {
                 throw new UnsafeSyncPathError(newRelPath, "sync root changed during move");
               }
+              // Never rename over a different file. The planner judged its own
+              // scan, which leaves out ignored files, and the remote-only pass
+              // never looks at the destination at all, so a remote rename onto
+              // a local file's name replaced that file (bounty 2026-11-07). A
+              // case-only rename of this same file is one inode and proceeds.
+              if (await occupiedByOtherFile(longPath(oldPath), longPath(newPath))) {
+                throw new UnsafeSyncPathError(newRelPath, "a different local file already exists here; rename one of them");
+              }
               const { rename: fsRename } = await import("fs/promises");
               await fsRename(longPath(oldPath), longPath(newPath));
               action.record.localPath = newRelPath;
@@ -1935,7 +1943,11 @@ export class SyncEngine extends EventEmitter {
                 this.recordUnsafePath(rt, newRelPath, error);
                 break;
               }
-              await this.downloadRemoteFile(rt, action.remoteFile, newPath, newRelPath);
+              // The fallback fetch is a fresh file at the new path, so it may
+              // not land over anything that is already there.
+              await this.downloadRemoteFile(rt, action.remoteFile, newPath, newRelPath, async () => {
+                if (await stat(longPath(newPath)).catch(() => null)) throw new LocalChangedDuringDownloadError(newRelPath);
+              });
             }
             break;
           }
