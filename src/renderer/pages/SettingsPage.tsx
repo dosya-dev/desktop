@@ -448,8 +448,13 @@ function TroubleshootingSection() {
   const factoryReset = async () => {
     setBusy("reset");
     try {
-      // Quits and relaunches signed out; nothing to do afterwards.
-      await window.electronAPI.factoryReset();
+      // Quits and relaunches signed out; nothing to do afterwards - unless
+      // the main process's own confirmation dialog was declined.
+      const result = await window.electronAPI.factoryReset();
+      if (result && result.canceled) {
+        setBusy(null);
+        setConfirmReset(false);
+      }
     } catch (err) {
       setBusy(null);
       setConfirmReset(false);

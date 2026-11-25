@@ -7,6 +7,7 @@
 import { api, apiBase, ApiError } from "./api-client";
 import { isSessionLossResponse, sessionLoss } from "./session-loss";
 import { tl } from "./locale-state";
+import { trackUpload } from "./analytics";
 import {
   cancelledError,
   type HttpResult,
@@ -67,6 +68,8 @@ export const uploadTransport: Transport = {
     }
   },
   put: xhrPut,
+  // A finished upload, for usage analytics: its size band and nothing else.
+  done: trackUpload,
   async post(path, headers, signal) {
     let res: Response;
     try {

@@ -127,6 +127,40 @@ test("the domain functions settle their promises", { skip: !toolchain() }, async
   }
 });
 
+test("the Sign in with Apple sheet is offered only to an entitled process, and says so honestly", { skip: !toolchain() }, async () => {
+  const out = mkdtempSync(join(tmpdir(), "dosya-addon-"));
+  try {
+    const addon = require(buildFileProviderAddon({ outDir: out }));
+    assert.equal(typeof addon.appleSignInAvailable, "function");
+    assert.equal(typeof addon.signInWithApple, "function");
+
+    // This process is unsigned, so it holds no com.apple.developer.applesignin
+    // entitlement. The app reads that here before offering the in-app path,
+    // and falls back to the browser flow; a sheet that cannot work must never
+    // flash and fail instead.
+    assert.equal(addon.appleSignInAvailable(), false);
+
+    // Asked anyway, the promise settles with the exact word the main process
+    // maps to "use the browser", never a hang or a crash.
+    const result = await Promise.race([
+      addon.signInWithApple("ab".repeat(32)).then(
+        (v) => ({ settled: "resolved", v }),
+        (e) => ({ settled: "rejected", message: e instanceof Error ? e.message : String(e) }),
+      ),
+      new Promise((r) => setTimeout(() => r({ settled: "hung" }), 20000)),
+    ]);
+    assert.deepEqual(result, { settled: "rejected", message: "unavailable" });
+
+    // The nonce hash is the one thing JS must supply; its absence is a
+    // programming error, reported synchronously.
+    assert.throws(() => addon.signInWithApple(), /nonce/i);
+    assert.throws(() => addon.signInWithApple(""), /nonce/i);
+    assert.throws(() => addon.signInWithApple(42), /nonce/i);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
 test("domainEnabled reports approval, and null when there is no domain", { skip: !toolchain() }, async () => {
   const out = mkdtempSync(join(tmpdir(), "dosya-addon-"));
   try {

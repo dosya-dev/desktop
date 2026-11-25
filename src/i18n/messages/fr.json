@@ -464,6 +464,7 @@
   "common.status.waiting": "En attente",
   "common.tooltip.resume": "Reprendre",
   "sign-in.action.forgotPassword": "Mot de passe oublié ?",
+  "sign-in.action.signInWithAPasskey": "Se connecter avec une clé d’accès",
   "sign-in.action.signUp": "S’inscrire",
   "sign-in.action.signingIn": "Connexion en cours…",
   "sign-in.description.donTHaveAnAccount": "Vous n’avez pas de compte ?",
@@ -568,7 +569,7 @@
   "files.accessibility.smallTiles": "Petites vignettes",
   "files.accessibility.sortPhotos": "{kind, select, photos {Trier les photos} videos {Trier les vidéos} documents {Trier les documents} other {Trier les photos}}",
   "files.action.columns": "Colonnes",
-  "files.action.commentsCommentCount": "Commentaires ({commentCount})",
+  "files.action.commentsCommentCount": "Commentaires{commentCount}",
   "files.action.copyFile": "Copier le fichier",
   "files.action.deleteFile": "Supprimer le fichier",
   "files.action.deletePermanently": "Supprimer définitivement",
@@ -2002,7 +2003,7 @@
   "menus.label.help": "Aide",
   "tray.action.openDosya": "Ouvrir dosya",
   "tray.action.quitDosya": "Quitter dosya",
-  "tray.action.uploadFile": "Importer dans le cloud…",
+  "tray.action.uploadFile": "Importer un fichier…",
   "tray.label.dosyaSummary": "dosya · {summary}",
   "tray.label.syncSummary": "Synchronisation : {summary}",
   "updater.error.checkFailed": "Échec de la vérification",
@@ -2414,5 +2415,7 @@
   "family.label.nameSize": "{name} {size}",
   "family.label.otherReservations": "Autres réservations",
   "family.label.usedByPeopleWhoShare": "Utilisé sans réservation",
-  "family.label.stillFreeSize": "Encore libre : {size}"
+  "family.label.stillFreeSize": "Encore libre : {size}",
+  "common.action.shareUsageData": "Partager les données d’usage",
+  "common.description.tellsUsWhichScreensAndFeaturesAreUsed": "Nous indique quels écrans et fonctionnalités sont utilisés. Jamais les noms de fichiers, les fichiers ni votre Vault."
 }

@@ -101,6 +101,12 @@ export interface AboutInfo {
   chrome: string;
 }
 
+/** About displays a human-readable OS name followed by its kernel release. */
+export function isLinuxPlatform(platform: string | null | undefined): boolean {
+  const value = platform?.toLowerCase();
+  return value === "linux" || value?.startsWith("linux ") === true;
+}
+
 /** One details row: label, value, and whether the value is a healthy state. */
 export type AboutRow = [label: string, value: string, ok?: boolean];
 

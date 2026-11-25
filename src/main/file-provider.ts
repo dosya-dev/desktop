@@ -17,8 +17,12 @@
  * accounts.
  */
 
-/** What the native addon exports. Identical to the mobile module's interface. */
-export interface FileProviderNative {
+import type { AppleSignInNative } from "./apple-sign-in";
+
+/** What the native addon exports. The File Provider half is identical to the
+ *  mobile module's interface; the Sign in with Apple half rides in the same
+ *  addon because it, too, needs the app's own entitlements. */
+export interface FileProviderNative extends AppleSignInNative {
   isSupported(): boolean;
   storedUserId(): string | null;
   writeSession(json: string): void;

@@ -4,7 +4,7 @@ import fs from "fs";
 import os from "os";
 import { startMockServer } from "../helpers/mock-api";
 import * as data from "../helpers/mock-data";
-import { launchApp } from "../fixtures";
+import { launchApp, rememberPickedFolder } from "../fixtures";
 
 /**
  * Mac App Store screenshot capture - NOT a test.
@@ -88,6 +88,7 @@ test("capture Mac App Store screenshots", async () => {
     });
     await page.waitForTimeout(500);
 
+    await rememberPickedFolder(app, designDir);
     await page.evaluate(async (localPath) => {
       await (window as any).electronAPI.addSyncPair({
         workspaceId: "ws_test_1",

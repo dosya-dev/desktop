@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { startMockServer } from "../helpers/mock-api";
-import { launchApp } from "../fixtures";
+import { launchApp, rememberPickedFolder } from "../fixtures";
 
 /**
  * Marketing screenshot capture - NOT a test.
@@ -83,6 +83,7 @@ test("capture desktop app marketing screenshots", async () => {
     await page.waitForTimeout(500);
 
     // Register the sync pair through the same IPC the UI uses.
+    await rememberPickedFolder(app, designDir);
     await page.evaluate(async (localPath) => {
       await (window as any).electronAPI.addSyncPair({
         workspaceId: "ws_test_1",

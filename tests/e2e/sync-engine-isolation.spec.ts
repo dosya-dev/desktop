@@ -1,4 +1,4 @@
-import { test, expect, navigateTo, electronAppFor } from "../fixtures";
+import { test, expect, navigateTo, electronAppFor, rememberPickedFolder } from "../fixtures";
 import type { Page } from "@playwright/test";
 import { mkdirSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -146,6 +146,7 @@ test.describe("Sync engine isolation", () => {
       });
 
     try {
+      await rememberPickedFolder(electronAppFor(appPage), localRoot);
       await appPage.evaluate(async (path: string) => {
         await (window as any).electronAPI.addSyncPair({
           workspaceId: "ws_test_1",

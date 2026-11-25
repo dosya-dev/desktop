@@ -31,6 +31,17 @@ export type CspInputs = {
   chunkOrigins: readonly string[];
 };
 
+/**
+ * The ONE document-server file the renderer may run as script: ONLYOFFICE's
+ * api.js. The renderer holds window.electronAPI, so granting the whole docs
+ * host script-src meant any file a write bug there could place ran beside the
+ * IPC bridge (bounty). The editor also pins this file with SRI from the API
+ * (EditorPage.tsx); api.js itself only creates iframes, which frame-src covers.
+ */
+export function docsApiScript(docsBase: string): string {
+  return `${docsBase.replace(/\/+$/, "")}/web-apps/apps/api/documents/api.js`;
+}
+
 /** The socket form of the API origin (live chat), e.g. wss://api.dosya.dev. */
 const socketOrigin = (apiBase: string): string => apiBase.replace(/^http/, "ws");
 
@@ -38,7 +49,7 @@ const socketOrigin = (apiBase: string): string => apiBase.replace(/^http/, "ws")
 export function packagedCsp({ apiBase, docsBase, chunkOrigins }: CspInputs): string {
   return [
     "default-src 'self'",
-    `script-src 'self' 'wasm-unsafe-eval' ${docsBase}`,
+    `script-src 'self' 'wasm-unsafe-eval' ${docsApiScript(docsBase)}`,
     // MapLibre builds its render worker from a blob: URL. worker-src has no
     // policy of its own here, so it falls back to script-src, which does not
     // allow blob: - the worker was refused, MapLibre threw inside a React
@@ -72,7 +83,7 @@ export function packagedCsp({ apiBase, docsBase, chunkOrigins }: CspInputs): str
 export function devCsp({ apiBase, docsBase, chunkOrigins }: CspInputs): string {
   return [
     "default-src 'self' http://localhost:* ws://localhost:*",
-    `script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' ${docsBase}`,
+    `script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' ${docsApiScript(docsBase)}`,
     // Same as the packaged policy: the map's worker comes from a blob.
     "worker-src 'self' blob: http://localhost:*",
     "style-src 'self' 'unsafe-inline' blob:",

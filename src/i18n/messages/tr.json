@@ -446,6 +446,7 @@
   "common.status.waiting": "Bekliyor",
   "common.tooltip.resume": "Devam et",
   "sign-in.action.forgotPassword": "Parolanızı mı unuttunuz?",
+  "sign-in.action.signInWithAPasskey": "Geçiş anahtarıyla giriş yap",
   "sign-in.action.signUp": "Kaydol",
   "sign-in.action.signingIn": "Oturum açılıyor…",
   "sign-in.description.donTHaveAnAccount": "Hesabınız yok mu?",
@@ -2414,5 +2415,7 @@
   "family.label.nameSize": "{name} {size}",
   "family.label.otherReservations": "Diğer ayrılan alanlar",
   "family.label.usedByPeopleWhoShare": "Ortak alanı kullananlar",
-  "family.label.stillFreeSize": "Kalan boş alan: {size}"
+  "family.label.stillFreeSize": "Kalan boş alan: {size}",
+  "common.action.shareUsageData": "Kullanım verilerini paylaş",
+  "common.description.tellsUsWhichScreensAndFeaturesAreUsed": "Hangi ekranların ve özelliklerin kullanıldığını bize bildirir. Dosya adları, dosyalar veya Vault'unuz asla paylaşılmaz."
 }

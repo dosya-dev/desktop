@@ -31,6 +31,37 @@ test.describe("Settings Page", () => {
     await closed;
   });
 
+  // Bounty (desktop 3.1.10): the renderer runs remote script, so its own modal
+  // is no guard. The main process asks in a native dialog (stubbed under the
+  // harness by __dosyaTestConfirmAnswer) and declining leaves the app running.
+  test("Reset app data is confirmed again by the main process, and declining keeps the app", async ({ appPage }) => {
+    const app = electronAppFor(appPage);
+    await app.evaluate(() => {
+      const g = globalThis as { __dosyaTestConfirmAnswer?: boolean; __dosyaTestConfirmLog?: string[] };
+      g.__dosyaTestConfirmAnswer = false;
+      g.__dosyaTestConfirmLog = [];
+    });
+    try {
+      await navigateTo(appPage, "/settings");
+      await appPage.getByRole("button", { name: "Reset app data" }).click();
+      await appPage.getByRole("button", { name: "Reset and restart" }).click();
+      await expect.poll(() => app.evaluate(() => (globalThis as { __dosyaTestConfirmLog?: string[] }).__dosyaTestConfirmLog)).toEqual(["factory-reset"]);
+      // Still running, back on the settings page, not stuck on a spinner.
+      await expect(appPage.getByRole("button", { name: "Reset app data" })).toBeEnabled();
+
+      // Launch at login: turning it on asks; declining leaves it off.
+      const applied = await appPage.evaluate(() => (window as any).electronAPI.setLaunchAtLogin(true));
+      const log = await app.evaluate(() => (globalThis as { __dosyaTestConfirmLog?: string[] }).__dosyaTestConfirmLog);
+      const supported = await appPage.evaluate(() => (window as any).electronAPI.getLaunchAtLoginSupported());
+      if (supported) {
+        expect(log).toEqual(["factory-reset", "launch-at-login"]);
+        expect(applied).toBe(false);
+      }
+    } finally {
+      await app.evaluate(() => { delete (globalThis as { __dosyaTestConfirmAnswer?: boolean }).__dosyaTestConfirmAnswer; });
+    }
+  });
+
   test("renders settings page with sidebar tabs", async ({ appPage }) => {
     await navigateTo(appPage, "/settings");
 

@@ -1,7 +1,23 @@
 import http from "http";
 import { readFileSync } from "fs";
 import { join } from "path";
+import { createHash } from "crypto";
 import * as data from "./mock-data";
+
+/**
+ * A stand-in for ONLYOFFICE's api.js: defines just enough of DocsAPI for the
+ * page to mount an "editor". The editor pins api.js with SRI, so the config
+ * hands out this body's real sha384 - a mismatch would be refused by Chromium
+ * exactly as a tampered docs.dosya.dev file would be.
+ */
+const MOCK_DOCS_API_JS =
+  "window.DocsAPI = { DocEditor: function (el, cfg) {" +
+  "  var host = document.getElementById(el);" +
+  "  if (host) { host.setAttribute('data-testid', 'oo-editor-mounted');" +
+  "    host.textContent = (cfg && cfg.document && cfg.document.title) || 'document'; }" +
+  "  return { destroyEditor: function () {} };" +
+  "} };";
+export const MOCK_DOCS_API_SRI = `sha384-${createHash("sha384").update(MOCK_DOCS_API_JS).digest("base64")}`;
 
 /** The real tagged MP3 the audio-viewer spec plays. Read once per process. */
 const SAMPLE_MP3 = readFileSync(join(__dirname, "../fixtures/sample-track.mp3"));
@@ -768,6 +784,7 @@ export async function startMockServer(
       return json({
         ok: true,
         documentServerUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        documentServerApiIntegrity: MOCK_DOCS_API_SRI,
         config: {
           document: { title: "Budget.docx", url: "https://example.invalid/doc", fileType: "docx", key: `k_${fileId}` },
           documentType: "word",
@@ -776,18 +793,10 @@ export async function startMockServer(
         },
       });
     }
-    // A stand-in for ONLYOFFICE's api.js: defines just enough of DocsAPI for the
-    // page to mount an "editor".
+    // The stand-in api.js (MOCK_DOCS_API_JS above).
     if (path === "/web-apps/apps/api/documents/api.js" && (method === "GET" || method === "HEAD")) {
       res.writeHead(200, { "Content-Type": "application/javascript", ...corsHeaders });
-      return res.end(
-        "window.DocsAPI = { DocEditor: function (el, cfg) {" +
-        "  var host = document.getElementById(el);" +
-        "  if (host) { host.setAttribute('data-testid', 'oo-editor-mounted');" +
-        "    host.textContent = (cfg && cfg.document && cfg.document.title) || 'document'; }" +
-        "  return { destroyEditor: function () {} };" +
-        "} };",
-      );
+      return res.end(MOCK_DOCS_API_JS);
     }
 
     // ── Map ───────────────────────────────────────────────

@@ -446,6 +446,7 @@
   "common.tooltip.versionsVersionCount": "Wersje ({versionCount})",
   "common.tooltip.videoUnavailable": "Wideo niedostępne",
   "sign-in.action.forgotPassword": "Nie pamiętasz hasła?",
+  "sign-in.action.signInWithAPasskey": "Zaloguj się kluczem dostępu",
   "sign-in.action.signUp": "Zarejestruj się",
   "sign-in.action.signingIn": "Logowanie…",
   "sign-in.description.donTHaveAnAccount": "Nie masz konta?",
@@ -578,7 +579,7 @@
   "files.accessibility.smallTiles": "Małe kafelki",
   "files.accessibility.sortPhotos": "{kind, select, photos {Sortuj zdjęcia} videos {Sortuj wideo} documents {Sortuj dokumenty} other {Sortuj zdjęcia}}",
   "files.action.columns": "Kolumny",
-  "files.action.commentsCommentCount": "Komentarze ({commentCount})",
+  "files.action.commentsCommentCount": "Komentarze{commentCount}",
   "files.action.copyFile": "Kopiuj plik",
   "files.action.deleteFile": "Usuń plik",
   "files.action.deletePermanently": "Usuń trwale",
@@ -839,7 +840,7 @@
   "sync.description.depthskippedFoldersWereDeeperThanMaxWalkDepthLevels": "{depthSkipped} folderów znajdowało się głębiej niż {maxWalkDepth} poziomów",
   "sync.description.dosyaPausedThisFolderFileDisappearedLocallyDeleteIt": "{count, plural, one {dosya wstrzymała synchronizację tego folderu: # plik zniknął lokalnie. Usunąć go także z chmury czy zachować kopię w chmurze?} few {dosya wstrzymała synchronizację tego folderu: # pliki zniknęły lokalnie. Usunąć je także z chmury czy zachować kopie w chmurze?} many {dosya wstrzymała synchronizację tego folderu: # plików zniknęło lokalnie. Usunąć je także z chmury czy zachować kopie w chmurze?} other {dosya wstrzymała synchronizację tego folderu: # pliku zniknęło lokalnie. Usunąć go także z chmury czy zachować kopię w chmurze?}}",
   "sync.description.fileFolderFound": "Znaleziono: {scannedFiles, plural, one {# plik} few {# pliki} many {# plików} other {# pliku}}, {scannedFolders, plural, one {# folder} few {# foldery} many {# folderów} other {# folderu}}",
-  "sync.description.fourYouCanPauseResumeOrRemoveASync": "4. Synchronizację możesz w dowolnym momencie wstrzymać, wznowić lub usunąć parę folderów bez utraty plików.",
+  "sync.description.fourYouCanPauseResumeOrRemoveASync": "4. W każdej chwili możesz wstrzymać lub wznowić synchronizację pary folderów albo usunąć tę parę bez utraty plików.",
   "sync.description.ifAConflictIsDetectedSameFileChangedIn": "Jeśli wykryjemy konflikt (ten sam plik zmieniony w obu lokalizacjach), otrzymasz powiadomienie na karcie Konflikty.",
   "sync.description.keepLocalFoldersInSyncWithYourDosyaDev": "Automatycznie synchronizuj foldery lokalne z przestrzenią roboczą dosya.dev.",
   "sync.description.localChangesAreSentToTheCloudIncludingDeletions": "Zmiany lokalne, w tym usunięcia, są wysyłane do chmury. Zmiany w chmurze są ignorowane lokalnie.",
@@ -1045,7 +1046,7 @@
   "sync.label.syncFolderAdded": "Dodano folder do synchronizacji",
   "sync.label.syncItAnyway": "Synchronizuj mimo to",
   "sync.label.syncMode": "Tryb synchronizacji",
-  "sync.label.syncPausedForLabelWillResumeAutomatically": "Synchronizacja wstrzymana dla: {label}. Wznowi się automatycznie.",
+  "sync.label.syncPausedForLabelWillResumeAutomatically": "Synchronizacja wstrzymana na {label}. Wznowi się automatycznie.",
   "sync.label.syncPausedMaintenance": "Synchronizacja wstrzymana · konserwacja",
   "sync.label.syncSettingsSaved": "Zapisano ustawienia synchronizacji",
   "sync.label.syncing": "Synchronizowanie",
@@ -2414,5 +2415,7 @@
   "family.label.nameSize": "{name} {size}",
   "family.label.otherReservations": "Inne rezerwacje",
   "family.label.usedByPeopleWhoShare": "Używane bez rezerwacji",
-  "family.label.stillFreeSize": "Nadal wolne: {size}"
+  "family.label.stillFreeSize": "Nadal wolne: {size}",
+  "common.action.shareUsageData": "Udostępniaj dane o użyciu",
+  "common.description.tellsUsWhichScreensAndFeaturesAreUsed": "Informuje nas, które ekrany i funkcje są używane. Nigdy nazwy plików, pliki ani twój Vault."
 }

@@ -1,5 +1,7 @@
 import { app, ipcMain, dialog, shell, BrowserWindow } from "electron";
 import { isAbsolute } from "path";
+import { realpathSync } from "fs";
+import { homedir, tmpdir } from "os";
 import type { SyncEngineHandle } from "./engine-host";
 import type { SyncPair, SyncMode, ConflictResolution } from "./types";
 import { estimateFolder } from "./folder-estimate";
@@ -8,6 +10,8 @@ import { currentDistribution } from "../distribution";
 import { shouldReceiveStatus } from "./broadcast-targets";
 import { makeIpcGate, rendererOrigin } from "../ipc-sender";
 import { tMain } from "../i18n";
+import { PickedFolders } from "./picked-folders";
+import { syncRootRefusal, pickRendererConfig } from "./sync-root-gate";
 
 const VALID_SYNC_MODES: SyncMode[] = ["two-way", "push", "push-safe", "pull", "pull-safe"];
 const VALID_CONFLICT_STRATEGIES = ["last-write-wins", "keep-both"];
@@ -37,28 +41,53 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     rendererOrigin({ isPackaged: app.isPackaged, devServerUrl: process.env.ELECTRON_RENDERER_URL }),
   );
 
+  // Folders the user chose in the native picker this session. The renderer
+  // runs remote script (the ONLYOFFICE api.js), so a path it names is only a
+  // sync root if a human picked it here first - see picked-folders.ts.
+  const picked = new PickedFolders(process.platform);
+  const assertSyncRoot = (path: unknown): void => {
+    const refusal = syncRootRefusal(path, {
+      picked,
+      platform: process.platform,
+      home: homedir(),
+      tmpDir: tmpdir(),
+      realpath: (p) => { try { return realpathSync(p); } catch { return null; } },
+    });
+    if (refusal) throw new Error(refusal);
+  };
+  // The Playwright harness adds pairs on temp folders without a native dialog
+  // it could drive. Only under the test runner, and only reachable from the
+  // main process (electronApp.evaluate), never from the renderer.
+  if (process.env.NODE_ENV === "test") {
+    (globalThis as { __dosyaTestRememberPickedFolder?: (p: string) => void }).__dosyaTestRememberPickedFolder =
+      (p) => picked.remember(p);
+  }
+
   handle("sync:get-config", () => engine.getConfig());
 
   handle("sync:save-config", (_e, updates) => {
     if (typeof updates !== "object" || updates === null) {
       throw new Error("Invalid config updates");
     }
-    return engine.saveGlobalConfig(updates);
+    // Global settings only: `pairs` here would be saved verbatim and started
+    // on the next launch, around every check sync:add-pair makes.
+    return engine.saveGlobalConfig(pickRendererConfig(updates as Record<string, unknown>));
   });
 
   handle("sync:get-status", () => engine.getStatus());
 
   handle("sync:add-pair", async (_e, opts: Omit<SyncPair, "id" | "createdAt">) => {
     // Validate required fields
+    if (typeof opts !== "object" || opts === null) throw new Error("Invalid sync pair");
     assertString(opts.workspaceId, "workspaceId");
     assertString(opts.workspaceName, "workspaceName");
     assertString(opts.localPath, "localPath");
     assertString(opts.remoteFolderName, "remoteFolderName");
     assertString(opts.region, "region");
 
-    if (!isAbsolute(opts.localPath)) {
-      throw new Error("localPath must be an absolute path");
-    }
+    // Picked by the user in this session, and not a home/system/credential
+    // folder (sync-root-gate.ts).
+    assertSyncRoot(opts.localPath);
 
     if (opts.syncMode && !VALID_SYNC_MODES.includes(opts.syncMode)) {
       throw new Error(`Invalid syncMode: ${opts.syncMode}`);
@@ -117,13 +146,9 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     if (typeof updates !== "object" || updates === null) {
       throw new Error("Invalid updates");
     }
-    // Prevent overriding localPath to arbitrary locations
-    if (updates.localPath !== undefined) {
-      assertString(updates.localPath, "localPath");
-      if (!isAbsolute(updates.localPath)) {
-        throw new Error("localPath must be an absolute path");
-      }
-    }
+    // Moving a pair's folder ("Reselect folder") is a new sync root: the same
+    // gate as sync:add-pair.
+    if (updates.localPath !== undefined) assertSyncRoot(updates.localPath);
     if (updates.syncMode && !VALID_SYNC_MODES.includes(updates.syncMode)) {
       throw new Error(`Invalid syncMode: ${updates.syncMode}`);
     }
@@ -136,9 +161,12 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
 
   // Cheap file/folder count so the Add-folder modal can warn about huge trees
   // before the user commits to syncing one.
+  // Only for a folder the user just picked: counting an arbitrary directory
+  // would tell a script what exists on disk.
   handle("sync:estimate-local-folder", async (_e, { path }) => {
     assertString(path, "path");
     if (!isAbsolute(path)) throw new Error("path must be absolute");
+    if (!picked.has(path)) throw new Error("path was not picked");
     return estimateFolder(path);
   });
 
@@ -161,6 +189,7 @@ export function registerSyncIpcHandlers(engine: SyncEngineHandle): void {
     if (result.canceled) return null;
     const path = result.filePaths[0];
     if (!path) return null;
+    picked.remember(path);
     return { path, bookmark: result.bookmarks?.[0] };
   });
 

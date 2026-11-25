@@ -1,0 +1,5 @@
+What's new in 3.1.10
+
+• Continue with Apple now happens inside the app, in Apple's own sign-in sheet, instead of sending you to your web browser. Your Apple ID password and second factor are handled by macOS; dosya only receives the signed-in result.
+• A shared link's download limit can no longer be lifted by reusing a download session.
+• Adding a file in a batch can no longer create a stray second version of one that already exists.

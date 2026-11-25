@@ -45,7 +45,7 @@ import {
   type AccountDeletePreview, type DeleteFailure,
 } from "@dosya-dev/shared";
 import { formatters, useLocale, useT } from "@/lib/i18n";
-import { aboutRows, detailsText, type AboutInfo, type AboutRow, type SyncSummaryInput } from "@/lib/about-info";
+import { aboutRows, detailsText, isLinuxPlatform, type AboutInfo, type AboutRow, type SyncSummaryInput } from "@/lib/about-info";
 import { AcknowledgementsList } from "@/components/AcknowledgementsList";
 import { LOCALE_LABELS, intlTag } from "../../i18n/locales";
 import { steppedZoom, ZOOM_STEPS } from "@/lib/pinch-zoom";
@@ -1381,7 +1381,7 @@ function AboutSection() {
     return () => { live = false; offUpdate(); offSync(); };
   }, []);
 
-  const isLinux = info?.platform === "linux";
+  const isLinux = isLinuxPlatform(info?.platform);
   const rows: AboutRow[] = [
     ...aboutRows(t, info, user?.email, sync, finder, { engine: false }),
     [t("appearance.label.language"), LOCALE_LABELS[locale]],

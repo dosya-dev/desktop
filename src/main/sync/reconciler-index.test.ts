@@ -162,8 +162,12 @@ describe("reconciliation with persisted sync history", () => {
         expect(touchesGit(await reconcileRemoteOnly(excluded, gitTree(".GIT"), base()))).toEqual([]);
       });
 
-    it("still syncs the same tree when nothing excludes it", async () => {
-      expect(touchesGit(await reconcile(pair, gitTree(".git"), base())).length).toBeGreaterThan(0);
+    it("refuses .git even when nothing excludes it", async () => {
+      expect(touchesGit(await reconcile(pair, gitTree(".git"), base()))).toEqual([]);
+    });
+
+    it("still syncs the same tree under an ordinary name", async () => {
+      expect(touchesGit(await reconcile(pair, gitTree("tools"), base())).length).toBeGreaterThan(0);
     });
   });
 

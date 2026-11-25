@@ -20,6 +20,7 @@ import { MenuBridge } from "./components/MenuBridge";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useT } from "./lib/i18n";
 import { usePinchZoom } from "./lib/pinch-zoom";
+import { trackScreen } from "./lib/analytics";
 
 // Everything else is code-split into its own chunk and loaded on demand.
 // This keeps the initial bundle small - the heavy pages (FileBrowser, Sync,
@@ -69,6 +70,19 @@ function RouteMemory() {
   useEffect(() => {
     saveLastRoute(location.pathname + location.search, window.localStorage);
   }, [location]);
+  return null;
+}
+
+/**
+ * Names the screen in front for usage analytics: the route with its ids
+ * replaced, never the query. Main drops it unless the person agreed
+ * (lib/analytics.ts). Renders nothing.
+ */
+function ScreenViewTracker() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    trackScreen(pathname);
+  }, [pathname]);
   return null;
 }
 
@@ -243,6 +257,7 @@ export function App() {
           <MaintenanceGate>
           <WorkspaceProvider>
           <RouteMemory />
+          <ScreenViewTracker />
           <IdlePrefetch />
           <ReportProblemFromMenu />
           <MenuBridge />

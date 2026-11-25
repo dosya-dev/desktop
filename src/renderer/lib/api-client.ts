@@ -8,6 +8,7 @@
 import { isSessionLossResponse, sessionLoss } from "./session-loss";
 import { t } from "./i18n";
 import { EDGE_CHALLENGE_CODE, isAbortError, isEdgeChallenge } from "./request-failure";
+import { recordApiActivity } from "./analytics";
 
 export { EDGE_CHALLENGE_CODE } from "./request-failure";
 
@@ -138,6 +139,11 @@ export async function apiRequest<T>(
       errorData,
     );
   }
+
+  // One place for the activity catalogue: a succeeded call that stands for an
+  // action (a share created, a folder deleted) is named here and handed to
+  // main, which keeps it only if the person agreed (lib/analytics.ts).
+  recordApiActivity(method, path);
 
   // Handle empty responses (204, etc.)
   const contentType = res.headers.get("content-type");

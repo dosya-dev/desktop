@@ -202,6 +202,22 @@ export function electronAppFor(page: Page): ElectronApplication {
 }
 
 /**
+ * Stand in for the user choosing `localPath` in the native folder picker.
+ *
+ * The main process accepts a sync root only if it was picked this session
+ * (src/main/sync/picked-folders.ts), and a native dialog cannot be driven
+ * from Playwright. The hook it calls exists only under NODE_ENV=test and only
+ * in the main process, out of the renderer's reach.
+ */
+export async function rememberPickedFolder(app: ElectronApplication, localPath: string): Promise<void> {
+  await app.evaluate((_electron, p) => {
+    const hook = (globalThis as { __dosyaTestRememberPickedFolder?: (p: string) => void }).__dosyaTestRememberPickedFolder;
+    if (!hook) throw new Error("rememberPickedFolder: test hook missing (NODE_ENV must be test)");
+    hook(p);
+  }, localPath);
+}
+
+/**
  * Resize the real window.
  *
  * `page.setViewportSize` does nothing useful in Electron - the OS window drives

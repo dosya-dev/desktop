@@ -3,7 +3,8 @@ import { access, readdir, stat, statfs, unlink, mkdir } from "fs/promises";
 import { join, resolve, sep, basename, dirname } from "path";
 import { toRelPath, normalizeRel, pathKey, absKey, longPath } from "./paths";
 import { baselineFor, baselineFromStat, localMatchesRecord, LocalChangedDuringDownloadError, updateMayReplace } from "./download-guard";
-import { occupiedByOtherFile, prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
+import { moveNoReplace, occupiedByOtherFile, prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
+import { isProtectedName, isRemotePathIgnored } from "./ignore-rules";
 import { loadConfig, saveConfig, loadPairState, deletePairState, openSyncIndex, syncStateDir, setSyncDataDir } from "./config";
 import type { SyncIndex, PairMeta } from "./index-db";
 import { migrateJsonStateIfNeeded } from "./index-migrate";
@@ -1130,10 +1131,28 @@ export class SyncEngine extends EventEmitter {
     console.error(`[sync] Could not remove local ${relPath}:`, message);
   }
 
+  /**
+   * True when this pair never writes `relPath` from the server: Git metadata
+   * (always) or a path under one of the pair's excludes. Every remote pass
+   * asks, so an excluded `.git/hooks/pre-commit` is not created whichever
+   * mode or poller delivered it (bounty 2026-11-07, recheck 2026-11-11).
+   */
+  private remotePathIgnored(rt: PairRuntime, relPath: string, isDirectory: boolean): boolean {
+    return isRemotePathIgnored(relPath, isDirectory, rt.pair.excludedPatterns, rt.pair.localPath, FOLDS_CASE);
+  }
+
+  /** The executor-side form of remotePathIgnored: refuse, never write. */
+  private assertRemoteWritable(rt: PairRuntime, relPath: string, isDirectory: boolean): void {
+    if (this.remotePathIgnored(rt, relPath, isDirectory)) {
+      throw new UnsafeSyncPathError(relPath, "excluded from this sync pair, so nothing is written there");
+    }
+  }
+
   private async prepareDownloadTarget(rt: PairRuntime, relPath: string): Promise<{
     absPath: string;
     assertPathSafe: () => Promise<void>;
   }> {
+    this.assertRemoteWritable(rt, relPath, false);
     const absPath = await prepareSafeSyncPath(rt.pair.localPath, relPath, {
       kind: "file", createParents: true,
     });
@@ -1675,6 +1694,7 @@ export class SyncEngine extends EventEmitter {
         const folderPath = join(action.localDir, action.name);
         const relPath = toRelPath(rt.pair.localPath, folderPath);
         try {
+          this.assertRemoteWritable(rt, relPath, true);
           await prepareSafeSyncPath(rt.pair.localPath, relPath, {
             kind: "directory", createParents: true,
           });
@@ -1904,6 +1924,7 @@ export class SyncEngine extends EventEmitter {
             }
             let newPath: string;
             try {
+              this.assertRemoteWritable(rt, newRelPath, false);
               newPath = await prepareSafeSyncPath(rt.pair.localPath, newRelPath, {
                 kind: "file", createParents: true,
               });
@@ -1930,8 +1951,16 @@ export class SyncEngine extends EventEmitter {
               if (await occupiedByOtherFile(longPath(oldPath), longPath(newPath))) {
                 throw new UnsafeSyncPathError(newRelPath, "a different local file already exists here; rename one of them");
               }
-              const { rename: fsRename } = await import("fs/promises");
-              await fsRename(longPath(oldPath), longPath(newPath));
+              // A file created at the destination after that check would
+              // still be replaced by fs.rename; this move fails instead.
+              try {
+                await moveNoReplace(longPath(oldPath), longPath(newPath));
+              } catch (moveError) {
+                if ((moveError as NodeJS.ErrnoException).code === "EEXIST") {
+                  throw new UnsafeSyncPathError(newRelPath, "a different local file already exists here; rename one of them");
+                }
+                throw moveError;
+              }
               action.record.localPath = newRelPath;
               action.record.remoteName = action.remoteFile.name;
               action.record.remoteFolderId = action.remoteFile.folder_id;
@@ -3512,6 +3541,9 @@ export class SyncEngine extends EventEmitter {
         // most excluded paths before an event exists, so a hit here is rare
         // and worth an Activity line - same visibility rule as the scanner.
         const isDirEvent = event.type === "addDir" || event.type === "unlinkDir";
+        // Chokidar's globs are case-sensitive, so `.GIT/x` reaches here; Git
+        // metadata is never synced at any depth.
+        if (relPath.split("/").some(isProtectedName)) continue;
         const eventSkipReason = ignoreReason(fileName, isDirEvent, rt.pair.excludedPatterns, event.path);
         if (eventSkipReason) {
           if (eventSkipReason.startsWith("excluded") || eventSkipReason.startsWith("virtual")) {
@@ -3689,6 +3721,17 @@ export class SyncEngine extends EventEmitter {
       );
       const unresolved: RemoteFileInfo[] = [];
       const unknownIds = new Set(unknownParent.map((f) => f.id));
+      // The two-way reconciler drops excluded remote paths; this pass never
+      // did, so a pull or pull-safe pair downloaded `.git/hooks/pre-commit`
+      // straight into an excluded local `.git` (bounty 2026-11-07, recheck
+      // 2026-11-11). Ignored files are left out of every step below.
+      const ignoredIds = new Set<string>();
+      for (const [remoteId, relPath] of filePathMap) {
+        if (this.remotePathIgnored(rt, relPath, false)) {
+          filePathMap.delete(remoteId);
+          ignoredIds.add(remoteId);
+        }
+      }
 
       // Remote names that fold to one local path (macOS, Windows) would land
       // on one file, the second download over the first. Same rule as the
@@ -3705,7 +3748,7 @@ export class SyncEngine extends EventEmitter {
       // Guard disk space up-front - pull can otherwise fill the volume.
       let neededBytes = 0;
       for (const [remoteId, file] of snapshot.files) {
-        if (collidedIds.has(remoteId)) continue;
+        if (collidedIds.has(remoteId) || ignoredIds.has(remoteId)) continue;
         const existing = this.index.getFileById(rt.pair.id, remoteId);
         if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
           neededBytes += file.size_bytes;
@@ -3718,7 +3761,7 @@ export class SyncEngine extends EventEmitter {
       try {
         for (const [remoteId, file] of snapshot.files) {
           if (this.stopped || (rt.status as SyncPairStatus) === "paused") break;
-          if (collidedIds.has(remoteId)) continue;
+          if (collidedIds.has(remoteId) || ignoredIds.has(remoteId)) continue;
           const existing = this.index.getFileById(rt.pair.id, remoteId);
           // A file whose folder is not in this snapshot: keep a previously
           // synced copy at its last known path (content may still update in
@@ -3728,9 +3771,20 @@ export class SyncEngine extends EventEmitter {
             if (!existing) { unresolved.push(file); continue; }
           }
           const relPath = resolved ?? existing!.localPath;
+          // The last known path of a file whose folder is missing may itself
+          // be excluded now (or always was, for `.git`).
+          if (this.remotePathIgnored(rt, relPath, false)) continue;
 
           const absPath = join(rt.pair.localPath, relPath);
           if (!existing || file.updated_at !== existing.remoteUpdatedAt || file.size_bytes !== existing.remoteSizeBytes) {
+            // Only a file's own tracked path may be overwritten. A server-side
+            // rename onto another name lands on a path this record never
+            // owned: an untracked local file there, or another record's file,
+            // is the user's, whatever the conflict strategy. Last-write-wins
+            // used to download straight over it (bounty 2026-11-07, recheck
+            // 2026-11-11). Such a target is treated like a never-tracked
+            // path: it must be empty, or the remote copy becomes a conflict.
+            const ownsTarget = !!existing && pathKey(existing.localPath) === pathKey(relPath);
             // Strategy-aware, like the planner's both-edited case: a file the
             // user edited since the last sync is never discarded under
             // keep-both, even on a download-only pair (every local edit there
@@ -3741,9 +3795,9 @@ export class SyncEngine extends EventEmitter {
             // download is refused. A tracked path that is empty at rename time
             // is safe to fill. A never-tracked path must stay empty (same rule
             // as the worker's download-new): a file there is the user's.
-            const decided = existing ? await stat(longPath(absPath)).catch(() => null) : null;
+            const decided = ownsTarget ? await stat(longPath(absPath)).catch(() => null) : null;
             if (
-              existing && decided && !localMatchesRecord(decided, existing)
+              ownsTarget && existing && decided && !localMatchesRecord(decided, existing)
               && (rt.pair.conflictStrategy || "keep-both") === "keep-both"
             ) {
               this.log(rt.pair.id, `"${relPath}" was edited here since it was last synced and the server has a newer copy - keeping your edit and treating it as a conflict`);
@@ -3761,7 +3815,7 @@ export class SyncEngine extends EventEmitter {
               });
               continue;
             }
-            const beforeReplace = existing
+            const beforeReplace = ownsTarget
               ? async () => {
                   const now = await stat(longPath(absPath)).catch(() => null);
                   if (now && (!decided || !localMatchesRecord(now, baselineFromStat(decided)))) {
@@ -3773,6 +3827,11 @@ export class SyncEngine extends EventEmitter {
                   if (now) throw new LocalChangedDuringDownloadError(relPath);
                 };
             try {
+              // Not owned and already taken: the outcome is known, so do not
+              // spend the download finding it out.
+              if (!ownsTarget && await stat(longPath(absPath)).catch(() => null)) {
+                throw new LocalChangedDuringDownloadError(relPath);
+              }
               await this.downloadRemoteFile(rt, file, absPath, relPath, beforeReplace, landed);
             } catch (error) {
               if (error instanceof UnsafeSyncPathError) {
@@ -3780,9 +3839,9 @@ export class SyncEngine extends EventEmitter {
                 continue;
               }
               if (error instanceof LocalChangedDuringDownloadError) {
-                this.log(rt.pair.id, existing
+                this.log(rt.pair.id, ownsTarget
                   ? `"${relPath}" was edited here while the server copy was downloading - keeping your edit and treating it as a conflict`
-                  : `"${relPath}" already exists here and was never synced - keeping your file and treating it as a conflict`);
+                  : `"${relPath}" already exists here and is not this synced file - keeping your file and treating it as a conflict`);
                 const now = await stat(longPath(absPath)).catch(() => null);
                 await this.raiseConflict(rt, {
                   id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -3832,6 +3891,12 @@ export class SyncEngine extends EventEmitter {
         } else {
           for (const [id, record] of [...this.index.iterFiles(rt.pair.id)].map((r) => [r.remoteId, r] as const)) {
             if (!remoteIds.has(id)) {
+              // A row under a path this pair now ignores is forgotten, never
+              // acted on: the local file there is out of sync's hands.
+              if (this.remotePathIgnored(rt, record.localPath, false)) {
+                this.dropFile(rt, id);
+                continue;
+              }
               const absPath = join(rt.pair.localPath, record.localPath);
               try {
                 const how = await this.removeLocalFile(rt, absPath);
@@ -4880,10 +4945,11 @@ export class SyncEngine extends EventEmitter {
           kind: "file", createParents: false,
         });
 
-        const { rename: fsRename } = await import("fs/promises");
         await prepareSafeSyncPath(rt.pair.localPath, originalRelPath, { kind: "file", createParents: false });
         await prepareSafeSyncPath(rt.pair.localPath, conflictRelPath, { kind: "file", createParents: false });
-        await fsRename(longPath(safeOriginal), longPath(conflictPath));
+        // The copy name was free a moment ago; never replace a file that
+        // took it since.
+        await moveNoReplace(longPath(safeOriginal), longPath(conflictPath));
 
         const mode = rt.pair.syncMode || "push-safe";
         if (mode === "pull" || mode === "pull-safe") {
@@ -5025,7 +5091,7 @@ export class SyncEngine extends EventEmitter {
       // Pre-populate folder state
       for (const [id, f] of snapshot.folders) {
         const relPath = folderPathMap.get(id);
-        if (relPath) {
+        if (relPath && !this.remotePathIgnored(rt, relPath, true)) {
           this.putFolder(rt, {
             remoteId: id, remoteName: f.name, remoteParentId: f.parent_id,
             localPath: relPath, syncedAt: Date.now(),
@@ -5037,6 +5103,7 @@ export class SyncEngine extends EventEmitter {
       for (const [id, f] of snapshot.files) {
         const relPath = filePathMap.get(id);
         if (relPath === undefined) continue; // unknown parent - see above
+        if (this.remotePathIgnored(rt, relPath, false)) continue;
         this.putFile(rt, {
           remoteId: id, remoteName: f.name, remoteFolderId: f.folder_id,
           remoteSizeBytes: f.size_bytes, remoteUpdatedAt: f.updated_at,

@@ -453,6 +453,7 @@
   "common.tooltip.versionsVersionCount": "Versijos ({versionCount})",
   "common.tooltip.videoUnavailable": "Vaizdo nėra",
   "sign-in.action.forgotPassword": "Pamiršote slaptažodį?",
+  "sign-in.action.signInWithAPasskey": "Prisijungti naudojant prieigos raktą",
   "sign-in.action.signUp": "Užsiregistruoti",
   "sign-in.action.signingIn": "Jungiama…",
   "sign-in.description.donTHaveAnAccount": "Neturite paskyros?",
@@ -956,7 +957,7 @@
   "sync.error.syncRootChangedDuringDownload": "Atsisiunčiant pasikeitė sinchronizavimo šaknis",
   "sync.error.syncRootChangedDuringMove": "Perkeliant pakito sinchronizavimo šaknis",
   "sync.error.syncStoppedAfterRepeatedCrashesAndWillNotRestart": "Po kelių strigčių sinchronizavimas sustabdytas ir savaime nepasileis. Norėdami bandyti dar kartą, paleiskite programą iš naujo.",
-  "sync.error.syncWasDisabledFromTheWebRemoveAndRe": "Sinchronizavimas išjungtas žiniatinklyje. Pašalinkite ir pridėkite iš naujo.",
+  "sync.error.syncWasDisabledFromTheWebRemoveAndRe": "Sinchronizavimas išjungtas žiniatinklio programėlėje. Norėdami tęsti, pašalinkite sinchronizavimo porą ir pridėkite ją iš naujo.",
   "sync.error.syncingAnEntireDriveIsNotSupportedPickA": "Viso disko sinchronizuoti negalima. Pasirinkite konkretų aplanką.",
   "sync.error.syncingYourWholeHomeFolderIsNotSupportedPick": "Viso namų aplanko sinchronizuoti negalima. Pasirinkite jame esantį aplanką, pvz., dokumentų ar atsisiuntimų.",
   "sync.error.theAppCouldnTReachItsSyncEngineTry": "Programa nepasiekė sinchronizavimo variklio. Paleiskite dosya iš naujo.",
@@ -2414,5 +2415,7 @@
   "family.label.nameSize": "{name} {size}",
   "family.label.otherReservations": "Kitos rezervacijos",
   "family.label.usedByPeopleWhoShare": "Naudoja be rezervacijos",
-  "family.label.stillFreeSize": "Dar laisva: {size}"
+  "family.label.stillFreeSize": "Dar laisva: {size}",
+  "common.action.shareUsageData": "Bendrinti naudojimo duomenis",
+  "common.description.tellsUsWhichScreensAndFeaturesAreUsed": "Parodo mums, kurie ekranai ir funkcijos naudojami. Niekada failų pavadinimų, failų ar jūsų Vault."
 }

@@ -7,6 +7,7 @@ import { Logo } from "@/components/Logo";
 import { useAuthDirection } from "@/lib/auth-direction";
 import { useT } from "@/lib/i18n";
 import { richText } from "@/lib/rich-text";
+import { trackEvent } from "@/lib/analytics";
 
 export function VerifyPage() {
   const t = useT();
@@ -38,6 +39,8 @@ export function VerifyPage() {
     setLoading(true);
     try {
       await api.post("/api/auth/verify", { ...emailBody, code });
+      // The email code was right: the account now exists. That is the sign-up.
+      trackEvent("sign_up", { method: "password" });
       navigate("/login", { state: { email: emailFromState, verified: true } });
     } catch (err) {
       setError(authErrorMessage(err, t("verify.error.couldNotVerifyYourEmail")));

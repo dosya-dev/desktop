@@ -57,6 +57,8 @@ export interface Transport {
   put(opts: PutOptions): Promise<HttpResult>;
   post(path: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<HttpResult>;
   sleep?(ms: number): Promise<void>;
+  /** Told once when an upload has finished, with its size in bytes. */
+  done?(bytes: number): void;
 }
 
 export interface UploadRequest {
@@ -168,8 +170,17 @@ export async function uploadFileInParts(req: UploadRequest, transport: Transport
   if (!init.ok || !init.session_id) throw new Error(init.error || tl("common.error.uploadInitFailed"));
   throwIfAborted(req.signal);
 
-  if (init.resumable) return uploadParts(req, init.session_id, init.resumable, transport);
-  return uploadSingle(req, init.upload_url || `/api/upload/${init.session_id}`, transport);
+  const outcome = init.resumable
+    ? await uploadParts(req, init.session_id, init.resumable, transport)
+    : await uploadSingle(req, init.upload_url || `/api/upload/${init.session_id}`, transport);
+  // The upload is whole. The transport may want to know (the real one counts
+  // it for usage analytics, by size only); a hook that throws changes nothing.
+  try {
+    transport.done?.(req.file.size);
+  } catch {
+    /* not this module's problem */
+  }
+  return outcome;
 }
 
 async function uploadSingle(req: UploadRequest, path: string, transport: Transport): Promise<UploadOutcome> {

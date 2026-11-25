@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { aboutRows, detailsText, syncLine, syncState, updateButton, updateHint } from "./about-info.ts";
+import { aboutRows, detailsText, isLinuxPlatform, syncLine, syncState, updateButton, updateHint } from "./about-info.ts";
 import { setTranslator } from "./locale-state.ts";
 import { makeT } from "../../i18n/translator.ts";
 
@@ -15,6 +15,12 @@ test("a ready update offers Restart to Update", () => {
   const b = updateButton("direct", { state: "ready", version: "3.1.4" });
   assert.deepEqual(b, { label: "Restart to Update", action: "install", busy: false });
   assert.equal(updateHint({ state: "ready", version: "3.1.4" }), "Version 3.1.4 is ready to install");
+});
+
+test("Linux detection accepts the formatted platform value shown in About", () => {
+  assert.equal(isLinuxPlatform("Linux 6.8.0-40-generic"), true);
+  assert.equal(isLinuxPlatform("linux"), true);
+  assert.equal(isLinuxPlatform("macOS 24.6.0"), false);
 });
 
 test("while installing, the button is busy and the hint says the app will reopen", () => {

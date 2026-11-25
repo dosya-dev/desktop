@@ -1,5 +1,7 @@
-import { lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { copyFile, link, lstat, mkdir, realpath, rename, stat, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
+import { hasProtectedSegment, windowsUnsafePath } from "./ignore-rules";
 import { isPathWithinRoot } from "./paths";
 
 export class UnsafeSyncPathError extends Error {
@@ -29,6 +31,13 @@ export async function prepareSafeSyncPath(
   if (!isPathWithinRoot(syncRoot, relPath)) {
     throw new UnsafeSyncPathError(relPath, "outside the sync root or invalid relative path");
   }
+  // Every local write, move, and delete passes through here, so the hard
+  // denylist holds even where a caller forgot to apply the pair's rules.
+  if (hasProtectedSegment(relPath)) {
+    throw new UnsafeSyncPathError(relPath, "Git metadata (.git) is never synced");
+  }
+  const windowsReason = windowsUnsafePath(relPath);
+  if (windowsReason) throw new UnsafeSyncPathError(relPath, windowsReason);
 
   let root: string;
   try {
@@ -102,5 +111,45 @@ export async function occupiedByOtherFile(from: string, to: string): Promise<boo
     return !(source.dev === target.dev && source.ino === target.ino && source.ino !== 0n);
   } catch {
     return true;
+  }
+}
+
+/**
+ * Move `from` to `to` without ever replacing a file at `to`. fs.rename
+ * replaces silently, so a file created at the destination after the
+ * occupancy check (the window between check and rename) was lost. A hard
+ * link fails with EEXIST instead; where links are unsupported (FAT, exFAT,
+ * some network shares) or cross devices, an exclusive copy does the same.
+ * Only a case-only rename of this same file (one inode on a case-folding
+ * filesystem) uses rename, since link and copy would see it as occupied.
+ * Throws an error with code "EEXIST" when the destination is taken.
+ */
+export async function moveNoReplace(from: string, to: string): Promise<void> {
+  const target = await lstat(to, { bigint: true }).catch(() => null);
+  if (target) {
+    const source = await lstat(from, { bigint: true });
+    if (source.dev === target.dev && source.ino === target.ino && source.ino !== 0n) {
+      await rename(from, to);
+      return;
+    }
+    throw Object.assign(new Error(`destination exists: ${to}`), { code: "EEXIST" });
+  }
+  try {
+    await link(from, to);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") throw error;
+    // No hard links here: copy, refusing to overwrite, then keep the times.
+    const source = await stat(from);
+    await copyFile(from, to, fsConstants.COPYFILE_EXCL);
+    await utimes(to, source.atime, source.mtime).catch(() => {});
+  }
+  try {
+    await unlink(from);
+  } catch (error) {
+    // The old name could not go (open elsewhere on Windows): undo the new
+    // name so the move either happened or did not, never half.
+    await unlink(to).catch(() => {});
+    throw error;
   }
 }

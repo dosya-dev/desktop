@@ -7,6 +7,7 @@ import { discardStaleShipItState } from "./shipit-cleanup";
 import { armQuitWatchdog, installDownloadedUpdate, type QuitWatchdog } from "./update-install";
 import { markQuitting } from "./quit-state";
 import { tMain as t } from "./i18n";
+import { confirmDangerousAction } from "./confirm-action";
 import { currentDistribution, isStoreManaged, storeUpdatesUrl, type Distribution } from "./distribution";
 
 export type UpdateStatus =
@@ -324,7 +325,18 @@ export async function initAutoUpdater(gate: IpcGate): Promise<void> {
           if (st.state === "ready" && st.filePath) shell.showItemInFolder(st.filePath);
         },
       });
-    gate.handle("updater:install", () => installNow());
+    // Renderer-requested restart into a new build: the main process asks
+    // first (confirm-action.ts). Linux only reveals the downloaded AppImage,
+    // which needs no question. The tray/menu path (installUpdateNow) is main-
+    // originated and unchanged.
+    gate.handle("updater:install", async (event) => {
+      if (process.platform !== "linux") {
+        const st = updateStatus;
+        const version = st.state === "ready" ? st.version : undefined;
+        if (!(await confirmDangerousAction({ kind: "install-update", version }, event.sender))) return;
+      }
+      installNow();
+    });
 
     // On Linux, also expose a dedicated handler to reveal the file
     gate.handle("updater:show-file", () => {

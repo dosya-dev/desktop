@@ -90,5 +90,7 @@ public func registerModule(_ env: napi_env?, _ exports: napi_value?) -> napi_val
   export(env, exports, "removeDomain", removeDomainCallback)
   export(env, exports, "signalChanges", signalChangesCallback)
   export(env, exports, "domainEnabled", domainEnabledCallback)
+  export(env, exports, "appleSignInAvailable", appleSignInAvailableCallback)
+  export(env, exports, "signInWithApple", signInWithAppleCallback)
   return exports
 }

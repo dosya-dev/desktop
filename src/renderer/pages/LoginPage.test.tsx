@@ -137,6 +137,82 @@ describe("LoginPage form state", () => {
   });
 });
 
+// A passkey cannot run in this window, so it goes through the system browser
+// exactly like Google: same IPC, same wait for the dosya:// callback.
+describe("LoginPage passkey sign-in", () => {
+  const PAGE_URL = "https://app.dosya.dev/connect/desktop-passkey?state=n1";
+
+  function stubBrowserFlow(beginOAuth: ReturnType<typeof vi.fn>) {
+    let complete: (() => Promise<void> | void) | null = null;
+    const unsub = vi.fn();
+    const api = {
+      onWindowClosedToTray: () => () => {},
+      beginOAuth,
+      onOAuthComplete: (cb: () => Promise<void> | void) => { complete = cb; return unsub; },
+      waitForSession: vi.fn().mockResolvedValue(undefined),
+    };
+    (window as unknown as { electronAPI: unknown }).electronAPI = api;
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    return { api, open, unsub, finish: () => complete!() };
+  }
+
+  async function renderLogin() {
+    auth.isAuthenticated = false;
+    auth.isLoading = false;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => { root!.render(<App />); });
+  }
+
+  function passkeyButton() {
+    return [...container!.querySelectorAll("button")].find((b) => b.textContent === "Sign in with a passkey")!;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+  });
+
+  it("starts the browser flow and lands on the dashboard after the callback", async () => {
+    const flow = stubBrowserFlow(vi.fn().mockResolvedValue(PAGE_URL));
+    await renderLogin();
+
+    await act(async () => { passkeyButton().click(); });
+    expect(flow.api.beginOAuth).toHaveBeenCalledWith("passkey");
+    expect(flow.open).toHaveBeenCalledWith(PAGE_URL, "_blank");
+
+    await act(async () => { await flow.finish(); });
+    expect(flow.api.waitForSession).toHaveBeenCalled();
+    expect(auth.refreshUser).toHaveBeenCalledWith(true);
+    expect(flow.unsub).toHaveBeenCalled();
+    expect(container!.querySelector('[data-testid="dashboard"]')).not.toBeNull();
+  });
+
+  it("gives up after two minutes like the other browser sign-ins", async () => {
+    vi.useFakeTimers();
+    stubBrowserFlow(vi.fn().mockResolvedValue(PAGE_URL));
+    await renderLogin();
+
+    await act(async () => { passkeyButton().click(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(
+      "Sign-in in your browser didn't finish within 2 minutes. Try again.",
+    );
+  });
+
+  it("shows a plain sentence when the flow cannot start", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const flow = stubBrowserFlow(vi.fn().mockRejectedValue(new Error("Unknown OAuth provider")));
+    await renderLogin();
+
+    await act(async () => { passkeyButton().click(); });
+    expect(flow.open).not.toHaveBeenCalled();
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe("Couldn't sign you in. Try again.");
+  });
+});
+
 // An account whose email was never verified used to get "Please verify your
 // email before signing in." with no way to get a code. Sign-in now hands the
 // user to the verify screen, which sends a fresh code.

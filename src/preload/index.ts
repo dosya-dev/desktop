@@ -5,6 +5,7 @@ import "@sentry/electron/preload";
 import { contextBridge, ipcRenderer } from "electron";
 import type { Locale } from "../i18n/locales";
 import type { MenuAction, MenuState } from "../main/menu-template";
+import type { AppleSignInOutcome } from "../main/apple-sign-in-types";
 
 /** Typed API exposed to the renderer via window.electronAPI */
 const electronAPI = {
@@ -59,7 +60,7 @@ const electronAPI = {
 
   // Troubleshooting (Settings)
   clearAppCache: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("app:clear-cache"),
-  factoryReset: (): Promise<void> => ipcRenderer.invoke("app:factory-reset"),
+  factoryReset: (): Promise<{ canceled?: boolean } | void> => ipcRenderer.invoke("app:factory-reset"),
 
   // Auth
   getApiBase: (): Promise<string> => ipcRenderer.invoke("auth:get-api-base"),
@@ -69,6 +70,10 @@ const electronAPI = {
   // login nonce that the dosya:// callback must echo back to be accepted.
   beginOAuth: (provider: string): Promise<string> =>
     ipcRenderer.invoke("auth:begin-oauth", provider),
+  // Native Sign in with Apple (macOS, entitled builds). The sheet runs in the
+  // app; the renderer posts the outcome's proof to /api/auth/desktop/apple.
+  appleSignInAvailable: (): Promise<boolean> => ipcRenderer.invoke("auth:apple-sign-in-available"),
+  appleSignIn: (): Promise<AppleSignInOutcome> => ipcRenderer.invoke("auth:apple-sign-in"),
 
   // Finder location (macOS). `available` is false everywhere else, and the
   // renderer renders nothing rather than a switch that cannot do anything.
@@ -85,6 +90,17 @@ const electronAPI = {
     // Opens General > Login Items & Extensions, where macOS holds the approval
     // a newly registered File Provider waits on.
     openSettings: (): Promise<void> => ipcRenderer.invoke("fileProvider:open-settings"),
+  },
+
+  // Usage analytics. Main holds the answer and does the sending; `track` is
+  // one-way and is dropped there once sharing is switched off.
+  analytics: {
+    state: (): Promise<{ consent: "granted" | "denied" }> =>
+      ipcRenderer.invoke("analytics:state"),
+    setConsent: (enabled: boolean): Promise<{ consent: "granted" | "denied" }> =>
+      ipcRenderer.invoke("analytics:set-consent", enabled),
+    track: (name: string, params?: Record<string, string | number | boolean>): void =>
+      ipcRenderer.send("analytics:track", name, params),
   },
 
   // File system

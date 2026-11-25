@@ -4,10 +4,11 @@
 // everywhere or skipped everywhere. Kept free of electron/chokidar imports
 // and TS-parameter-property syntax so plain `node --test` can load it.
 //
-// The engine hard-codes ONLY what is technical, not a preference:
-// its own temp markers, transient editor/office artifacts, and virtual
-// filesystems. Everything a user could legitimately want synced -
-// node_modules, .git, /bin, *.log - lives in the pair's excludedPatterns,
+// The engine hard-codes ONLY what is technical or a security boundary, not a
+// preference: its own temp markers, transient editor/office artifacts,
+// virtual filesystems, and Git metadata (see PROTECTED_NAMES). Everything a
+// user could legitimately want synced - node_modules, /bin, *.log - lives in
+// the pair's excludedPatterns,
 // which the sync-pair modal seeds with visible, removable defaults
 // (SyncPage.tsx DEFAULT_EXCLUDED). The engine used to also hard-code those
 // names invisibly, which (a) silently dropped /usr/bin-style folders because
@@ -35,6 +36,84 @@ const IGNORED_PREFIXES = ["~$", ".~lock."];
 const APPLEDOUBLE_PREFIX = "._";
 
 /**
+ * Names sync never creates, replaces, moves into, deletes, or uploads, in
+ * any mode and whatever the pair's excludes say. A `.git` directory holds
+ * hooks Git runs on the next commit, and a `.git` FILE redirects Git to
+ * another metadata directory, so a workspace member who could place either
+ * under someone's sync root could run code on their machine. The ".git"
+ * chip in the sync-pair modal used to be the only guard, and removing it (or
+ * a remote pass that never consulted it) wrote a remote
+ * `.git/hooks/pre-commit` into a local repository (bounty 2026-11-07,
+ * recheck 2026-11-11). Compared through foldName, so `.GIT`, an NFD
+ * spelling, or a name padded with characters a filesystem ignores all count.
+ */
+const PROTECTED_NAMES = new Set([".git"]);
+
+/**
+ * Characters some filesystems drop when comparing names (HFS+ ignores
+ * several zero-width and bidi controls). Stripped before a protected-name
+ * comparison so `.g\u200Bit` cannot stand in for `.git`.
+ */
+const IGNORABLE_CHARS = /[\u00AD\u034F\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
+
+/**
+ * Comparison key for a name on a case-folding filesystem: NFC, then upper
+ * and back to lower, so letters whose lower case is not the folded form
+ * (U+017F long s, U+212A Kelvin sign) meet their ASCII twins the way APFS and
+ * NTFS treat them. Over-matching is the safe direction for an exclude.
+ */
+export function foldName(name: string): string {
+  return name.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
+}
+
+/** True when `name` is, or is an alias of, a name sync never touches. */
+export function isProtectedName(name: string): boolean {
+  return PROTECTED_NAMES.has(foldName(name.replace(IGNORABLE_CHARS, "")));
+}
+
+/** True when any segment of a forward- or back-slash relative path is protected. */
+export function hasProtectedSegment(relPath: string): boolean {
+  return relPath.split(/[\\/]/).some((segment) => segment.length > 0 && isProtectedName(segment));
+}
+
+/**
+ * Why a remote-supplied path segment cannot be written safely on Windows, or
+ * null. Windows resolves several spellings to a different file than the one
+ * named: `GIT~1` is the 8.3 short alias of `.git`, a trailing dot or space is
+ * stripped (`.git.` is `.git`), `name:stream` addresses an alternate data
+ * stream, and CON/NUL/COM1... open devices whatever the extension. None of
+ * them is a name a remote file can be given safely, so they are refused
+ * (skipped with an error), never written. Other platforms return null:
+ * those spellings are ordinary distinct names there.
+ */
+export function windowsUnsafeSegment(segment: string, platform: string = process.platform): string | null {
+  if (platform !== "win32") return null;
+  if (/[<>:"|?*]/.test(segment)) return "contains a character Windows reserves (< > : \" | ? *)";
+  if (/[. ]$/.test(segment)) return "ends with a dot or a space, which Windows strips";
+  const dot = segment.indexOf(".");
+  const base = dot === -1 ? segment : segment.slice(0, dot);
+  const ext = dot === -1 ? "" : segment.slice(dot + 1);
+  if (/~\d+$/.test(base) && base.length <= 8 && ext.length <= 3 && !ext.includes(".")) {
+    return "looks like a Windows short (8.3) name, which can stand for a different file";
+  }
+  if (/^(con|prn|aux|nul|conin\$|conout\$|com[0-9\u00B9\u00B2\u00B3]|lpt[0-9\u00B9\u00B2\u00B3])$/i.test(base.trimEnd())) {
+    return "is a reserved Windows device name";
+  }
+  return null;
+}
+
+/** First Windows-unsafe segment of a relative path, as a reason, or null. */
+export function windowsUnsafePath(relPath: string, platform: string = process.platform): string | null {
+  if (platform !== "win32") return null;
+  for (const segment of relPath.split(/[\\/]/)) {
+    if (!segment) continue;
+    const reason = windowsUnsafeSegment(segment, platform);
+    if (reason) return `"${segment}" ${reason}`;
+  }
+  return null;
+}
+
+/**
  * Why an entry is excluded from sync, or null if it isn't.
  * Exported for the scanner so skips can be logged to the Activity tab with
  * their cause; shouldIgnoreEntry below is the boolean form.
@@ -59,6 +138,9 @@ export function ignoreReason(
   // the marker as an infix (covers both prefix and suffix placements).
   if (name.includes(".dosya-sync-")) return "internal temp file";
 
+  // Files and folders alike: a `.git` file points Git at another directory.
+  if (isProtectedName(name)) return "Git metadata (never synced)";
+
   if (!isDirectory) {
     for (const prefix of IGNORED_PREFIXES) {
       if (name.startsWith(prefix)) return "transient lock file";
@@ -74,9 +156,12 @@ export function ignoreReason(
   // User-configured patterns
   if (userPatterns && userPatterns.length > 0) {
     for (const pattern of userPatterns) {
+      // NFC on both sides always (macOS hands back NFD names); full case
+      // folding where the filesystem folds, so an alias spelling the
+      // filesystem treats as the same entry cannot slip past an exclude.
       if (matchesUserPattern(
-        foldCase ? name.toLowerCase() : name, isDirectory,
-        foldCase && !pattern.startsWith("/") ? pattern.toLowerCase() : pattern, absPath,
+        foldCase ? foldName(name) : name.normalize("NFC"), isDirectory,
+        pattern.startsWith("/") ? pattern : (foldCase ? foldName(pattern) : pattern.normalize("NFC")), absPath,
       )) {
         return `excluded by pattern "${pattern}"`;
       }
@@ -215,6 +300,9 @@ export const CHOKIDAR_IGNORED = [
   "**/.~lock.*",
   // Editor backup files
   "**/*~",
+  // Git metadata (see PROTECTED_NAMES). Globs are case-sensitive, so the
+  // event handler re-checks every path segment with isProtectedName.
+  "**/.git", "**/.git/**",
   // AppleDouble sidecars (see APPLEDOUBLE_PREFIX)
   "**/._*",
   // Virtual filesystems (see VIRTUAL_FS_ROOTS): absolute paths only ever

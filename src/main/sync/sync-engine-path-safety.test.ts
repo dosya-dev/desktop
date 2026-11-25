@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SyncEngine } from "./index";
@@ -271,5 +271,105 @@ describe("remote-derived sync paths", () => {
     expect(files.has("file")).toBe(false);
     expect(trash).toHaveBeenCalledWith(join(await realpath(actualRoot), "shared", "proof.txt"));
     await expect(readFile(join(actualRoot, "shared", "proof.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  // Bounty 2026-11-07, recheck 2026-11-11: pull and pull-safe pairs run
+  // handleRemoteChanges, which never applied the pair's excludes, so a remote
+  // .git/hooks/pre-commit was written into the local repository.
+  const gitHookSnapshot = (file: RemoteFileInfo, gitName = ".git") => ({
+    files: new Map([["hook", { ...file, id: "hook", name: "pre-commit", folder_id: "hooks" }]]),
+    folders: new Map([
+      ["git", { id: "git", name: gitName, parent_id: null, file_count: 0 }],
+      ["hooks", { id: "hooks", name: "hooks", parent_id: "git", file_count: 1 }],
+    ]),
+  });
+
+  it.each(["pull", "pull-safe"] as const)(
+    "a %s pair with .git excluded never writes a remote Git hook",
+    async mode => {
+      const { engine, rt, file, client, files } = fixture(mode, false);
+      rt.pair.excludedPatterns = [".git"];
+      rt.pair.conflictStrategy = "keep-both";
+      await engine.handleRemoteChanges("pair", gitHookSnapshot(file));
+      await expect(lstat(join(root, ".git"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(client.downloadFile).not.toHaveBeenCalled();
+      expect(files.has("hook")).toBe(false);
+      expect(rt.status).toBe("idle");
+    },
+  );
+
+  it.each([".git", ".GIT"])(
+    "Git metadata (%s) is refused even when the pair excludes nothing",
+    async gitName => {
+      const { engine, rt, file, client } = fixture("pull-safe", false);
+      rt.pair.excludedPatterns = [];
+      await engine.handleRemoteChanges("pair", gitHookSnapshot(file, gitName));
+      await expect(lstat(join(root, gitName))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(join(root, ".git"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(client.downloadFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it("the two-way executor refuses a .git folder and download that reach it", async () => {
+    const { engine, rt, file, client } = fixture("two-way", false);
+    rt.pair.excludedPatterns = [];
+    await engine.executeActions(rt, [
+      { type: "create-local-folder", remoteFolderId: "git", localDir: root, name: ".git/hooks" },
+      { type: "download-new", remoteFile: { ...file, name: "pre-commit" }, localDir: join(root, ".git", "hooks") },
+    ]);
+    await expect(lstat(join(root, ".git"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(client.downloadFile.mock.calls.length + client.downloadFromPresignedUrl.mock.calls.length).toBe(0);
+  });
+
+  // A tracked file renamed on the server onto the name of an untracked local
+  // file: keep-both raised a conflict, but last-write-wins downloaded over it.
+  it.each(["last-write-wins", "keep-both"] as const)(
+    "a pull rename onto an untracked local file never overwrites it (%s)",
+    async strategy => {
+      const { engine, rt, file, files, client } = fixture("pull", false);
+      rt.pair.conflictStrategy = strategy;
+      engine.addNotice = vi.fn();
+      await writeFile(join(root, "tracked.txt"), bytes);
+      await writeFile(join(root, "private.txt"), "LOCAL-PRIVATE");
+      files.set(file.id, record("tracked.txt"));
+      await engine.handleRemoteChanges("pair", {
+        files: new Map([[file.id, { ...file, name: "private.txt", folder_id: null, updated_at: 2 }]]),
+        folders: new Map(),
+      });
+      expect(client.downloadFile).not.toHaveBeenCalled();
+      const contents = await Promise.all(
+        (await readdir(root)).filter(name => name !== "shared").map(name => readFile(join(root, name), "utf8")),
+      );
+      expect(contents).toContain("LOCAL-PRIVATE");
+      if (strategy === "last-write-wins") {
+        expect(await readFile(join(root, "private.txt"), "utf8")).toBe("LOCAL-PRIVATE");
+        expect(engine.conflicts).toHaveLength(1);
+        expect(engine.conflicts[0].localPath).toBe(join(root, "private.txt"));
+      }
+      expect((files.get(file.id) as SyncFileRecord).localPath).toBe("tracked.txt");
+    },
+  );
+
+  it("refuses Windows short-name and stream spellings on win32", async () => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const { engine, rt, file, client, errors } = fixture("pull-safe", false);
+      rt.pair.excludedPatterns = [".git"];
+      await engine.handleRemoteChanges("pair", {
+        files: new Map<string, RemoteFileInfo>([
+          ["hook", { ...file, id: "hook", name: "pre-commit", folder_id: "short" }],
+          ["stream", { ...file, id: "stream", name: "a:b.txt", folder_id: null }],
+        ]),
+        folders: new Map([["short", { id: "short", name: "GIT~1", parent_id: null, file_count: 1 }]]),
+      });
+      expect(client.downloadFile).not.toHaveBeenCalled();
+      await expect(lstat(join(root, "GIT~1"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(join(root, "a:b.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(errors.get("GIT~1/pre-commit")?.error).toMatch(/short/);
+      expect(errors.get("a:b.txt")?.error).toMatch(/reserves/);
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
   });
 });

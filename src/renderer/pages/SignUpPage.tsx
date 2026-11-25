@@ -4,6 +4,7 @@ import { Eye, EyeOff } from "lucide-react";
 import { api, ApiError, isEdgeChallengeError } from "@/lib/api-client";
 import { authErrorMessage } from "@/lib/auth-error";
 import { useAuth } from "@/lib/auth-context";
+import { runNativeAppleSignIn } from "@/lib/apple-sign-in";
 import { isValidEmail } from "@dosya-dev/shared";
 import { Logo } from "@/components/Logo";
 import { LegalConsent, LegalNotice } from "@/components/LegalNotice";
@@ -25,6 +26,18 @@ export function SignUpPage() {
   // The address already has an account: offer the sign-in screen with it.
   const [accountExists, setAccountExists] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Email sign-up is switched on and off from the admin dashboard, and the API
+  // refuses it when off. Null while asking, so the form never flashes up and
+  // vanishes; if the question itself fails, show the form and let the server
+  // have the final say.
+  const [emailSignupOpen, setEmailSignupOpen] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.get<{ email_signup?: unknown }>("/api/auth/signup")
+      .then((d) => { if (live) setEmailSignupOpen(d.email_signup !== false); })
+      .catch(() => { if (live) setEmailSignupOpen(true); });
+    return () => { live = false; };
+  }, []);
 
   // Closing the window hides it to the tray and keeps this form alive. Drop
   // the password and any stale error so reopening the app starts clean (QA
@@ -57,6 +70,47 @@ export function SignUpPage() {
    * the provider UI, and the callback is only accepted if it echoes back the
    * single-use nonce minted here.
    */
+  /**
+   * "Continue with Apple" runs Apple's own sheet inside the app where the
+   * build is entitled to show it (App Review, guideline 4, 2026-11-11), and
+   * the browser flow below everywhere else. Same handler shape as the login
+   * page, with this page's words.
+   */
+  async function runApple() {
+    setError("");
+    setLoading(true);
+    const result = await runNativeAppleSignIn();
+    switch (result.kind) {
+      case "unavailable":
+        setLoading(false);
+        return runOAuth("apple");
+      case "dismissed":
+        setLoading(false);
+        return;
+      case "2fa":
+        // An existing account with 2FA signed in through the sign-up page.
+        setLoading(false);
+        navigate("/2fa", { state: { email: "", method: result.method } });
+        return;
+      case "failed":
+        console.error("Apple sign-up failed:", result.error);
+        setLoading(false);
+        setError(t("sign-up.error.couldNotCreateYourAccount"));
+        return;
+      case "signed-in":
+        try {
+          await window.electronAPI.waitForSession();
+          await refreshUser(true);
+          navigate("/dashboard");
+        } catch (err) {
+          console.error("Apple sign-up completion failed:", err);
+          setError(t("sign-up.error.couldNotCreateYourAccount"));
+        } finally {
+          setLoading(false);
+        }
+    }
+  }
+
   async function runOAuth(provider: "google" | "github" | "apple") {
     setError("");
     setLoading(true);
@@ -187,6 +241,7 @@ export function SignUpPage() {
           </div>
         )}
 
+        {emailSignupOpen === true && (<>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">{t("sign-up.label.name.person")}</label>
@@ -278,6 +333,7 @@ export function SignUpPage() {
           <span className="text-xs text-[var(--color-text-muted)]">{t("common.label.or")}</span>
           <div className="h-px flex-1 bg-[var(--color-border)]" />
         </div>
+        </>)}
 
         <div className="space-y-2">
           <button
@@ -309,7 +365,7 @@ export function SignUpPage() {
               button: this app ships eight themes, and a hardcoded black
               surface is unreadable in several of them. */}
           <button
-            onClick={() => runOAuth("apple")}
+            onClick={() => void runApple()}
             disabled={loading}
             className="flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)] transition-colors disabled:opacity-50"
             style={{ borderColor: "var(--color-border)" }}

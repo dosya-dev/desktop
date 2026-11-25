@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 /**
@@ -81,6 +82,76 @@ test("the app's keychain group is the one Session.swift looks for", () => {
   const [prefix, ...rest] = groups[0].split(".");
   assert.match(prefix, /^[A-Z0-9]{10}$/, "the app's group must carry a literal team prefix");
   assert.equal(rest.join("."), accessGroupSuffix());
+});
+
+/**
+ * The entitlements a provisioning profile grants, read the way codesign reads
+ * them: the profile is a CMS blob around a plist. macOS only, because
+ * `security` is; elsewhere the test is skipped rather than guessed.
+ */
+function profileEntitlements(profile: string): string | null {
+  if (process.platform !== "darwin") return null;
+  try {
+    return execFileSync("security", ["cms", "-D", "-i", join(desktop, profile)], { encoding: "utf8" });
+  } catch {
+    return null;
+  }
+}
+
+/** The addon only offers the sheet when the process holds this key. */
+function appleSignInEntitlementKey(): string {
+  const swift = read("native/macos/DosyaFileProvider/Sources/DosyaFileProviderAddon/AppleSignIn.swift");
+  const match = swift.match(/static let entitlement\s*=\s*"([^"]+)"/);
+  assert.ok(match, "AppleSignIn.swift no longer declares the entitlement it checks");
+  return match[1];
+}
+
+test("the store app claims Sign in with Apple, under the key the addon checks", () => {
+  // The MAS build is the one App Review refused for finishing Sign in with
+  // Apple in the browser; the sheet needs this entitlement or it fails with
+  // "unknown" and the renderer falls back to exactly that browser flow.
+  const key = appleSignInEntitlementKey();
+  assert.deepEqual(entitlementArray(read("build/entitlements.mas.plist"), key), ["Default"]);
+});
+
+test("the store profile grants Sign in with Apple, or the entitlement would kill the app at launch", (t) => {
+  // Authorization-gated, like keychain-access-groups: an entitlement the
+  // embedded profile does not grant is not a missing feature but a launch
+  // failure. Regenerating the profile is a portal step (App ID capability
+  // "Sign in with Apple", then a new Mac App Store profile), so this test
+  // is what says it has been done.
+  const granted = profileEntitlements("build/mas.provisionprofile");
+  if (granted === null) {
+    t.skip("needs macOS and the security tool");
+    return;
+  }
+  const key = appleSignInEntitlementKey();
+  const claims = entitlementArray(read("build/entitlements.mas.plist"), key).length > 0;
+  const grants = granted.includes(`<key>${key}</key>`);
+  assert.equal(
+    grants,
+    claims,
+    claims
+      ? `build/entitlements.mas.plist claims ${key} but build/mas.provisionprofile does not grant it: enable Sign in with Apple on the dev.dosya.mac App ID and regenerate the Mac App Store profile`
+      : `build/mas.provisionprofile grants ${key}; the store build should claim it`,
+  );
+});
+
+test("the direct-download app does not claim Sign in with Apple until its profile grants it", (t) => {
+  // The Developer ID build has its own App ID (dev.dosya.desktop) and its
+  // own profile. Claiming the entitlement there without the grant would kill
+  // that build too; without the claim the addon reports the sheet
+  // unavailable and the browser flow is used, which Apple allows outside the
+  // store. Once the profile grants it, the claim (and the API's accepted
+  // audiences, APPLE_DESKTOP_BUNDLE_IDS) can follow.
+  const key = appleSignInEntitlementKey();
+  const claims = entitlementArray(read("build/entitlements.mac.plist"), key).length > 0;
+  const granted = profileEntitlements("build/embedded.provisionprofile");
+  if (granted === null) {
+    t.skip("needs macOS and the security tool");
+    return;
+  }
+  assert.equal(claims, granted.includes(`<key>${key}</key>`));
 });
 
 test("the app keeps the entitlements it already had", () => {

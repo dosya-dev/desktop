@@ -10,6 +10,7 @@ import { app } from "electron";
 import { release as osRelease, arch as osArch } from "os";
 import { HIDDEN_LAUNCH_ARG } from "./window-show";
 import { currentDistribution } from "./distribution";
+import { getAnalytics } from "./analytics";
 import { loginItemMode } from "./login-item";
 import { join, resolve, sep, basename } from "path";
 import { createWriteStream, readFileSync } from "fs";
@@ -36,6 +37,8 @@ import {
   type FileProviderDeps,
   type FileProviderNative,
 } from "./file-provider";
+import { appleSignInAvailable, runAppleSignIn } from "./apple-sign-in";
+import { confirmDangerousAction } from "./confirm-action";
 import {
   addonPath,
   loadAddon,
@@ -175,8 +178,13 @@ export function registerIpcHandlers(apiBase: string): void {
   };
   handle("app:get-launch-at-login-supported", () => loginMode !== "unsupported");
   handle("app:get-launch-at-login", () => launchAtLogin());
-  handle("app:set-launch-at-login", (_e, enabled: boolean) => {
+  handle("app:set-launch-at-login", async (e, enabled: boolean) => {
     if (loginMode === "unsupported") return false;
+    // Turning it ON is persistence for whatever runs in the renderer, so the
+    // main process asks first (confirm-action.ts). Turning it off never asks.
+    if (enabled && !launchAtLogin() && !(await confirmDangerousAction({ kind: "launch-at-login" }, e.sender))) {
+      return launchAtLogin();
+    }
     app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true, args: loginItemArgs, ...loginType });
     return launchAtLogin();
   });
@@ -206,6 +214,22 @@ export function registerIpcHandlers(apiBase: string): void {
       downloads: get("downloads"),
       home: get("home"),
     };
+  });
+
+  // ── Usage analytics (main/analytics.ts) ───────────────────────────
+  // Consent, the install's random id and the outgoing queue all live in main.
+  // The renderer asks for the answer, changes it, and hands over events it
+  // has already named with the shared catalogue; nothing is kept or sent
+  // once sharing is switched off.
+  const analyticsState = () => ({ consent: getAnalytics()?.consent() ?? "denied" });
+  handle("analytics:state", () => analyticsState());
+  handle("analytics:set-consent", async (_e, enabled: unknown) => {
+    if (typeof enabled !== "boolean") return analyticsState();
+    await getAnalytics()?.setConsent(enabled);
+    return analyticsState();
+  });
+  on("analytics:track", (_e, name: unknown, params: unknown) => {
+    getAnalytics()?.track(name, params);
   });
 
   // ── Bug reports (spec: docs/superpowers/specs/2026-10-03-bug-report-design.md) ──
@@ -269,6 +293,13 @@ export function registerIpcHandlers(apiBase: string): void {
   });
 
   handle("auth:get-api-base", () => apiBase);
+
+  // Native Sign in with Apple (macOS). The sheet lives in the same addon as the
+  // Finder location; the renderer asks whether it exists before taking the
+  // Apple button's in-app path, and falls back to the browser flow otherwise.
+  // See apple-sign-in.ts for the nonce and the outcome shapes.
+  handle("auth:apple-sign-in-available", () => appleSignInAvailable(nativeAddon()));
+  handle("auth:apple-sign-in", () => runAppleSignIn(nativeAddon()));
 
   // Wait for the dosya_session cookie to be ready (SameSite fixed).
   // After login, the server sets SameSite=Lax which doesn't work for
@@ -503,6 +534,7 @@ export function registerIpcHandlers(apiBase: string): void {
 
       const fileStream = createWriteStream(longPath(filePath));
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
+      getAnalytics()?.track("file_download", { kind: "file" });
       return { ok: true, path: filePath };
     },
   );
@@ -532,6 +564,7 @@ export function registerIpcHandlers(apiBase: string): void {
 
       const fileStream = createWriteStream(longPath(filePath));
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
+      getAnalytics()?.track("file_download", { kind: "archive" });
       return { ok: true, path: filePath };
     },
   );

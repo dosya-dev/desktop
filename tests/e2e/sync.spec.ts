@@ -1,5 +1,5 @@
-import { test, expect, navigateTo, guestTest, electronAppFor } from "../fixtures";
-import { tmpdir } from "os";
+import { test, expect, navigateTo, guestTest, electronAppFor, rememberPickedFolder } from "../fixtures";
+import { tmpdir, homedir } from "os";
 import { join } from "path";
 
 test.describe("Sync Page", () => {
@@ -101,6 +101,8 @@ guestTest.describe("Sync login gate", () => {
     await appPage.evaluate(() => (window as any).electronAPI.clearSession());
 
     const localPath = join(tmpdir(), "dosya-e2e-login-gate");
+    // Picked, so the refusal under test is the login gate, not the picker one.
+    await rememberPickedFolder(electronAppFor(appPage), localPath);
     const result = await appPage.evaluate(async (path: string) => {
       const api = (window as any).electronAPI;
       try {
@@ -122,5 +124,59 @@ guestTest.describe("Sync login gate", () => {
 
     expect(result.rejected).toBe(true);
     expect(result.message).toMatch(/logged in/i);
+  });
+});
+
+// Bounty (desktop 3.1.10): the renderer runs remote script (the ONLYOFFICE
+// api.js), and sync:add-pair used to accept any absolute path from it. A
+// script could push ~/.ssh out or pull files into ~/.config/autostart. The
+// main process now takes only folders the user picked in the native picker
+// this session, and never a credential or home folder at all.
+test.describe("Sync root gate", () => {
+  const addPair = (page: import("@playwright/test").Page, localPath: string) =>
+    page.evaluate(async (path: string) => {
+      const api = (window as any).electronAPI;
+      try {
+        const pair = await api.addSyncPair({
+          workspaceId: "ws_test_1",
+          workspaceName: "Test Workspace",
+          localPath: path,
+          remoteFolderName: "gate",
+          region: "eu-west",
+        });
+        if (pair?.id) await api.removeSyncPair(pair.id);
+        return { rejected: false, message: "" };
+      } catch (e: any) {
+        return { rejected: true, message: String(e?.message ?? e) };
+      }
+    }, localPath);
+
+  test("refuses a folder the user never picked", async ({ appPage }) => {
+    const result = await addPair(appPage, join(tmpdir(), "dosya-e2e-never-picked"));
+    expect(result.rejected).toBe(true);
+    expect(result.message).toMatch(/Browse/);
+  });
+
+  test("refuses ~/.ssh and ~/.config even when picked", async ({ appPage }) => {
+    for (const p of [join(homedir(), ".ssh"), join(homedir(), ".config", "autostart"), homedir()]) {
+      await rememberPickedFolder(electronAppFor(appPage), p);
+      const result = await addPair(appPage, p);
+      expect(result.rejected, p).toBe(true);
+      expect(result.message, p).not.toMatch(/Browse/);
+    }
+  });
+
+  test("refuses to save sync pairs through sync:save-config", async ({ appPage }) => {
+    const target = join(homedir(), ".ssh");
+    const pairs = await appPage.evaluate(async (path: string) => {
+      const api = (window as any).electronAPI;
+      await api.saveSyncConfig({
+        pauseOnBattery: false,
+        pairs: [{ id: "sp_evil", workspaceId: "ws_test_1", workspaceName: "x", localPath: path,
+          remoteFolderName: "x", region: "auto", syncMode: "push", enabled: true }],
+      });
+      return (await api.getSyncConfig()).pairs.map((p: any) => p.localPath);
+    }, target);
+    expect(pairs).not.toContain(target);
   });
 });

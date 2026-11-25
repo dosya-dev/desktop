@@ -1,9 +1,9 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
+import { moveNoReplace, prepareSafeSyncPath, UnsafeSyncPathError } from "./filesystem-safety";
 
 describe("prepareSafeSyncPath", () => {
   let base: string;
@@ -71,4 +71,59 @@ describe("prepareSafeSyncPath", () => {
       .rejects.toBeInstanceOf(UnsafeSyncPathError);
     await expect(readFile(join(outside, "proof.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("refuses Git metadata in any spelling, creating nothing", async () => {
+    for (const rel of [".git/hooks/pre-commit", "repo/.GIT/config", ".git"]) {
+      await expect(prepareSafeSyncPath(root, rel, { kind: "file", createParents: true }))
+        .rejects.toBeInstanceOf(UnsafeSyncPathError);
+    }
+    await expect(lstat(join(root, ".git"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(join(root, "repo"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses Windows alias spellings when running on win32", async () => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      for (const rel of ["GIT~1/hooks/pre-commit", "a:b.txt", "docs./x.txt", "CON.txt"]) {
+        await expect(prepareSafeSyncPath(root, rel, { kind: "file", createParents: true }))
+          .rejects.toBeInstanceOf(UnsafeSyncPathError);
+      }
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+    await expect(lstat(join(root, "GIT~1"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(join(root, "docs."))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("moveNoReplace", () => {
+  let base: string;
+
+  beforeEach(async () => { base = await mkdtemp(join(tmpdir(), "dosya-move-")); });
+  afterEach(async () => { await rm(base, { recursive: true, force: true }); });
+
+  it("moves to a free name", async () => {
+    await writeFile(join(base, "a.txt"), "A");
+    await moveNoReplace(join(base, "a.txt"), join(base, "b.txt"));
+    expect(await readFile(join(base, "b.txt"), "utf8")).toBe("A");
+    await expect(lstat(join(base, "a.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("never replaces a file that holds the destination", async () => {
+    await writeFile(join(base, "a.txt"), "A");
+    await writeFile(join(base, "b.txt"), "LOCAL");
+    await expect(moveNoReplace(join(base, "a.txt"), join(base, "b.txt"))).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(join(base, "b.txt"), "utf8")).toBe("LOCAL");
+    expect(await readFile(join(base, "a.txt"), "utf8")).toBe("A");
+  });
+
+  it.skipIf(process.platform !== "darwin" && process.platform !== "win32")(
+    "lets a case-only rename of the same file through",
+    async () => {
+      await writeFile(join(base, "a.txt"), "A");
+      await moveNoReplace(join(base, "a.txt"), join(base, "A.txt"));
+      expect(await readdir(base)).toEqual(["A.txt"]);
+    },
+  );
 });

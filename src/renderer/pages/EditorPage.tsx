@@ -7,8 +7,15 @@
  *
  * It needs the document server named in the renderer's CSP: api.js is loaded
  * from there and the editor then iframes it. See src/main/session.ts, where
- * both script-src and frame-src carry docsBase. Without that the script is
- * blocked silently and the page simply never becomes an editor.
+ * script-src names docsBase's api.js file and frame-src docsBase. Without
+ * that the script is blocked silently and the page simply never becomes an
+ * editor.
+ *
+ * api.js runs in THIS document, the one that holds window.electronAPI, so it
+ * is pinned with SRI: the integrity value comes from the API
+ * (documentServerApiIntegrity, the api Worker's ONLYOFFICE_API_JS_SRI var, so
+ * a Document Server upgrade needs no desktop release), the script is fetched
+ * in CORS mode, and with no value the editor refuses to load at all.
  */
 import { useEffect, useState } from 'react';
 import { Link, useParams } from "react-router-dom";
@@ -20,6 +27,8 @@ import { useAutoDir } from "@/lib/bidi-ui";
 interface EditorConfigResponse {
   ok: boolean;
   documentServerUrl: string;
+  /** SRI for api.js. Missing or malformed = the editor stays shut (fail closed). */
+  documentServerApiIntegrity?: string;
   config: {
     documentType: string;
     type: string;
@@ -45,10 +54,19 @@ declare global {
 
 const SCRIPT_ID = 'onlyoffice-docsapi';
 
-function loadDocsApi(serverUrl: string): Promise<void> {
+/** One or more space-separated SRI hashes (two during a Document Server upgrade). */
+function isSriValue(value: string): boolean {
+  return value.length > 0 && value.split(/\s+/).every((h) => /^sha(256|384|512)-[A-Za-z0-9+/]+={0,2}$/.test(h));
+}
+
+function loadDocsApi(serverUrl: string, integrity: string | undefined): Promise<void> {
   return new Promise((resolve, reject) => {
+    const sri = (integrity ?? '').trim();
+    if (!isSriValue(sri)) { reject(new Error('api.js integrity value missing')); return; }
     if (window.DocsAPI) { resolve(); return; }
-    const existing = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+    let existing = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+    // Never reuse a tag pinned to a different hash.
+    if (existing && existing.integrity !== sri) { existing.remove(); existing = null; }
     const script = existing ?? document.createElement('script');
 
     // Shared settle handler for both the fresh-tag and existing-tag paths.
@@ -73,6 +91,8 @@ function loadDocsApi(serverUrl: string): Promise<void> {
 
     if (!existing) {
       script.id = SCRIPT_ID;
+      script.integrity = sri;
+      script.crossOrigin = 'anonymous';
       script.src = `${serverUrl}/web-apps/apps/api/documents/api.js`;
       document.head.appendChild(script);
     }
@@ -105,7 +125,7 @@ export function EditorPage() {
         if (cancelled) return;
         setTitle(res.config.document.title);
         setMode(res.config.editorConfig.mode);
-        await loadDocsApi(res.documentServerUrl);
+        await loadDocsApi(res.documentServerUrl, res.documentServerApiIntegrity);
         if (cancelled || !window.DocsAPI) return;
         editor = new window.DocsAPI.DocEditor('oo-editor', res.config);
         setState('ready');

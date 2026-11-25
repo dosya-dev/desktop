@@ -15,7 +15,8 @@ import { flushSentry, initSentryMain } from "./telemetry";
 // GPU, renderer and main crashes, uploaded on the next launch), and it has to
 // register its IPC scheme before registerSchemesAsPrivileged below runs.
 initSentryMain();
-import { registerIpcHandlers } from "./ipc";
+import { registerIpcHandlers, appVersion } from "./ipc";
+import { Analytics, platformOf, setAnalytics, syncSettled } from "./analytics";
 import { makeIpcGate, rendererOrigin } from "./ipc-sender";
 import { installFileLogger } from "./file-logger";
 import { clearQuitting, isQuitting, markQuitting } from "./quit-state";
@@ -25,6 +26,7 @@ import { captureWindowState, readWindowState, resolveWindowState, writeWindowSta
 import { readZoom, writeZoom } from "./zoom";
 import { validateSyncDeepLinkPath } from "./deep-link-path";
 import { findDeepLinkArg, protocolClientRegistration } from "./deep-link";
+import { browserSignInUrl, PROD_WEB_APP_BASE } from "./oauth-start";
 import { linuxProtocolInstallPlan } from "./linux-protocol";
 import { setupSession, appDocumentCsp } from "./session";
 import { isUnexpectedSessionLoss } from "./session-events";
@@ -47,6 +49,7 @@ import { currentDistribution } from "./distribution";
 import { rendererLogLine, type RendererConsoleDetails } from "./renderer-log";
 import { abortAllSinks } from "./lan-receive";
 import { abortAllVaultSinks } from "./vault-save";
+import { confirmDangerousAction } from "./confirm-action";
 
 // ── File logging ────────────────────────────────────────────────────
 // Every console line also lands in <userData>/logs/main.log. A packaged
@@ -84,6 +87,9 @@ process.on("unhandledRejection", (reason) => {
 // dosya.dev is the Astro marketing site (no /api routes), the API lives on
 // api.dosya.dev (prod) / localhost:4322 (apps/api dev server, 4321 is the site).
 const API_BASE = process.env.API_BASE || (app.isPackaged ? "https://api.dosya.dev" : "http://localhost:4322");
+// The web app, for sign-ins that must finish there. Dev points at apps/web's
+// Vite server so a dev build never receives a production session token.
+const WEB_APP_BASE = process.env.WEB_APP_BASE || (app.isPackaged ? PROD_WEB_APP_BASE : "http://localhost:5173");
 
 // ── Custom renderer scheme (packaged builds) ───────────────────────
 // Packaged builds serve the renderer from app://bundle/ instead of file://.
@@ -825,15 +831,32 @@ if (!gotTheLock) {
     setupSession(API_BASE);
     registerIpcHandlers(API_BASE);
 
+    // Usage analytics: on unless switched off in the settings (main/analytics.ts).
+    // Loaded here, before the window, so the settings switch has a state to show. Time with a window focused is the engagement
+    // figure; losing focus is also when a waiting batch goes out.
+    const analytics = new Analytics({
+      dir: app.getPath("userData"),
+      apiBase: API_BASE,
+      platform: platformOf(process.platform),
+      version: appVersion(),
+      channel: currentDistribution(),
+      locale: () => app.getLocale() || null,
+      defaultOn: process.env.NODE_ENV !== "test",
+    });
+    setAnalytics(analytics);
+    void analytics.load();
+    app.on("browser-window-focus", () => analytics.setFocused(true));
+    app.on("browser-window-blur", () => analytics.setFocused(false));
+
     // Start an OAuth login: mint a fresh single-use nonce and hand the renderer
     // the provider URL carrying it. The dosya:// callback is only honored if it
     // echoes this exact nonce back (see handleDosyaUrl).
     handle("auth:begin-oauth", (_e, provider: string) => {
-      if (provider !== "google" && provider !== "github" && provider !== "apple") {
-        throw new Error(tMain("native.error.unknownOAuthProvider"));
-      }
-      pendingOAuthNonce = randomUUID();
-      return `${API_BASE}/api/auth/${provider}?desktop=1&state=${encodeURIComponent(pendingOAuthNonce)}`;
+      const nonce = randomUUID();
+      const url = browserSignInUrl(provider, nonce, { apiBase: API_BASE, webAppBase: WEB_APP_BASE });
+      if (!url) throw new Error(tMain("native.error.unknownOAuthProvider"));
+      pendingOAuthNonce = nonce;
+      return url;
     });
 
     registerProtocolClient();
@@ -1018,7 +1041,13 @@ if (!gotTheLock) {
         return { ok: true };
       });
 
-      handle("app:factory-reset", async () => {
+      handle("app:factory-reset", async (event) => {
+        // The renderer's own "Reset app data?" modal is no guard against a
+        // script running in that renderer; this native one is.
+        if (!(await confirmDangerousAction({ kind: "factory-reset" }, event.sender))) {
+          console.log("[reset] Factory reset declined in the confirmation dialog");
+          return { canceled: true };
+        }
         console.log("[reset] Factory reset requested from Settings");
         try {
           await syncEngine?.stop();
@@ -1064,6 +1093,14 @@ if (!gotTheLock) {
       // first to learn a session was revoked. The renderer confirms against
       // /api/me and signs out (auth-context.tsx).
       syncEngine.on("session-expired", () => sendToWindow("auth:session-expired"));
+      // A sync run that just finished, for usage analytics. Here rather than
+      // in the renderer, which is told nothing about sync while its window is
+      // hidden; counted at most once per quarter hour, and only with consent.
+      let lastSyncStatus: { pairs: { pairId?: string; status: string }[] } | null = null;
+      syncEngine.on("status-changed", (status: { pairs: { pairId?: string; status: string }[] }) => {
+        if (syncSettled(lastSyncStatus, status)) analytics.syncSettled(status.pairs.some((p) => p.status === "error") ? "error" : "ok");
+        lastSyncStatus = { pairs: status.pairs.map((p) => ({ pairId: p.pairId, status: p.status })) };
+      });
       syncEngine.on("status-changed", (status: { pairs: { status: string }[]; activeTransfers: unknown[] }) => {
         const active = status.pairs.some((p) => p.status === "syncing") || status.activeTransfers.length > 0;
         if (active) {

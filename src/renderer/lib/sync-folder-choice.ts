@@ -7,22 +7,25 @@ export type FolderPicker = (opts?: { defaultPath?: string }) => Promise<PickedFo
  * Resolve the folder for a new sync pair from either the Browse button (no
  * preset) or a Quick backup preset.
  *
- * Outside the Mac App Store build a preset is the answer by itself. Inside
- * the sandbox a path alone grants nothing, so the preset only steers the
- * picker: macOS returns the security-scoped bookmark alongside the path and
- * that bookmark is what keeps the folder reachable after a relaunch. While the
- * distribution is still unknown the picker is used too, because a pair
- * created without a bookmark on the store build would start unusable.
+ * A preset only steers the native picker (it opens AT that folder); the user
+ * still confirms it there, on every build. Two reasons:
+ *  - the main process accepts a sync root only if the user chose it in that
+ *    picker this session (main/sync/picked-folders.ts), so the renderer -
+ *    which also runs remote script - can never name a folder by itself;
+ *  - inside the Mac App Store sandbox a path alone grants nothing, and the
+ *    picker returns the security-scoped bookmark that keeps the folder
+ *    reachable after a relaunch.
+ *
+ * `distribution` is kept in the signature for callers; it no longer changes
+ * the outcome.
  */
 export async function chooseSyncFolder({
-  distribution,
   preset,
   pick,
 }: {
-  distribution: RendererDistribution | null;
+  distribution?: RendererDistribution | null;
   preset?: string;
   pick: FolderPicker;
 }): Promise<PickedFolder | null> {
-  if (preset && distribution !== null && distribution !== "mas") return { path: preset };
   return pick(preset ? { defaultPath: preset } : undefined);
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { E2EE_CHUNK_ORIGINS, chunkOrigins, devCsp, packagedCsp } from "./csp.ts";
+import { E2EE_CHUNK_ORIGINS, chunkOrigins, devCsp, docsApiScript, packagedCsp } from "./csp.ts";
 
 const inputs = {
   apiBase: "https://api.dosya.dev",
@@ -16,8 +16,18 @@ function directive(policy: string, name: string): string[] | null {
 
 test("packaged policy lets libsodium instantiate WebAssembly and nothing more in script-src", () => {
   assert.deepEqual(directive(packagedCsp(inputs), "script-src"), [
-    "'self'", "'wasm-unsafe-eval'", "https://docs.dosya.dev",
+    "'self'", "'wasm-unsafe-eval'", "https://docs.dosya.dev/web-apps/apps/api/documents/api.js",
   ]);
+});
+
+test("script-src grants the document server's api.js FILE only, never the whole host (the renderer holds the IPC bridge)", () => {
+  for (const policy of [packagedCsp(inputs), devCsp(inputs)]) {
+    const script = directive(policy, "script-src")!;
+    assert.ok(!script.includes("https://docs.dosya.dev"));
+    assert.equal(script.filter((s) => s.includes("docs.dosya.dev")).length, 1);
+  }
+  // A trailing slash on the env override must not produce `//web-apps`.
+  assert.equal(docsApiScript("https://docs.example/"), "https://docs.example/web-apps/apps/api/documents/api.js");
 });
 
 test("packaged connect-src names the API (and its live chat socket), docs and BOTH R2 chunk endpoints", () => {
@@ -31,7 +41,7 @@ test("packaged connect-src names the API (and its live chat socket), docs and BO
 test("dev policy keeps HMR allowances and adds the same two things", () => {
   const dev = devCsp({ ...inputs, apiBase: "http://localhost:4322" });
   assert.deepEqual(directive(dev, "script-src"), [
-    "'self'", "'unsafe-inline'", "'unsafe-eval'", "'wasm-unsafe-eval'", "https://docs.dosya.dev",
+    "'self'", "'unsafe-inline'", "'unsafe-eval'", "'wasm-unsafe-eval'", "https://docs.dosya.dev/web-apps/apps/api/documents/api.js",
   ]);
   const connect = directive(dev, "connect-src")!;
   assert.ok(connect.includes("ws://localhost:*"));

@@ -1,12 +1,14 @@
 import { useState, useRef, useEffect, type FormEvent } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
+import { runNativeAppleSignIn } from "@/lib/apple-sign-in";
 import { ipc } from "@/lib/ipc";
 import { Logo } from "@/components/Logo";
 import { LegalNotice } from "@/components/LegalNotice";
 import { useAuthDirection } from "@/lib/auth-direction";
 import { useT } from "@/lib/i18n";
 import { useOnClosedToTray } from "@/lib/use-closed-to-tray";
+import { trackEvent } from "@/lib/analytics";
 
 export function LoginPage() {
   const t = useT();
@@ -78,6 +80,49 @@ export function LoginPage() {
     void submit();
   }
 
+  /**
+   * "Continue with Apple". Apple's own provider must finish inside the app
+   * (App Review, guideline 4, 2026-11-11), so on an entitled macOS build this
+   * runs the native sheet and posts its proof; the server answers with the
+   * same cookie-or-2FA shapes the password form gets. Anywhere the sheet does
+   * not exist, the browser flow below is what Google and GitHub use too.
+   */
+  async function handleApple() {
+    setError("");
+    setCanRetry(false);
+    setLoading(true);
+    const result = await runNativeAppleSignIn();
+    switch (result.kind) {
+      case "unavailable":
+        setLoading(false);
+        return handleOAuth("apple");
+      case "dismissed":
+        setLoading(false);
+        return;
+      case "2fa":
+        setLoading(false);
+        navigate("/2fa", { state: { email: "", method: result.method } });
+        return;
+      case "failed":
+        console.error("Apple sign-in failed:", result.error);
+        setLoading(false);
+        setError(t("sign-in.error.couldNotSignYouIn"));
+        return;
+      case "signed-in":
+        try {
+          await window.electronAPI.waitForSession();
+          await refreshUser(true);
+          trackEvent("login", { method: "apple" });
+          navigate("/dashboard");
+        } catch (err) {
+          console.error("Apple sign-in completion failed:", err);
+          setError(t("sign-in.error.couldNotSignYouIn"));
+        } finally {
+          setLoading(false);
+        }
+    }
+  }
+
   async function handleOAuth(provider: string) {
     setError("");
     setLoading(true);
@@ -100,7 +145,13 @@ export function LoginPage() {
       // method..."); the log keeps it, the user gets a sentence.
       console.error("OAuth start failed:", err);
       setLoading(false);
-      setError(t("sign-in.error.couldNotStartProviderSignInPleaseTryAgain", { provider }));
+      // The sentence takes a brand name; "passkey" is a common noun that would
+      // appear untranslated and uninflected inside it.
+      setError(
+        provider === "passkey"
+          ? t("sign-in.error.couldNotSignYouIn")
+          : t("sign-in.error.couldNotStartProviderSignInPleaseTryAgain", { provider }),
+      );
       return;
     }
 
@@ -114,6 +165,8 @@ export function LoginPage() {
       try {
         await window.electronAPI.waitForSession();
         await refreshUser(true);
+        // The browser finished a provider or passkey sign-in and handed it back.
+        trackEvent("login", { method: "browser" });
         navigate("/dashboard");
       } catch (err) {
         console.error("OAuth completion failed:", err);
@@ -289,7 +342,7 @@ export function LoginPage() {
             {t("common.action.continueWithGitHub")}
           </button>
           <button
-            onClick={() => handleOAuth("apple")}
+            onClick={() => void handleApple()}
             className="flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)] transition-colors"
             style={{ borderColor: "var(--color-border)" }}
           >
@@ -300,6 +353,17 @@ export function LoginPage() {
               <path d="M17.05 12.536c-.02-2.29 1.87-3.39 1.955-3.443-1.065-1.558-2.72-1.771-3.31-1.795-1.41-.142-2.75.83-3.465.83-.714 0-1.816-.81-2.986-.788-1.536.023-2.953.893-3.743 2.267-1.596 2.766-.408 6.86 1.146 9.105.76 1.099 1.667 2.334 2.856 2.29 1.145-.046 1.577-.741 2.962-.741 1.385 0 1.774.741 2.986.718 1.233-.02 2.014-1.12 2.768-2.223.873-1.275 1.232-2.51 1.253-2.573-.027-.012-2.404-.922-2.428-3.657zM14.79 5.518c.632-.766 1.058-1.832.942-2.894-.91.037-2.013.606-2.665 1.371-.586.679-1.099 1.764-.96 2.805 1.015.079 2.05-.516 2.683-1.282z" />
             </svg>
             {t("common.action.continueWithApple")}
+          </button>
+          <button
+            onClick={() => handleOAuth("passkey")}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium hover:bg-[var(--color-bg-secondary)] transition-colors"
+            style={{ borderColor: "var(--color-border)" }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="7.5" cy="15.5" r="5.5" />
+              <path d="M11.5 11.5 21 2M16 7l3 3M19 4l2 2" />
+            </svg>
+            {t("sign-in.action.signInWithAPasskey")}
           </button>
         </div>
 

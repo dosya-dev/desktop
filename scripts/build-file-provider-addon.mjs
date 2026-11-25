@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Builds the Node addon the Electron main process loads to reach the shared
-// keychain and NSFileProviderManager. Node can reach neither, and no other part
+// keychain, NSFileProviderManager and the Sign in with Apple sheet. Node can
+// reach none of them, and no other part
 // of the bundle can either: the app's embedded provisioning profile authorizes
 // the app's own code and nothing nested inside it, so a helper tool in
 // Contents/MacOS is killed on launch (measured: SIGKILL, no output) and a
@@ -26,7 +27,7 @@ const addonSources = join(packageRoot, "Sources", "DosyaFileProviderAddon");
  * compiled into the app's process.
  */
 const SHARED_CORE = ["Session.swift"];
-const ADDON = ["Napi.swift", "Addon.swift", "Domains.swift"];
+const ADDON = ["Napi.swift", "Promised.swift", "Addon.swift", "Domains.swift", "AppleSignIn.swift"];
 
 /** What it is called inside the app bundle, and what the main process requires. */
 export const ADDON_FILE_NAME = "dosya-file-provider.node";

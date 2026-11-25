@@ -1,4 +1,4 @@
-import { test, expect } from "../fixtures";
+import { test, expect, electronAppFor, rememberPickedFolder } from "../fixtures";
 import { mkdirSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -12,6 +12,7 @@ test.describe("Sync nested folder structure", () => {
     mkdirSync(join(localRoot, "2024", "summer", "beach", "day-1"), { recursive: true });
 
     try {
+      await rememberPickedFolder(electronAppFor(appPage), localRoot);
       const pair = await appPage.evaluate(async (path: string) => {
         const api = (window as any).electronAPI;
         return api.addSyncPair({

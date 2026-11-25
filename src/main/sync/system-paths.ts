@@ -63,6 +63,11 @@ export function forbiddenSyncRootReason(
   if (h && p === h) {
     return "Syncing your whole home folder is not supported - pick a folder inside it (like Documents or Downloads).";
   }
+  // /Users, /home, C:\Users: every account's home, keys and autostart
+  // entries included. A pull into one of these writes into a home folder.
+  if (h && h.startsWith(p + "/")) {
+    return "Syncing a folder that contains your home folder is not supported - pick a folder inside it (like Documents or Downloads).";
+  }
   const deny = [...(DENY[platform] ?? [])];
   if (platform === "darwin" && h) deny.push(h + "/Library");
   if (platform === "win32" && h) deny.push(h + "/AppData");
@@ -71,5 +76,27 @@ export function forbiddenSyncRootReason(
       return `"${absPath}" is a system folder. Syncing it would upload operating-system files and can make the app unusable - pick a folder with your own files instead.`;
     }
   }
+  if (h) {
+    for (const name of CREDENTIAL_DIRS) {
+      if (isOrInside(p, norm(`${h}/${name}`, ci))) {
+        return `"${absPath}" holds keys, credentials or programs that start at login. Syncing it could expose them or let synced files run on this computer - pick a folder with your own documents instead.`;
+      }
+    }
+  }
   return null;
 }
+
+/**
+ * Folders under the home folder that hold credentials or autostart entries,
+ * on every platform. Bounty (desktop 3.1.10): a script in the renderer pointed
+ * a push pair at ~/.ssh to upload keys, and a pull pair at ~/.config to write
+ * ~/.config/autostart/*.desktop and ~/.config/git/config, i.e. code execution
+ * as the user. A sync root at or inside any of these is refused, however it
+ * was chosen. ~/Library (LaunchAgents) and %APPDATA% (the Start Menu Startup
+ * folder) are refused above as system folders; shell rc files live directly
+ * in the home folder, which is refused on its own.
+ */
+const CREDENTIAL_DIRS = [
+  ".ssh", ".gnupg", ".aws", ".azure", ".config", ".kube", ".docker", ".password-store",
+  "Library/LaunchAgents",
+];

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { test, expect, navigateTo } from "../fixtures";
+import { test, expect, navigateTo, electronAppFor, rememberPickedFolder } from "../fixtures";
 
 /**
  * The "token issues" flow. When the server invalidates a session, the cookie
@@ -60,6 +60,7 @@ test("sync recovers promptly after a revoked session and re-login", async ({ app
   };
 
   try {
+    await rememberPickedFolder(electronAppFor(page), dir);
     const pairId: string = await page.evaluate(async (path: string) => {
       const pair = await (window as any).electronAPI.addSyncPair({
         workspaceId: "ws_test",

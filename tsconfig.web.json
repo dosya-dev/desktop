@@ -41,6 +41,7 @@
     "src/main/sync/types.ts",
     "src/main/sync-pair-label.ts",
     "src/main/menu-template.ts",
+    "src/main/apple-sign-in-types.ts",
     "../../packages/shared/src/**/*.ts",
     "vendor/audio-player/**/*.ts",
     "vendor/video-player/**/*.ts",

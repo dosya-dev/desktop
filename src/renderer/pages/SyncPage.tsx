@@ -4,6 +4,7 @@ import { useAuth } from "../lib/auth-context";
 import { useDistribution } from "../lib/use-distribution";
 import { chooseSyncFolder } from "../lib/sync-folder-choice";
 import { FinderLocationToggle } from "../components/FinderLocationToggle";
+import { UsageDataToggle } from "@/components/UsageDataToggle";
 import { useQuery } from "@tanstack/react-query";
 import {
   RefreshCw,
@@ -1398,6 +1399,7 @@ function SyncSettings() {
         <h3 className="text-sm font-semibold">{t("sync.heading.desktopApp")}</h3>
         {launchSupported && <PrefToggle label={t("sync.label.launchAtLogin")} description={t("sync.label.startDosyaAutomaticallyWhenYouSignIn")} checked={launchAtLogin} onChange={toggleLaunch} />}
         <FinderLocationToggle userId={user?.id ?? null} />
+        <UsageDataToggle />
       </div>
 
       {/* Snooze */}

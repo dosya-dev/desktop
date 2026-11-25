@@ -36,6 +36,28 @@ test.describe("office editor", () => {
     await expect(page.getByRole("link", { name: /Files/ })).toBeVisible();
   });
 
+  // Bounty: api.js runs beside window.electronAPI, so it is pinned with the
+  // SRI value the API hands out. Without one the editor must not load api.js
+  // at all; with a wrong one Chromium must refuse the bytes.
+  for (const [label, sri] of [
+    ["no integrity value", undefined],
+    ["an integrity value that does not match", "sha384-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+  ] as const) {
+    test(`refuses to run api.js with ${label}`, async ({ appPage: page }) => {
+      await page.route("**/api/files/file_sri/editor-config", async (route) => {
+        const res = await route.fetch({ url: route.request().url().replace("file_sri", "file_5") });
+        const body = await res.json();
+        if (sri === undefined) delete body.documentServerApiIntegrity;
+        else body.documentServerApiIntegrity = sri;
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+      });
+      await navigateTo(page, "/editor/file_sri");
+      await expect(page.getByRole("button", { name: /Try again/ })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId("oo-editor-mounted")).toHaveCount(0);
+      expect(await page.evaluate(() => typeof (window as { DocsAPI?: unknown }).DocsAPI)).toBe("undefined");
+    });
+  }
+
   test("reports a failure instead of showing an empty frame", async ({ appPage: page }) => {
     // No such file: editor-config is served only for /api/files/<id>/editor-config,
     // and the catch-all answers {ok:true} with no config, so the page must treat

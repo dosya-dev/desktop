@@ -83,3 +83,35 @@ test("reasons are human-readable sentences", () => {
   const home = forbiddenSyncRootReason(HOME_LINUX, "linux", HOME_LINUX);
   assert.match(home ?? "", /home folder/);
 });
+
+// Bounty (desktop 3.1.10): a pair on ~/.ssh uploaded private keys; a pull pair
+// on ~/.config wrote ~/.config/autostart/*.desktop and ~/.config/git/config.
+test("credential and autostart folders are refused on every platform, at any depth", () => {
+  for (const [platform, home] of [["linux", HOME_LINUX], ["darwin", HOME_MAC], ["win32", HOME_WIN]] as const) {
+    const sep = platform === "win32" ? "\\" : "/";
+    for (const rel of [".ssh", ".ssh/keys", ".gnupg", ".aws", ".azure", ".config", ".config/autostart", ".kube", ".docker", ".password-store"]) {
+      const p = home + sep + rel.split("/").join(sep);
+      assert.match(forbiddenSyncRootReason(p, platform, home) ?? "", /credentials|system folder/, `${platform} ${p}`);
+    }
+  }
+  assert.notEqual(forbiddenSyncRootReason(`${HOME_MAC}/Library/LaunchAgents`, "darwin", HOME_MAC), null);
+  // The Windows Startup folder lives under %APPDATA%.
+  assert.notEqual(
+    forbiddenSyncRootReason(`${HOME_WIN}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup`, "win32", HOME_WIN),
+    null,
+  );
+});
+
+test("credential names are only refused directly under home, not as project folders elsewhere", () => {
+  assert.equal(forbiddenSyncRootReason(`${HOME_LINUX}/code/dotfiles/.config-backup`, "linux", HOME_LINUX), null);
+  assert.equal(forbiddenSyncRootReason(`${HOME_LINUX}/code/.configs`, "linux", HOME_LINUX), null);
+  assert.equal(forbiddenSyncRootReason(`${HOME_LINUX}/.configs`, "linux", HOME_LINUX), null);
+});
+
+test("a folder that contains the home folder is refused (/home, /Users, C:\\Users)", () => {
+  assert.match(forbiddenSyncRootReason("/home", "linux", HOME_LINUX) ?? "", /home folder/);
+  assert.match(forbiddenSyncRootReason("/Users", "darwin", HOME_MAC) ?? "", /home folder/);
+  assert.match(forbiddenSyncRootReason("C:\\Users", "win32", HOME_WIN) ?? "", /home folder/);
+  // A sibling that merely shares a prefix is fine.
+  assert.equal(forbiddenSyncRootReason("/home/firat-shared", "linux", HOME_LINUX), null);
+});
